@@ -30,7 +30,8 @@ public:
     };
 
     explicit DecodedTextureCache(size_t budget, size_t max_entries = 4096)
-        : budget(budget), max_entries(max_entries) {}
+        : budget(budget)
+        , max_entries(max_entries) {}
 
     bool eligible(size_t compressed, size_t decoded) const {
         return max_entries && compressed <= budget && decoded <= budget - compressed;

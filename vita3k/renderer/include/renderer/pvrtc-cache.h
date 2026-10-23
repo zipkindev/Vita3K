@@ -8,4 +8,4 @@ namespace pvr {
 renderer::DecodedTextureCache::Stats PVRTCDecodeCacheStats();
 // Unchanged reference path, also used for cache correctness comparisons.
 uint32_t PVRTDecompressPVRTCUncached(const void *data, uint32_t two_bit, uint32_t width, uint32_t height, uint32_t type, uint8_t *output);
-}
+} // namespace pvr
