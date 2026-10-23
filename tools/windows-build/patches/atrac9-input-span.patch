@@ -1,0 +1,12 @@
+--- a/vita3k/codec/src/atrac9.cpp
++++ b/vita3k/codec/src/atrac9.cpp
+@@ -91,7 +91,8 @@
+ 
+     int decode_used = 0;
+ 
+-    const int res = Atrac9DecodeBounded(decoder_handle, data, superframe_data_left, reinterpret_cast<short *>(result.data()), &decode_used);
++    const int available = superframe_data_left > 0 ? static_cast<int>(std::min<uint32_t>(size, superframe_data_left)) : 0;
++    const int res = Atrac9DecodeBounded(decoder_handle, data, available, reinterpret_cast<short *>(result.data()), &decode_used);
+     if (res != At9Status::ERR_SUCCESS) {
+         static uint64_t failure_count = 0;
+         ++failure_count;

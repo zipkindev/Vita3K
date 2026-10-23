@@ -1,0 +1,176 @@
+--- a/C/src/bit_reader.c
++++ b/C/src/bit_reader.c
+@@ -7,6 +7,20 @@
+ {
+ 	br->Buffer = buffer;
+ 	br->Position = 0;
++	br->BufferBytes = -1;
++	br->InvalidRead = 0;
++}
++
++void InitBitReaderCxtBounded(BitReaderCxt* br, const void* buffer, int bufferBytes)
++{
++	InitBitReaderCxt(br, buffer);
++	br->BufferBytes = bufferBytes;
++}
++
++int BitReaderOverrun(const BitReaderCxt* br)
++{
++	return br->InvalidRead || br->Position < 0
++		|| (br->BufferBytes >= 0 && br->Position > br->BufferBytes * 8);
+ }
+ 
+ int ReadInt(BitReaderCxt* br, const int bits)
+@@ -33,6 +47,17 @@
+ 
+ int PeekInt(BitReaderCxt* br, const int bits)
+ {
++	if (bits < 0 || bits > 32 || br->Position < 0)
++	{
++		br->InvalidRead = 1;
++		return 0;
++	}
++	if (bits == 0) return 0;
++	// Huffman lookahead may exceed the remaining input without consuming it.
++	// Zero-extend those peeks; actual consumption is checked by BitReaderOverrun.
++	if (br->BufferBytes >= 0 && br->Position / 8 > br->BufferBytes - 4)
++		return PeekIntFallback(br, bits);
++
+ 	const int byteIndex = br->Position / 8;
+ 	const int bitIndex = br->Position % 8;
+ 	const unsigned char* buffer = br->Buffer;
+@@ -55,7 +80,7 @@
+ 
+ 	if (bits <= 25)
+ 	{
+-		int value = buffer[byteIndex] << 24
++		unsigned int value = (unsigned int)buffer[byteIndex] << 24
+ 			| buffer[byteIndex + 1] << 16
+ 			| buffer[byteIndex + 2] << 8
+ 			| buffer[byteIndex + 3];
+@@ -80,7 +105,7 @@
+ 
+ static int PeekIntFallback(BitReaderCxt* br, int bitCount)
+ {
+-	int value = 0;
++	unsigned int value = 0;
+ 	int byteIndex = br->Position / 8;
+ 	int bitIndex = br->Position % 8;
+ 	const unsigned char* buffer = br->Buffer;
+@@ -100,7 +125,9 @@
+ 		}
+ 
+ 		const int mask = 0xFF >> bitIndex;
+-		const int currentByte = (mask & buffer[byteIndex]) >> (8 - bitIndex - bitsToRead);
++		const unsigned int current = (br->BufferBytes < 0 || byteIndex < br->BufferBytes)
++			? buffer[byteIndex] : 0;
++		const int currentByte = (mask & current) >> (8 - bitIndex - bitsToRead);
+ 
+ 		value = (value << bitsToRead) | currentByte;
+ 		bitIndex += bitsToRead;
+--- a/C/src/bit_reader.h
++++ b/C/src/bit_reader.h
+@@ -3,6 +3,8 @@
+ typedef struct {
+ 	const unsigned char * Buffer;
+ 	int Position;
++	int BufferBytes; // -1 retains the original unbounded API
++	int InvalidRead;
+ } BitReaderCxt;
+ 
+ // Make MSVC compiler happy. Leave const in for value parameters
+@@ -13,3 +15,6 @@
+ int ReadSignedInt(BitReaderCxt* br, const int bits);
+ int ReadOffsetBinary(BitReaderCxt* br, const int bits);
+ void AlignPosition(BitReaderCxt* br, const unsigned int multiple);
++
++void InitBitReaderCxtBounded(BitReaderCxt* br, const void* buffer, int bufferBytes);
++int BitReaderOverrun(const BitReaderCxt* br);
+--- a/C/src/decoder.c
++++ b/C/src/decoder.c
+@@ -7,6 +7,7 @@
+ #include "unpack.h"
+ #include "utility.h"
+ #include <string.h>
++#include <limits.h>
+ 
+ static At9Status DecodeFrame(Frame* frame, BitReaderCxt* br);
+ static void ImdctBlock(Block* block);
+@@ -25,9 +26,27 @@
+ 	return ERR_SUCCESS;
+ }
+ 
++At9Status DecodeBounded(Atrac9Handle* handle, const unsigned char* audio, int audioBytes, unsigned char* pcm, int* bytesUsed)
++{
++	if (bytesUsed) *bytesUsed = 0;
++	if (!handle || !handle->Initialized || !pcm || !bytesUsed)
++		return ERR_BAD_CONFIG_DATA;
++	if (!audio || audioBytes <= 0 || audioBytes > INT_MAX / 8)
++		return ERR_BUFFER_OVERRUN;
++	BitReaderCxt br;
++	InitBitReaderCxtBounded(&br, audio, audioBytes);
++	const At9Status status = DecodeFrame(&handle->Frame, &br);
++	if (BitReaderOverrun(&br)) return ERR_BUFFER_OVERRUN;
++	if (status != ERR_SUCCESS) return status;
++	PcmFloatToShort(&handle->Frame, (short*)pcm);
++	*bytesUsed = br.Position / 8;
++	return ERR_SUCCESS;
++}
++
+ static At9Status DecodeFrame(Frame* frame, BitReaderCxt* br)
+ {
+ 	ERROR_CHECK(UnpackFrame(frame, br));
++	if (BitReaderOverrun(br)) return ERR_BUFFER_OVERRUN;
+ 
+ 	for (int i = 0; i < frame->Config->ChannelConfig.BlockCount; i++)
+ 	{
+--- a/C/src/decoder.h
++++ b/C/src/decoder.h
+@@ -5,3 +5,5 @@
+ 
+ At9Status Decode(Atrac9Handle* handle, const unsigned char* audio, unsigned char* pcm, int* bytesUsed);
+ int GetCodecInfo(Atrac9Handle* handle, CodecInfo* pCodecInfo);
++
++At9Status DecodeBounded(Atrac9Handle* handle, const unsigned char* audio, int audioBytes, unsigned char* pcm, int* bytesUsed);
+--- a/C/src/error_codes.h
++++ b/C/src/error_codes.h
+@@ -7,6 +7,7 @@
+ 	ERR_NOT_IMPLEMENTED = 0x80000000,
+ 
+ 	ERR_BAD_CONFIG_DATA = 0x81000000,
++	ERR_BUFFER_OVERRUN = 0x81000001,
+ 	
+ 	ERR_UNPACK_SUPERFRAME_FLAG_INVALID = 0x82000000,
+ 	ERR_UNPACK_REUSE_BAND_PARAMS_INVALID,
+--- a/C/src/libatrac9.c
++++ b/C/src/libatrac9.c
+@@ -29,3 +29,8 @@
+ {
+ 	return GetCodecInfo(handle, (CodecInfo*)pCodecInfo);
+ }
++
++int Atrac9DecodeBounded(void* handle, const unsigned char* pAtrac9Buffer, int bufferBytes, short* pPcmBuffer, int* pNBytesUsed)
++{
++	return DecodeBounded(handle, pAtrac9Buffer, bufferBytes, (unsigned char*)pPcmBuffer, pNBytesUsed);
++}
+--- a/C/src/libatrac9.h
++++ b/C/src/libatrac9.h
+@@ -22,6 +22,8 @@
+ int Atrac9InitDecoder(void* handle, unsigned char *pConfigData);
+ int Atrac9Decode(void* handle, const unsigned char *pAtrac9Buffer, short *pPcmBuffer, int *pNBytesUsed);
+ 
++int Atrac9DecodeBounded(void* handle, const unsigned char* pAtrac9Buffer, int bufferBytes, short* pPcmBuffer, int* pNBytesUsed);
++
+ int Atrac9GetCodecInfo(void* handle, Atrac9CodecInfo *pCodecInfo);
+ 
+ #ifdef __cplusplus
+--- a/C/src/utility.c
++++ b/C/src/utility.c
+@@ -6,6 +6,7 @@
+ 
+ unsigned int BitReverse32(unsigned int value, int bitCount)
+ {
++	if (bitCount == 0) return 0; // Avoid shifting by 32 for the first shuffle-table entry.
+ 	value = ((value & 0xaaaaaaaa) >> 1) | ((value & 0x55555555) << 1);
+ 	value = ((value & 0xcccccccc) >> 2) | ((value & 0x33333333) << 2);
+ 	value = ((value & 0xf0f0f0f0) >> 4) | ((value & 0x0f0f0f0f) << 4);

@@ -1,0 +1,18 @@
+--- a/vita3k/util/src/logging.cpp
++++ b/vita3k/util/src/logging.cpp
+@@ -116,7 +116,7 @@
+     sinks.push_back(std::make_shared<callback_sink_mt>());
+ #endif
+ 
+-    constexpr bool RELEASE_VERSION = true; // Nick
++    constexpr bool RELEASE_VERSION = false; // Diagnostic metadata is explicit
+ 
+     if (add_sink(root_paths.get_log_path() / LOG_FILE_NAME) != Success)
+         return InitConfigFailed;
+--- /dev/null
++++ b/vita3k/util/include/util/fork_build.h
+@@ -0,0 +1,4 @@
++// Local diagnostic build metadata; absent from the pinned fork checkout.
++#pragma once
++#define FORK_BUILD_SEQ 1
++#define FORK_BUILD_CHANGES "v1.3.3-win11diag.1; source a86b5f93db43e4c4640ad1527e2a4695aad0f35b; optimized matching symbols"

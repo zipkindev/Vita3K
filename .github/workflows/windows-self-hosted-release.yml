@@ -1,0 +1,44 @@
+name: Windows release package (self-hosted)
+on:
+  workflow_dispatch:
+    inputs:
+      preflight_only:
+        description: Verify runner toolchain without building the emulator
+        type: boolean
+        default: true
+      source_commit:
+        description: Reviewed 40-character commit in this fork (required for package)
+        type: string
+      build_label:
+        description: Explicit release label (required for package)
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: windows-release-server
+  cancel-in-progress: false
+jobs:
+  windows:
+    if: github.repository == 'zipkindev/Vita3K' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: [self-hosted, Windows, X64, vita3k-windows, server2022]
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify toolchain or build reviewed release
+        shell: powershell
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          BUILD_LABEL: ${{ inputs.build_label }}
+          PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
+        run: |
+          $preflight=$env:PREFLIGHT_ONLY -eq 'true'
+          ./tools/windows-build/Build.ps1 -SourceCommit $env:SOURCE_COMMIT -BuildLabel $env:BUILD_LABEL -PreflightOnly:$preflight
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: success() && inputs.preflight_only == false
+        with:
+          name: windows-${{ inputs.build_label }}-${{ github.run_id }}
+          path: windows-package/
+          retention-days: 3
+          if-no-files-found: error

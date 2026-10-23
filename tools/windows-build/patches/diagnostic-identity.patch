@@ -1,0 +1,23 @@
+--- a/vita3k/CMakeLists.txt
++++ b/vita3k/CMakeLists.txt
+@@ -4,9 +4,9 @@
+ set(VITA3K_DISPLAY_NAME "Vita3K+")
+ set(VITA3K_APP_VER_HI 1)
+ set(VITA3K_APP_VER_MID 3)
+-set(VITA3K_APP_VER_LO 2)
++set(VITA3K_APP_VER_LO 3)
+ # two-component display version (v1.1): the numeric LO still feeds the exe FILE_VERSION resource  // Nick - Version
+-set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID}.${VITA3K_APP_VER_LO}")
++set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID}.${VITA3K_APP_VER_LO}-win11diag.1")
+ # Release number advertised to the updater (must match "Vita3K Build: <n>" in the GitHub release body) and rise each release
+ set(VITA3K_APP_NUMBER 3)
+ 
+@@ -61,7 +61,7 @@
+ 	set(GIT_COUNT 0)
+ elseif(((GIT_REPO STREQUAL "Vita3K") AND ((GIT_BRANCH STREQUAL "master") OR (GIT_BRANCH STREQUAL "HEAD"))) OR (GIT_REPO STREQUAL "Vita3K-Plus"))
+ 	set(VITA3K_GIT_REV "${GIT_HASH}")
+-	set(VITA3K_OFFICIAL_UPDATE_BUILD 1)
++	set(VITA3K_OFFICIAL_UPDATE_BUILD 0)
+ else()
+ 	set(VITA3K_GIT_REV "${GIT_HASH}-${GIT_REPO}/${GIT_BRANCH}")
+ endif()

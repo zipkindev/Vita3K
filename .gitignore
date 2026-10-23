@@ -95,3 +95,5 @@ fastlane/readme.md
 # Translations
 /template/
 /android/app/src/main/res/values-*/strings.xml
+
+/tools/windows-build/__pycache__/

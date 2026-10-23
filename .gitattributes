@@ -15,3 +15,5 @@ src/external/*	linguist-vendored
 *.sh			eol=lf
 
 *.bat			eol=crlf
+
+/tools/windows-build/patches/*.patch text eol=lf -whitespace
