@@ -1,6 +1,27 @@
-# Vita3K-ZipZ: source selection, validation and update plan
+# Vita3K-Go: source selection, validation and update plan
 
 Status: proposal based on source inspection on 2026-10-23. No scheduled merger, upstream watcher or automatic release/deployment is enabled by this document. Current Windows builds remain manually dispatched to the dedicated runner. Source pins are in [upstream-sources.proposal.json](upstream-sources.proposal.json).
+
+## Latest reviewed candidate (2026-10-23 evening)
+
+The tables below retain their original source pins and review context. Mainline
+has since advanced to `dbde5491789bb5bc8cfea5d99e919518161a5dfc`. The separate
+[.7 candidate](https://github.com/zipkindev/Vita3K-Go/pull/11), based on automatic
+texture preparation .6, adapts vertex COLOR0/COLOR1 clamping from
+`c5f7c750f6f243c6221d5a4915c44142a11796bf` and only the bitmap allocator rewrite
+from `dbde5491789bb5bc8cfea5d99e919518161a5dfc`. Original authorship and source
+references are retained. Shader version advances from our 18 to 19; older cache
+files are preserved. A new independent allocator model checks 220,000 operations
+and a partial-word best-fit regression. This establishes tested allocation
+behavior, not a measured handheld speedup.
+
+Guest-memory policy, broad modernization, Boost and FFmpeg updates are deferred
+for separate compatibility/dependency review. The existing Plus instruction
+fetch guards must be tested before replacing them with a mainline equivalent.
+See [.7 release notes](releases/v1.3.3-win11merge.7.md) for validation limits.
+The .6 reference remains unchanged. Current builds use exact reviewed source
+commits and the dedicated Windows runner. Scheduled observation, automatic
+integration, releases and device deployment are not enabled by this proposal.
 
 ## Recommendation
 
