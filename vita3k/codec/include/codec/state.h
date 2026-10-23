@@ -195,7 +195,8 @@ struct Atrac9DecoderState : public DecoderState {
     uint32_t get(DecoderQuery query) override;
     uint32_t get_es_size() override;
 
-    bool send(const uint8_t *data, uint32_t size = 0) override;
+    // A bounded ATRAC9 decode requires the actual available input byte count.
+    bool send(const uint8_t *data, uint32_t size) override;
     bool receive(uint8_t *data, DecoderSize *size) override;
     void flush() override;
 

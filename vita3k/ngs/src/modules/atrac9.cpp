@@ -220,12 +220,21 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
     uint32_t decoded_superframe_pos = 0;
     bool got_decode_error = false;
     const int32_t pos_after_this_superframe = state->current_byte_position_in_buffer + static_cast<int32_t>(superframe_size);
+    // Both direct buffers and superframe_staging contain a complete superframe
+    // here. Pass its actual remaining span; zero is not a valid bounded input.
+    uint32_t superframe_bytes_left = superframe_size;
     // decode a whole superframe at a time
     for (uint32_t frame = 0; frame < runtime->decoder->get(DecoderQuery::AT9_FRAMES_IN_SUPERFRAME); frame++) {
-        if (!runtime->decoder->send(input, 0)) {
+        if (!runtime->decoder->send(input, superframe_bytes_left)) {
             got_decode_error = true;
             break;
         }
+        const uint32_t consumed = runtime->decoder->get_es_size();
+        if (consumed == 0 || consumed > superframe_bytes_left) {
+            got_decode_error = true;
+            break;
+        }
+        superframe_bytes_left -= consumed;
 
         // convert from int16 to float
         const uint32_t channel_count = runtime->decoder->get(DecoderQuery::CHANNELS);
@@ -269,8 +278,8 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
         swr_convert(swr, &swr_data_out, decoder_size.samples, &swr_data_in, decoder_size.samples);
 
         decoded_superframe_pos += decoder_size.samples * sizeof(float) * 2;
-        input += runtime->decoder->get_es_size();
-        state->current_byte_position_in_buffer += runtime->decoder->get_es_size();
+        input += consumed;
+        state->current_byte_position_in_buffer += consumed;
     }
 
     if (got_decode_error) {
