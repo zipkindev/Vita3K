@@ -29,7 +29,7 @@ Preparation is CPU-side, using at most one decoder helper plus the caller, with 
 
 ## Releases and diagnostics
 
-Each approved build produces a **runtime download** and a **matching diagnostics/symbols download** from the same optimized executable. Symbols are stored in a separate PDB; the runtime package excludes them. This is optimized RelWithDebInfo with full symbols, not an unoptimized Debug build. Use only the PDB whose GUID/age and EXE hash match your build. Per-release notes identify features, fixes, measured improvements, validation, limitations and exact provenance. Diagnostic candidates remain experimental until gameplay validation; see [release notes](docs/releases/v1.3.3-win11merge.6.md).
+Each approved build produces a **runtime download** and a **matching diagnostics/symbols download** from the same optimized executable. Symbols are stored in a separate PDB; the runtime package excludes them. This is optimized RelWithDebInfo with full symbols, not an unoptimized Debug build. Use only the PDB whose GUID/age and EXE hash match your build. Per-release notes identify features, fixes, measured improvements, validation, limitations and exact provenance. Diagnostic candidates remain experimental until gameplay validation; see [.6 automatic preparation](docs/releases/v1.3.3-win11merge.6.md) and [.7 reviewed upstream candidate](docs/releases/v1.3.3-win11merge.7.md).
 
 Original upstream documentation follows.
 
