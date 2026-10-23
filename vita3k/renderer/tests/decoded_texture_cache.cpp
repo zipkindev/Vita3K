@@ -46,6 +46,29 @@ int main() {
     bounded_entries.insert(a, input, pixels, 1);
     bounded_entries.insert(b, input, pixels, 1);
     assert(bounded_entries.stats().entries == 1);
+    // Many small textures must fit beyond the old4096-entry limit while the
+    // byte budget remains512MiB. The new default still has a hard entry bound.
+    Cache many_small(size_t(512) * 1024 * 1024);
+    for (uint64_t n = 0; n < 16384; ++n)
+        many_small.insert({ n, 8, 8, 0 }, input, pixels, 32);
+    assert(many_small.stats().entries == 16384 && many_small.stats().evictions == 0);
+    assert(many_small.stats().budget_bytes == size_t(512) * 1024 * 1024);
+    assert(many_small.stats().resident_bytes <= many_small.stats().budget_bytes);
+    assert(many_small.copy({ 0, 8, 8, 0 }, input, output, result));
+    many_small.insert({ 16384, 8, 8, 0 }, input, pixels, 32);
+    assert(many_small.stats().entries == 16384 && many_small.stats().evictions == 1);
+    assert(!many_small.copy({ 1, 8, 8, 0 }, input, output, result));
+    assert(many_small.copy({ 0, 8, 8, 0 }, input, output, result));
+    assert(many_small.copy({ 16384, 8, 8, 0 }, input, output, result));
+    // Raising the entry cap must not relax the independent payload byte bound.
+    Cache byte_limited(16);
+    byte_limited.insert(a, input, pixels, 32);
+    byte_limited.insert(b, input, pixels, 32);
+    byte_limited.insert(c, input, pixels, 32);
+    assert(byte_limited.stats().entries == 2 && byte_limited.stats().evictions == 1);
+    assert(byte_limited.stats().resident_bytes <= 16);
+    assert(!byte_limited.copy(a, input, output, result));
+    assert(byte_limited.copy(c, input, output, result));
     Cache shared(4096, 16);
     std::vector<std::thread> workers;
     for (unsigned n = 0; n < 8; ++n)

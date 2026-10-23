@@ -29,7 +29,7 @@ public:
         size_t resident_bytes = 0, entries = 0, budget_bytes = 0;
     };
 
-    explicit DecodedTextureCache(size_t budget, size_t max_entries = 4096)
+    explicit DecodedTextureCache(size_t budget, size_t max_entries = 16384)
         : budget(budget)
         , max_entries(max_entries) {}
 
