@@ -813,7 +813,7 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
     if (const char *output = std::getenv("VITA3K_DIAG_JIT_PROFILE"); output && *output) {
         try {
             cpu::JitProfileConfig profile;
-            profile.directory = fs_utils::utf8_to_path(output);
+            profile.directory = fs_utils::utf8_to_path(output).native();
             profile.title = emuenv.io.title_id;
             profile.version = emuenv.app_info.app_version;
             profile.executable = emuenv.self_name;
