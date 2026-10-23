@@ -3,10 +3,10 @@
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
-#include <config/settings.h>
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <config/settings.h>
 #include <fstream>
 
 int main() {
@@ -16,7 +16,7 @@ int main() {
     assert(settings.decoded_texture_cache_mb == 0);
     const auto dir = fs::temp_directory_path() / ("vita3k-cache-settings-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(dir);
-    for (int mib : {0, 128, 256, 512}) {
+    for (int mib : { 0, 128, 256, 512 }) {
         settings.decoded_texture_cache_mb = mib;
         assert(config::save_custom_config(settings, dir, "TEST"));
         Config::CurrentConfig loaded;

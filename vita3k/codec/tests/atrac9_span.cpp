@@ -3,15 +3,15 @@
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
-#include <codec/state.h>
 #include <algorithm>
 #include <cassert>
+#include <codec/state.h>
 #include <cstring>
 #include <vector>
 
 int main() {
     // Synthetic mono, four frames per superframe. No game audio is included.
-    const uint8_t config[] { 0xfe, 0x70, 0x7f, 0xf0 };
+    const uint8_t config[]{ 0xfe, 0x70, 0x7f, 0xf0 };
     uint32_t config_word;
     std::memcpy(&config_word, config, sizeof(config_word));
     Atrac9DecoderState decoder(config_word);

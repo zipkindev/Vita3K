@@ -35,10 +35,10 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cstring>
-#include <vector>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 #include <renderer/pvrt-dec.h>
 #include <renderer/pvrtc-cache.h>
@@ -874,7 +874,7 @@ uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width,
     // rewritten, and caching output computed from another version would be stale.
     const auto *source = static_cast<const uint8_t *>(data);
     std::vector<uint8_t> compressed(source, source + size_t(input_bytes));
-    const renderer::DecodedTextureCache::Key key {
+    const renderer::DecodedTextureCache::Key key{
         XXH3_64bits(compressed.data(), compressed.size()), width, height, two_bit | (type << 1)
     };
     const std::span<uint8_t> pixels(output, size_t(output_bytes));
