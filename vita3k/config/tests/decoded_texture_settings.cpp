@@ -25,14 +25,14 @@ int main() {
     }
     // Legacy profiles omit the new field and should inherit the global setting.
     const auto path = dir / "config/config_TEST.xml";
-    std::ifstream in(path);
+    fs::ifstream in(path);
     std::string xml((std::istreambuf_iterator<char>(in)), {});
     in.close();
     const auto begin = xml.find(" decoded-texture-cache-mb=");
     assert(begin != std::string::npos);
     const auto value = xml.find('"', begin);
     xml.erase(begin, xml.find('"', value + 1) - begin + 1);
-    std::ofstream(path) << xml;
+    fs::ofstream(path) << xml;
     Config::CurrentConfig inherited;
     inherited.decoded_texture_cache_mb = 256;
     assert(config::load_custom_config(inherited, dir, "TEST"));
