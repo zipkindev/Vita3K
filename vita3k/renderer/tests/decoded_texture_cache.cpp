@@ -46,6 +46,7 @@ int main() {
     bounded_entries.insert(a, input, pixels, 1);
     bounded_entries.insert(b, input, pixels, 1);
     assert(bounded_entries.stats().entries == 1);
+    assert(bounded_entries.stats().entry_evictions == 1 && bounded_entries.stats().byte_evictions == 0);
     // Many small textures must fit beyond the old4096-entry limit while the
     // byte budget remains512MiB. The new default still has a hard entry bound.
     Cache many_small(size_t(512) * 1024 * 1024);
@@ -69,6 +70,24 @@ int main() {
     assert(byte_limited.stats().resident_bytes <= 16);
     assert(!byte_limited.copy(a, input, output, result));
     assert(byte_limited.copy(c, input, output, result));
+    assert(byte_limited.stats().byte_evictions == 1 && byte_limited.stats().entry_evictions == 0);
+    Cache both_limited(8, 1);
+    both_limited.insert(a, input, pixels, 1);
+    both_limited.insert(b, input, pixels, 1);
+    assert(both_limited.stats().both_evictions == 1);
+    both_limited.set_budget(0);
+    assert(both_limited.stats().clear_evictions == 1 && both_limited.stats().evictions == 2);
+    both_limited.decoded(1000000, 8, 8);
+    both_limited.decoded(12000000, 16, 16);
+    both_limited.decoded(60000000, 32, 32);
+    const auto peak = both_limited.telemetry_stats();
+    assert(peak.decodes == 3 && peak.decode_ns == 73000000);
+    assert(peak.decode_ge2ms == 2 && peak.decode_ge10ms == 2 && peak.decode_ge50ms == 1);
+    assert(peak.interval_max_decode_ns == 60000000 && peak.max_decode_ns == 60000000);
+    assert(peak.interval_max_width == 32 && peak.interval_max_height == 32);
+    const auto reset = both_limited.telemetry_stats();
+    assert(reset.interval_max_decode_ns == 0 && reset.interval_max_width == 0);
+    assert(reset.decode_ns == peak.decode_ns && reset.max_decode_ns == peak.max_decode_ns);
     Cache shared(4096, 16);
     std::vector<std::thread> workers;
     for (unsigned n = 0; n < 8; ++n)

@@ -26,6 +26,11 @@ public:
     struct Stats {
         uint64_t requests = 0, hits = 0, misses = 0, bypasses = 0;
         uint64_t evictions = 0, decodes = 0, decode_ns = 0;
+        // Exclusive causes: a victim can satisfy both bounds simultaneously.
+        uint64_t byte_evictions = 0, entry_evictions = 0, both_evictions = 0, clear_evictions = 0;
+        uint64_t decode_ge2ms = 0, decode_ge10ms = 0, decode_ge50ms = 0;
+        uint64_t max_decode_ns = 0, interval_max_decode_ns = 0;
+        uint32_t interval_max_width = 0, interval_max_height = 0;
         size_t resident_bytes = 0, entries = 0, budget_bytes = 0;
     };
 
@@ -71,6 +76,14 @@ public:
         if (cost > budget)
             return;
         while (!lru.empty() && (resident > budget - cost || lru.size() >= max_entries)) {
+            const bool bytes_full = resident > budget - cost;
+            const bool entries_full = lru.size() >= max_entries;
+            if (bytes_full && entries_full)
+                ++counts.both_evictions;
+            else if (bytes_full)
+                ++counts.byte_evictions;
+            else
+                ++counts.entry_evictions;
             const auto victim = std::prev(lru.end());
             const auto candidates = lookup.equal_range(victim->key);
             for (auto it = candidates.first; it != candidates.second; ++it) {
@@ -94,10 +107,19 @@ public:
         ++counts.bypasses;
     }
 
-    void decoded(uint64_t nanoseconds) {
+    void decoded(uint64_t nanoseconds, uint32_t width = 0, uint32_t height = 0) {
         std::lock_guard lock(mutex);
         ++counts.decodes;
         counts.decode_ns += nanoseconds;
+        counts.decode_ge2ms += nanoseconds >= 2000000;
+        counts.decode_ge10ms += nanoseconds >= 10000000;
+        counts.decode_ge50ms += nanoseconds >= 50000000;
+        counts.max_decode_ns = std::max(counts.max_decode_ns, nanoseconds);
+        if (nanoseconds > counts.interval_max_decode_ns) {
+            counts.interval_max_decode_ns = nanoseconds;
+            counts.interval_max_width = width;
+            counts.interval_max_height = height;
+        }
     }
 
     void set_budget(size_t bytes) {
@@ -105,6 +127,7 @@ public:
         if (budget == bytes)
             return;
         counts.evictions += lru.size();
+        counts.clear_evictions += lru.size();
         lookup.clear();
         lru.clear();
         resident = 0;
@@ -113,6 +136,20 @@ public:
 
     Stats stats() const {
         std::lock_guard lock(mutex);
+        return stats_unlocked();
+    }
+
+    // Only the optional telemetry writer consumes/resets the interval peak.
+    Stats telemetry_stats() {
+        std::lock_guard lock(mutex);
+        const auto value = stats_unlocked();
+        counts.interval_max_decode_ns = 0;
+        counts.interval_max_width = counts.interval_max_height = 0;
+        return value;
+    }
+
+private:
+    Stats stats_unlocked() const {
         auto value = counts;
         value.resident_bytes = resident;
         value.entries = lru.size();
@@ -120,7 +157,6 @@ public:
         return value;
     }
 
-private:
     struct Entry {
         Key key;
         std::vector<uint8_t> compressed, decoded;

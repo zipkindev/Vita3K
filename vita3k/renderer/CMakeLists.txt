@@ -97,3 +97,8 @@ endif()
 if(TRACY_ENABLE_ON_CORE_COMPONENTS)
 	target_link_libraries(renderer PRIVATE tracy)
 endif()
+
+add_executable(decoded-texture-telemetry-tests tests/decoded_texture_telemetry.cpp)
+target_include_directories(decoded-texture-telemetry-tests PRIVATE include)
+target_link_libraries(decoded-texture-telemetry-tests PRIVATE Threads::Threads)
+add_test(NAME decoded-texture-telemetry COMMAND decoded-texture-telemetry-tests)

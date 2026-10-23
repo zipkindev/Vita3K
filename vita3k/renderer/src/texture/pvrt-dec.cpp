@@ -40,6 +40,7 @@
 #include <cstring>
 #include <vector>
 
+#include <renderer/decoded_texture_telemetry.h>
 #include <renderer/parallel_decode_worker.h>
 #include <renderer/pvrt-dec.h>
 #include <renderer/pvrtc-cache.h>
@@ -956,6 +957,9 @@ static renderer::DecodedTextureCache &decoded_cache() {
         const auto mb = std::strtoul(text, &end, 10);
         return *end == '\0' && mb <= 512 ? size_t(mb) * 1024 * 1024 : 0;
     }());
+    // Constructed after cache, so its writer joins before cache destruction.
+    // Opt-in only; all file operations run on the telemetry writer.
+    static renderer::DecodedTextureTelemetry telemetry(cache, std::getenv("VITA3K_DIAG_PVRTC_TELEMETRY"));
     return cache;
 }
 
@@ -986,7 +990,7 @@ uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width,
         cache.bypass();
         const auto start = std::chrono::steady_clock::now();
         const auto result = PVRTDecompressPVRTCParallel(data, two_bit, width, height, type, output);
-        cache.decoded(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+        cache.decoded(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count(), width, height);
         return result;
     }
     const size_t output_bytes = size_t(width) * height * 4;
@@ -1004,7 +1008,7 @@ uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width,
         return result;
     const auto start = std::chrono::steady_clock::now();
     result = PVRTDecompressPVRTCParallel(compressed.data(), two_bit, width, height, type, output);
-    cache.decoded(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+    cache.decoded(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count(), width, height);
     cache.insert(key, std::move(compressed), pixels, result);
     return result;
 }
