@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "dynarmic": {
+    "baseCommit": "86458a0bd369d63ba4c2ef812cacbb6c9080c065",
+    "file": "dynarmic-jit-observer.patch",
+    "sha256": "3421fa2372454e1ceeea4b098a430ffd72960681f644f29e055e15c876ced48d"
+  }
+}

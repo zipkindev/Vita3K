@@ -86,6 +86,10 @@ using NIDSet = std::set<uint32_t>;
 /**
  * @brief State of the emulated PlayStation Vita environment
  */
+namespace cpu {
+class JitCompileProfile;
+}
+
 struct EmuEnvState {
     // declare this first as the unique_ptr need to be initialized before the references
 private:
@@ -136,6 +140,7 @@ public:
     std::string self_path{};
     Config &cfg;
     SceUID main_thread_id{};
+    std::shared_ptr<cpu::JitCompileProfile> jit_compile_profile;
     size_t frame_count = 0;
     uint32_t fps = 0;
     uint32_t avg_fps = 0;

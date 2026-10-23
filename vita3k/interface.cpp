@@ -47,6 +47,9 @@
 #include <util/vita_theme_utils.h>
 
 #include <cpu/functions.h>
+#include <cpu/jit_profile.h>
+#include <cpu/state.h>
+#include <cstdlib>
 #include <gdbstub/functions.h>
 #include <stb_image_write.h>
 
@@ -804,6 +807,37 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
         if (module->info.modid != main_module_id)
             start_module(emuenv, module->info);
     }
+
+    // Diagnostic-only main-thread learning. No code is precompiled or executed here.
+#if defined(_M_X64) || defined(__x86_64__)
+    if (const char *output = std::getenv("VITA3K_DIAG_JIT_PROFILE"); output && *output) {
+        try {
+            cpu::JitProfileConfig profile;
+            profile.directory = fs_utils::utf8_to_path(output);
+            profile.title = emuenv.io.title_id;
+            profile.version = emuenv.app_info.app_version;
+            profile.executable = emuenv.self_name;
+            profile.guest_thread = main_thread->id;
+            profile.cpu_optimizations = emuenv.kernel.cpu_opt;
+            {
+                const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
+                for (const auto &[_, module] : emuenv.kernel.loaded_modules) {
+                    const auto &info = module->info;
+                    const std::string path(info.path, std::find(std::begin(info.path), std::end(info.path), '\0'));
+                    for (const auto &seg : info.segments) {
+                        if (seg.memsz)
+                            profile.regions.push_back({ path, seg.vaddr.address(), seg.memsz, seg.perms });
+                    }
+                }
+            }
+            emuenv.jit_compile_profile = std::make_shared<cpu::JitCompileProfile>(std::move(profile));
+            main_thread->cpu->jit_profile = emuenv.jit_compile_profile;
+            LOG_INFO("[JIT-PROFILE] Main-thread compilation observer armed (65536 records; no prewarming)");
+        } catch (const std::exception &e) {
+            LOG_WARN("[JIT-PROFILE] Diagnostic disabled: {}", e.what());
+        }
+    }
+#endif
 
     SceKernelThreadOptParam param{ 0, 0 };
     std::vector<std::string> cfg_args;

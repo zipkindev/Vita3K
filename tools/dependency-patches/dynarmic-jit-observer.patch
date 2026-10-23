@@ -1,0 +1,64 @@
+diff --git a/src/dynarmic/backend/x64/a32_interface.cpp b/src/dynarmic/backend/x64/a32_interface.cpp
+index d690aada..69cd91cb 100644
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -206,6 +206,15 @@ private:
+         if (block)
+             return *block;
+ 
++        const bool profiling = conf.callbacks->IsJitCompileProfilingEnabled();
++        bool observed_complete = false;
++        if (profiling)
++            conf.callbacks->JitCompileBegin(descriptor.Value());
++        SCOPE_EXIT {
++            if (profiling && !observed_complete)
++                conf.callbacks->JitCompileAborted();
++        };
++
+         constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
+         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
+             invalidate_entire_cache = true;
+@@ -227,7 +236,13 @@ private:
+         }
+         Optimization::IdentityRemovalPass(ir_block);
+         Optimization::VerificationPass(ir_block);
+-        return emitter.Emit(ir_block);
++        const auto result = emitter.Emit(ir_block);
++        if (profiling) {
++            conf.callbacks->JitCompileComplete(A32::LocationDescriptor{ir_block.EndLocation()}.PC(),
++                result.size);
++            observed_complete = true;
++        }
++        return result;
+     }
+ 
+     void PerformRequestedCacheInvalidation(HaltReason hr) {
+@@ -240,6 +255,8 @@ private:
+                 return;
+             }
+ 
++            if (conf.callbacks->IsJitCompileProfilingEnabled())
++                conf.callbacks->JitCacheInvalidated();
+             jit_state.ResetRSB();
+             if (invalidate_entire_cache) {
+                 block_of_code.ClearCache();
+diff --git a/src/dynarmic/interface/A32/config.h b/src/dynarmic/interface/A32/config.h
+index 360df06e..cac5da62 100644
+--- a/src/dynarmic/interface/A32/config.h
++++ b/src/dynarmic/interface/A32/config.h
+@@ -61,6 +61,15 @@ enum class Exception {
+ struct UserCallbacks : public TranslateCallbacks {
+     virtual ~UserCallbacks() = default;
+ 
++    // Optional diagnostic observer. Only x64 actual compilation misses are observed.
++    // Callbacks must not execute guest code, re-enter the JIT, or throw.
++    virtual bool IsJitCompileProfilingEnabled() const noexcept { return false; }
++    virtual void JitCompileBegin(std::uint64_t) noexcept {}
++    virtual void JitCompileComplete(std::uint32_t, std::size_t) noexcept {}
++    virtual void JitCompileAborted() noexcept {}
++    virtual void JitCacheInvalidated() noexcept {}
++
++
+     // All reads through this callback are 4-byte aligned.
+     // Memory must be interpreted as little endian.
+     std::optional<std::uint32_t> MemoryReadCode(VAddr vaddr) override { return MemoryRead32(vaddr); }

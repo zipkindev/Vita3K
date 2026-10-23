@@ -25,6 +25,10 @@
 #include <atomic>
 #include <functional>
 
+namespace cpu {
+class JitCompileProfile;
+}
+
 struct CPUState {
     CPUState() = default;
 
@@ -32,6 +36,7 @@ struct CPUState {
     MemState *mem = nullptr;
     DisasmState disasm;
 
+    std::shared_ptr<cpu::JitCompileProfile> jit_profile;
     CPUInterfacePtr cpu;
     bool svc_called;
     uint32_t svc;

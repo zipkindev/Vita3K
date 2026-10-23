@@ -17,6 +17,7 @@
 
 #include "cpu/common.h"
 #include <cpu/impl/dynarmic_cpu.h>
+#include <cpu/jit_profile.h>
 #include <cpu/state.h>
 #include <util/log.h>
 
@@ -192,13 +193,25 @@ public:
 
     ~ArmDynarmicCallback() override = default;
 
+    bool IsJitCompileProfilingEnabled() const noexcept override {
+        return parent->jit_profile && parent->jit_profile->enabled();
+    }
+    void JitCompileBegin(std::uint64_t descriptor) noexcept override { parent->jit_profile->begin(descriptor); }
+    void JitCompileComplete(std::uint32_t end_pc, std::size_t bytes) noexcept override { parent->jit_profile->complete(end_pc, bytes); }
+    void JitCompileAborted() noexcept override { parent->jit_profile->abort(); }
+    void JitCacheInvalidated() noexcept override { parent->jit_profile->invalidated(); }
+
     std::optional<std::uint32_t> MemoryReadCode(Dynarmic::A32::VAddr addr) override {
         if (cpu->log_mem)
             LOG_TRACE("Instruction fetch at address 0x{:X}", addr);
         const Ptr<uint32_t> ptr{ static_cast<Address>(addr) };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
-            if (!confirm_invalid_access(addr, "instruction fetch"))
-                return MemoryRead32(addr);
+            if (!confirm_invalid_access(addr, "instruction fetch")) {
+                const auto value = MemoryRead32(addr);
+                if (parent->jit_profile)
+                    parent->jit_profile->code_read(addr, value);
+                return value;
+            }
             uint32_t bc_nid = 0, bc_lr = 0;
             get_last_import_call(bc_nid, bc_lr);
             LOG_CRITICAL("Invalid instruction fetch at address 0x{:X} (last HLE import on this thread: nid=0x{:X} called from LR=0x{:X})\n{}", addr, bc_nid, bc_lr, cpu->save_context().description());
@@ -237,9 +250,14 @@ public:
                 }
                 LOG_CRITICAL("Memory at register targets (words -2..+5):\n{}", reg_mem);
             }
+            if (parent->jit_profile)
+                parent->jit_profile->invalid_read();
             return std::nullopt;
         }
-        return MemoryRead32(addr);
+        const auto value = MemoryRead32(addr);
+        if (parent->jit_profile)
+            parent->jit_profile->code_read(addr, value);
+        return value;
     }
 
     static void TraceInstruction(uint64_t self_, uint64_t address, uint64_t is_thumb) {
@@ -324,9 +342,15 @@ public:
 
         const auto word_at = [&](size_t i) -> std::optional<uint32_t> {
             const Ptr<uint32_t> word{ static_cast<Address>(pc + i * 4) };
-            if (!word.valid(*parent->mem))
+            if (!word.valid(*parent->mem)) {
+                if (parent->jit_profile)
+                    parent->jit_profile->invalid_read();
                 return std::nullopt;
-            return *word.get(*parent->mem);
+            }
+            const auto value = *word.get(*parent->mem);
+            if (parent->jit_profile)
+                parent->jit_profile->code_read(word.address(), value, true);
+            return value;
         };
 
         const auto first = word_at(0);
@@ -732,6 +756,8 @@ void DynarmicCPU::trigger_breakpoint() {
 }
 
 void DynarmicCPU::rebuild_jit() {
+    if (parent->jit_profile)
+        parent->jit_profile->invalidated();
     const CPUContext ctx = save_context();
     jit = make_jit();
     load_context(ctx);

@@ -26,6 +26,7 @@
 #include <config/state.h>
 #include <config/version.h>
 #include <cpu/functions.h>
+#include <cpu/jit_profile.h>
 #include <ctrl/functions.h>
 #include <ctrl/state.h>
 #include <dialog/state.h>
@@ -505,6 +506,10 @@ void shutdown_app_runtime(EmuEnvState &state) {
         state.renderer->command_buffer_queue.abort();
 
     state.kernel.process_exit();
+    if (state.jit_compile_profile) {
+        LOG_INFO("[JIT-PROFILE] {}", state.jit_compile_profile->finish() ? "saved" : "report write failed");
+        state.jit_compile_profile.reset();
+    }
 
     state.motion.reset_runtime();
 
