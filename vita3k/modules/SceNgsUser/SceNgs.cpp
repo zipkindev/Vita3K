@@ -789,6 +789,9 @@ EXPORT(SceInt32, sceNgsVoiceGetOutputPatch, ngs::Voice *voice, const SceInt32 ou
     }
 
     *patch = voice->patches[output_index][output_subindex];
+    if (*patch && !patch->valid(emuenv.mem))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+
     const bool patch_missing = !(*patch) || (patch->get(emuenv.mem))->output_sub_index == -1;
     if (patch_missing) {
         LOG_WARN_ONCE("Getting non-existen output patch port {}:{}", output_index, output_subindex);
