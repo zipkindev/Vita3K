@@ -15,3 +15,6 @@ src/external/*	linguist-vendored
 *.sh			eol=lf
 
 *.bat			eol=crlf
+
+# Preserve checksummed dependency patches and their required blank context lines.
+tools/dependency-patches/*.patch eol=lf whitespace=-blank-at-eol
