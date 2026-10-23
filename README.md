@@ -1,4 +1,15 @@
-# Vita3K
+# Vita3K-ZipZ
+
+Performance experiments and optimized Windows diagnostics based on [Vita3K-Plus](https://github.com/nckstwrt/Vita3K-Plus), building on the original [Vita3K](https://github.com/Vita3K/Vita3K) emulator. This repository retains the original GitHub fork relationship; the diagnostic releases use the separately pinned Plus `all-enhancements` baseline with reviewed patches.
+
+- [Diagnostic downloads and matching symbols](https://github.com/zipkindev/Vita3K-ZipZ/releases)
+- [Diagnostic usage and maintenance](https://github.com/zipkindev/Vita3K-ZipZ/blob/experiment/pvrtc-decoded-cache/docs/windows-diagnostics.md)
+- [Ubermall measurements and limitations](https://github.com/zipkindev/Vita3K-ZipZ/blob/experiment/pvrtc-decoded-cache/docs/ubermall-cache-20261023.md)
+- [Cache experiment draft PR](https://github.com/zipkindev/Vita3K-ZipZ/pull/1)
+
+The default branch currently retains mainline source plus build infrastructure. The active Plus-derived emulator changes live on `experiment/pvrtc-decoded-cache`; no mainline/nx merge is implied. Cache trials remain opt-in. Runtime and matching PDB downloads are separate. Heavy Windows builds use the dedicated self-hosted Windows runner; local native builds support diagnostic iteration.
+
+The original upstream introduction follows for attribution and general emulator information.
 
 [![C/C++ CI](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml/badge.svg)](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml)
 [![Release](https://img.shields.io/github/v/release/Vita3K/Vita3K-builds?include_prereleases)](https://github.com/Vita3K/Vita3K/releases)

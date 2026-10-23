@@ -50,7 +50,7 @@ if($PreflightOnly){
 }
 if(!$SourceCommit -or !$BuildLabel){throw 'SourceCommit and BuildLabel are required for a release package'}
 $source=Join-Path $env:GITHUB_WORKSPACE 'source'
-& git -c core.autocrlf=false clone --no-checkout https://github.com/zipkindev/Vita3K.git $source
+& git -c core.autocrlf=false clone --no-checkout https://github.com/zipkindev/Vita3K-ZipZ.git $source
 if($LASTEXITCODE){throw 'Public source clone failed'}
 & git -C $source checkout --detach $SourceCommit
 if($LASTEXITCODE){throw 'Requested source commit unavailable'}

@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   windows:
-    if: github.repository == 'zipkindev/Vita3K' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    if: github.repository == 'zipkindev/Vita3K-ZipZ' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
     runs-on: [self-hosted, Windows, X64, vita3k-windows, server2022]
     timeout-minutes: 150
     steps:
