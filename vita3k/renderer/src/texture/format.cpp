@@ -23,6 +23,7 @@
 #include <gxm/types.h>
 #include <renderer/functions.h>
 #include <renderer/pvrt-dec.h>
+#include <renderer/pvrtc-cache.h>
 #include <util/log.h>
 
 namespace renderer::texture {
@@ -157,6 +158,12 @@ uint32_t decompress_compressed_texture(SceGxmTextureBaseFormat fmt, void *dest, 
     } else if ((fmt >= SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP) && (fmt <= SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP)) {
         pvr::PVRTDecompressPVRTC(data, (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP) || (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP), width, height,
             (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP) || (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP), static_cast<uint8_t *>(dest));
+
+        const auto cache = pvr::PVRTCDecodeCacheStats();
+        if (cache.requests == 1 || cache.requests % 1024 == 0)
+            LOG_INFO("PVRTC-DECODE requests={} hits={} misses={} bypasses={} evictions={} decodes={} decode_ms={:.3f} resident_bytes={} entries={} budget_bytes={}",
+                cache.requests, cache.hits, cache.misses, cache.bypasses, cache.evictions, cache.decodes,
+                cache.decode_ns / 1e6, cache.resident_bytes, cache.entries, cache.budget_bytes);
 
         const bool is_2bpp = (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP) || (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP);
 

@@ -51,6 +51,18 @@ target_include_directories(renderer PUBLIC include)
 target_link_libraries(renderer PUBLIC display mem stb shader glutil threads config util vkutil overlay)
 target_link_libraries(renderer PRIVATE dialog ddspp SDL3::SDL3 stb ffmpeg xxHash::xxhash concurrentqueue)
 
+find_package(Threads REQUIRED)
+add_executable(decoded-texture-cache-tests tests/decoded_texture_cache.cpp)
+target_include_directories(decoded-texture-cache-tests PRIVATE include)
+target_link_libraries(decoded-texture-cache-tests PRIVATE Threads::Threads)
+add_test(NAME decoded-texture-cache COMMAND decoded-texture-cache-tests)
+
+add_executable(pvrtc-cache-tests tests/pvrtc_cache.cpp src/texture/pvrt-dec.cpp)
+target_include_directories(pvrtc-cache-tests PRIVATE include)
+target_link_libraries(pvrtc-cache-tests PRIVATE xxHash::xxhash Threads::Threads)
+add_test(NAME pvrtc-cache COMMAND pvrtc-cache-tests)
+add_test(NAME pvrtc-cache-disabled COMMAND pvrtc-cache-tests disabled)
+
 if(ANDROID)
 	target_link_libraries(renderer PRIVATE android adrenotools)
 endif()

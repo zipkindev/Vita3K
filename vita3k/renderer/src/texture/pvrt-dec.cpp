@@ -37,8 +37,12 @@
 #include <cassert>
 #include <cstring>
 #include <vector>
+#include <chrono>
+#include <cstdlib>
 
 #include <renderer/pvrt-dec.h>
+#include <renderer/pvrtc-cache.h>
+#include <xxhash.h>
 
 namespace pvr {
 enum {
@@ -788,7 +792,7 @@ static int pvrtcDecompress(uint8_t *pCompressedData, Pixel32 *pDecompressedData,
     return ui32Width * ui32Height / static_cast<uint32_t>(ui32WordWidth / 2);
 }
 
-uint32_t PVRTDecompressPVRTC(const void *pCompressedData, uint32_t Do2bitMode, uint32_t XDim, uint32_t YDim, uint32_t DoPvrtType, uint8_t *pResultImage) {
+uint32_t PVRTDecompressPVRTCUncached(const void *pCompressedData, uint32_t Do2bitMode, uint32_t XDim, uint32_t YDim, uint32_t DoPvrtType, uint8_t *pResultImage) {
     // Cast the output buffer to a Pixel32 pointer.
     Pixel32 *pDecompressedData = (Pixel32 *)pResultImage;
     std::vector<Pixel32> pTempDataVector;
@@ -819,6 +823,59 @@ uint32_t PVRTDecompressPVRTC(const void *pCompressedData, uint32_t Do2bitMode, u
     }
 
     return retval;
+}
+
+static renderer::DecodedTextureCache &decoded_cache() {
+    // Diagnostic opt-in, read once per process. Zero leaves the decoder uncached.
+    static renderer::DecodedTextureCache cache([]() -> size_t {
+        const char *text = std::getenv("VITA3K_DIAG_PVRTC_CACHE_MB");
+        if (!text || *text < '0' || *text > '9')
+            return 0;
+        char *end = nullptr;
+        const auto mb = std::strtoul(text, &end, 10);
+        return *end == '\0' && mb <= 512 ? size_t(mb) * 1024 * 1024 : 0;
+    }());
+    return cache;
+}
+
+renderer::DecodedTextureCache::Stats PVRTCDecodeCacheStats() {
+    return decoded_cache().stats();
+}
+
+uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width, uint32_t height, uint32_t type, uint8_t *output) {
+    auto &cache = decoded_cache();
+    const uint64_t true_width = std::max(width, two_bit == 1 ? 16u : 8u);
+    const uint64_t true_height = std::max(height, 8u);
+    const uint64_t input_bytes = true_width * true_height / (two_bit == 1 ? 4 : 2);
+    const bool valid_layout = width && height && two_bit <= 1 && type <= 1
+        && !(true_width & (true_width - 1)) && !(true_height & (true_height - 1));
+    // Reject dimensions beyond the cache budget before allocating or hashing.
+    const auto budget = cache.stats().budget_bytes;
+    if (!valid_layout || input_bytes > budget || uint64_t(width) * height > (budget - input_bytes) / 4) {
+        cache.bypass();
+        const auto start = std::chrono::steady_clock::now();
+        const auto result = PVRTDecompressPVRTCUncached(data, two_bit, width, height, type, output);
+        cache.decoded(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+        return result;
+    }
+    const size_t output_bytes = size_t(width) * height * 4;
+
+    // Decode from the same immutable bytes used for the key. Guest memory can be
+    // rewritten, and caching output computed from another version would be stale.
+    const auto *source = static_cast<const uint8_t *>(data);
+    std::vector<uint8_t> compressed(source, source + size_t(input_bytes));
+    const renderer::DecodedTextureCache::Key key {
+        XXH3_64bits(compressed.data(), compressed.size()), width, height, two_bit | (type << 1)
+    };
+    const std::span<uint8_t> pixels(output, size_t(output_bytes));
+    uint32_t result;
+    if (cache.copy(key, compressed, pixels, result))
+        return result;
+    const auto start = std::chrono::steady_clock::now();
+    result = PVRTDecompressPVRTCUncached(compressed.data(), two_bit, width, height, type, output);
+    cache.decoded(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+    cache.insert(key, std::move(compressed), pixels, result);
+    return result;
 }
 
 ////////////////////////////////////// ETC Compression //////////////////////////////////////
