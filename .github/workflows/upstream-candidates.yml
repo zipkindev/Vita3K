@@ -48,6 +48,9 @@ jobs:
           import json, re, subprocess
           from pathlib import Path
           pin = json.loads(Path('tools/upstream/approved-candidate.json').read_text())
+          if pin.get('enabled') is not True:
+              print('Candidate auto-builds are disabled pending initial validation.')
+              raise SystemExit(0)
           assert re.fullmatch(r'[0-9a-f]{40}', pin['sourceCommit'])
           assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', pin['buildLabel'])
           subprocess.run(['gh', 'workflow', 'run', 'windows-self-hosted-release.yml',
