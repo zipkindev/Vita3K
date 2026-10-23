@@ -29,6 +29,9 @@ int main() {
         while (!std::filesystem::exists(output) && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(1ms);
         assert(std::filesystem::exists(output));
+        // Updates after the first published row must survive normal shutdown.
+        for (unsigned n = 0; n < 100; ++n)
+            cache.decoded(3000000, 16, 16);
     } // Final snapshot is flushed and writer joined before reading.
     std::ifstream file(output);
     std::string header, row, last;
@@ -46,7 +49,7 @@ int main() {
 #ifdef _WIN32
     assert(std::stoull(values[3]) > 0 && std::stoull(values[4]) > 0);
 #endif
-    assert(values[14] == "100" && values[15] == "300000000" && values[16] == "100");
+    assert(values[14] == "200" && values[15] == "600000000" && values[16] == "200");
     assert(values[17] == "0" && values[18] == "0" && values[19] == "3000000");
     file.close();
     const auto size = std::filesystem::file_size(output);

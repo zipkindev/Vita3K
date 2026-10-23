@@ -44,6 +44,7 @@ public:
                     // 14401 rows including the initial/final sample; <8MiB with
                     // fixed-width numeric fields. Failure/cap disables output.
                     for (unsigned row = 0; row < 14401; ++row) {
+                        const bool final_sample = stop.stop_requested();
                         const auto unix_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
                         const auto steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
                         uint64_t qpc = 0, frequency = 0;
@@ -62,7 +63,7 @@ public:
                              << ',' << s.max_decode_ns << ',' << s.interval_max_decode_ns << ',' << s.interval_max_width << ',' << s.interval_max_height
                              << ',' << s.resident_bytes << ',' << s.entries << ',' << s.budget_bytes << '\n';
                         file.flush();
-                        if (!file || stop.stop_requested())
+                        if (!file || final_sample)
                             break;
                         std::unique_lock lock(wait_mutex);
                         wake.wait_for(lock, period, [&] { return stop.stop_requested(); });
