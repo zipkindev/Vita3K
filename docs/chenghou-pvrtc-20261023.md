@@ -1,6 +1,6 @@
 # Chenghou Project native pause analysis — October 23, 2026
 
-Two 45-second races used the separately staged optimized Plus v1.3.3-win11diag.1 EXE/PDB, identical graphics profile, BelowNormal priority, all16 logical CPUs, ExternalHost and async compilation. Owner selected Chenghou Project / FEISAR HD, confirmed driving with working graphics/controls, and confirmed continuous racing/noticeable pauses for the first capture. Repeat was requested in the same process with retained caches; complete texture residency is not established. Both foreground screenshots show active lap1 racing. Second full-window context confirmation is pending.
+Two 45-second races used the separately staged optimized Plus v1.3.3-win11diag.1 EXE/PDB, identical graphics profile, BelowNormal priority, all16 logical CPUs, ExternalHost and async compilation. Owner selected Chenghou Project / FEISAR HD, confirmed driving with working graphics/controls, and confirmed continuous racing/noticeable pauses for the first capture. Repeat was requested in the same process with retained caches; complete texture residency is not established. Both foreground screenshots show active lap1 racing. Owner also confirmed continuous racing without pause/results throughout the repeat.
 
 | Capture | Presents | Median / p99 / maximum ms | Gaps >50 / >100 ms |
 | --- | --- | --- | --- |
