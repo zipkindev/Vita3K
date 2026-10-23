@@ -39,6 +39,7 @@ enum class RestartRequiredSetting : uint8_t {
     AccurateThreadScheduling = 9,
     GuestCores = 10,
     DecodedTextureCache = 11,
+    AutomaticTexturePreparation = 12,
 };
 
 std::vector<RestartRequiredSetting> get_restart_required_settings(

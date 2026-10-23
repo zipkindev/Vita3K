@@ -33,7 +33,9 @@
 #include <io/state.h>
 #include <kernel/state.h>
 #include <renderer/functions.h>
+#include <renderer/pvrtc-cache.h>
 #include <renderer/state.h>
+#include <util/fs.h>
 #include <util/log.h>
 #include <util/system.h>
 
@@ -330,6 +332,9 @@ void SettingsDialog::load_config() {
     m_ui->vsync->setChecked(m_config.v_sync);
     m_ui->disable_surface_sync->setChecked(m_config.disable_surface_sync);
     m_ui->async_pipeline_compilation->setChecked(m_config.async_pipeline_compilation);
+    m_ui->clear_game_texture_profile->setEnabled(!m_app_path.empty() && emuenv.io.app_path.empty());
+    m_ui->clear_all_texture_profiles->setEnabled(emuenv.io.app_path.empty());
+    m_ui->automatic_texture_preparation->setChecked(m_config.automatic_texture_preparation);
     m_ui->decoded_texture_cache_mb->clear();
     m_ui->decoded_texture_cache_mb->addItem(tr("Off"), 0);
     for (int mib : { 128, 256, 512 })
@@ -633,6 +638,7 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     current.v_sync = m_ui->vsync->isChecked();
     current.disable_surface_sync = m_ui->disable_surface_sync->isChecked();
     current.async_pipeline_compilation = m_ui->async_pipeline_compilation->isChecked();
+    current.automatic_texture_preparation = m_ui->automatic_texture_preparation->isChecked();
     current.decoded_texture_cache_mb = m_ui->decoded_texture_cache_mb->currentData().toInt();
     current.accurate_thread_scheduling = m_ui->accurate_thread_scheduling->isChecked();
     current.guest_cores = m_ui->guest_cores_box->currentData().toInt();
@@ -1171,6 +1177,25 @@ void SettingsDialog::setup_connections() {
         const auto result = app::commit_settings(emuenv, desired, {});
         prompt_restart_if_needed(result, false);
     });
+
+    const auto clear_saved_profiles = [this](bool all) {
+        if (!emuenv.io.app_path.empty()) {
+            QMessageBox::information(this, tr("Saved Texture Profiles"), tr("Close the game normally before clearing saved texture profiles."));
+            return;
+        }
+        if (!all && m_app_path.empty())
+            return;
+        const auto question = all ? tr("Clear saved texture profiles for all games? They can be learned again. Saves and shader caches are preserved.") : tr("Clear this game's saved texture profile? It can be learned again. Saves and shader caches are preserved.");
+        if (QMessageBox::question(this, tr("Clear Saved Texture Profiles"), question, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        std::string message;
+        if (pvr::PVRTCClearTextureProfiles(fs_utils::path_to_utf8(emuenv.cache_path), all ? std::string{} : m_app_path, message))
+            QMessageBox::information(this, tr("Saved Texture Profiles"), QString::fromStdString(message));
+        else
+            QMessageBox::warning(this, tr("Saved Texture Profiles"), QString::fromStdString(message));
+    };
+    connect(m_ui->clear_game_texture_profile, &QPushButton::clicked, this, [clear_saved_profiles] { clear_saved_profiles(false); });
+    connect(m_ui->clear_all_texture_profiles, &QPushButton::clicked, this, [clear_saved_profiles] { clear_saved_profiles(true); });
 
     connect(m_ui->clean_shaders_cache, &QPushButton::clicked, this, [this] {
         const auto shaders_cache_path = emuenv.cache_path / "shaders";

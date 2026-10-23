@@ -238,6 +238,9 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
         case config::RestartRequiredSetting::GuestCores:
             runtime_current.guest_cores = previous_current.guest_cores;
             break;
+        case config::RestartRequiredSetting::AutomaticTexturePreparation:
+            runtime_current.automatic_texture_preparation = previous_current.automatic_texture_preparation;
+            break;
         case config::RestartRequiredSetting::DecodedTextureCache:
             runtime_current.decoded_texture_cache_mb = previous_current.decoded_texture_cache_mb;
             break;

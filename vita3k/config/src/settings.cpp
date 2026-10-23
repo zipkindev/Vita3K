@@ -58,6 +58,7 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.spirv_shader = cfg.spirv_shader;
     current.texture_cache = cfg.texture_cache;
     current.decoded_texture_cache_mb = cfg.decoded_texture_cache_mb;
+    current.automatic_texture_preparation = cfg.automatic_texture_preparation;
     current.audio_backend = cfg.audio_backend;
     current.audio_volume = cfg.audio_volume;
     current.ngs_enable = cfg.ngs_enable;
@@ -107,6 +108,7 @@ void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.spirv_shader = current.spirv_shader;
     cfg.texture_cache = current.texture_cache;
     cfg.decoded_texture_cache_mb = current.decoded_texture_cache_mb;
+    cfg.automatic_texture_preparation = current.automatic_texture_preparation;
     cfg.audio_backend = current.audio_backend;
     cfg.audio_volume = current.audio_volume;
     cfg.ngs_enable = current.ngs_enable;
@@ -153,6 +155,7 @@ std::vector<RestartRequiredSetting> get_restart_required_settings(
     append_if_changed(before.validation_layer != after.validation_layer, RestartRequiredSetting::ValidationLayer);
     append_if_changed(before.accurate_thread_scheduling != after.accurate_thread_scheduling, RestartRequiredSetting::AccurateThreadScheduling);
     append_if_changed(before.guest_cores != after.guest_cores, RestartRequiredSetting::GuestCores);
+    append_if_changed(before.automatic_texture_preparation != after.automatic_texture_preparation, RestartRequiredSetting::AutomaticTexturePreparation);
     append_if_changed(before.decoded_texture_cache_mb != after.decoded_texture_cache_mb, RestartRequiredSetting::DecodedTextureCache);
 
     return changed;
@@ -215,6 +218,7 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
         out.shader_cache = gpu.attribute("shader-cache").as_bool(true);
         out.spirv_shader = gpu.attribute("spirv-shader").as_bool();
         out.texture_cache = gpu.attribute("texture-cache").as_bool(true);
+        out.automatic_texture_preparation = gpu.attribute("automatic-texture-preparation").as_bool(out.automatic_texture_preparation);
         out.decoded_texture_cache_mb = std::clamp(gpu.attribute("decoded-texture-cache-mb").as_int(out.decoded_texture_cache_mb), 0, 512);
     }
 
@@ -307,6 +311,7 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
     gpu_child.append_attribute("shader-cache") = cc.shader_cache;
     gpu_child.append_attribute("spirv-shader") = cc.spirv_shader;
     gpu_child.append_attribute("texture-cache") = cc.texture_cache;
+    gpu_child.append_attribute("automatic-texture-preparation") = cc.automatic_texture_preparation;
     gpu_child.append_attribute("decoded-texture-cache-mb") = std::clamp(cc.decoded_texture_cache_mb, 0, 512);
 
     auto audio_child = config_child.append_child("audio");

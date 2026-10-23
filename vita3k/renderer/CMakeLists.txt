@@ -111,3 +111,6 @@ add_executable(texture-profile-lifecycle-tests tests/texture_profile_lifecycle.c
 target_include_directories(texture-profile-lifecycle-tests PRIVATE include)
 target_link_libraries(texture-profile-lifecycle-tests PRIVATE xxHash::xxhash Threads::Threads)
 add_test(NAME texture-profile-lifecycle COMMAND texture-profile-lifecycle-tests)
+add_executable(texture-profile-storage-tests tests/texture_profile_storage.cpp)
+target_include_directories(texture-profile-storage-tests PRIVATE include)
+add_test(NAME texture-profile-storage COMMAND texture-profile-storage-tests)

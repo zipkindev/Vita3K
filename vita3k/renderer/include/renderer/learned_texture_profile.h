@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <renderer/decoded_texture_cache.h>
+#include <renderer/texture_profile_storage.h>
 #include <xxhash.h>
 
 #include <chrono>
@@ -24,7 +25,8 @@ class LearnedTextureProfile {
 public:
     enum class Mode { Off,
         Learn,
-        Preload };
+        Preload,
+        Automatic };
     static constexpr size_t file_limit = 64 * 1024 * 1024;
     static constexpr size_t job_limit = 32 * 1024 * 1024;
     using Clock = std::chrono::steady_clock;
@@ -36,6 +38,7 @@ public:
     };
     struct Report {
         std::string status = "off";
+        std::string mode = "off";
         uint64_t profile_entries = 0, prepared_entries = 0, prepared_bytes = 0, prepare_ns = 0, saved_entries = 0, profile_hash = 0;
     };
 
@@ -71,7 +74,7 @@ public:
         uint64_t version, length, count;
         if (!get(4, version) || version != 1 || !get(4, length) || length > 256 || length != identity.size() || cursor + length > bytes.size() - 8)
             return false;
-        if (!std::equal(identity.begin(), identity.end(), bytes.begin() + cursor))
+        if (std::memcmp(identity.data(), bytes.data() + cursor, identity.size()) != 0)
             return false;
         cursor += size_t(length);
         if (!get(4, count) || count > 16384)
@@ -99,6 +102,9 @@ public:
         mode = Mode::Off;
         report = {};
         output = report_path;
+        report.mode = requested == Mode::Automatic ? "auto" : requested == Mode::Learn ? "learn"
+            : requested == Mode::Preload                                               ? "preload"
+                                                                                       : "off";
         identity = title + "|" + id;
         if (requested == Mode::Off) {
             write_report();
@@ -120,6 +126,12 @@ public:
         } else if (mode == Mode::Learn) {
             report.status = "learn-ready";
         } else {
+            if (std::filesystem::is_symlink(profile.parent_path().parent_path()) || std::filesystem::is_symlink(profile.parent_path()) || std::filesystem::is_symlink(profile))
+                throw std::runtime_error("profile path is a symlink");
+            if (mode == Mode::Automatic) {
+                TextureProfileStorage storage(profile.parent_path().parent_path());
+                storage.reserve(profile);
+            }
             const auto start = Clock::now();
             std::error_code ec;
             const auto size = std::filesystem::file_size(profile, ec);
@@ -131,6 +143,8 @@ public:
                     std::ifstream input(profile, std::ios::binary);
                     std::vector<Record> records;
                     if (input.read(reinterpret_cast<char *>(bytes.data()), bytes.size()) && validate(bytes, identity, records)) {
+                        if (mode == Mode::Automatic)
+                            std::filesystem::last_write_time(profile, std::filesystem::file_time_type::clock::now());
                         report.profile_entries = records.size();
                         report.profile_hash = XXH3_64bits(bytes.data(), bytes.size());
                         report.status = "preload-ready";
@@ -167,13 +181,20 @@ public:
     }
 
     Report finish() {
-        if (mode == Mode::Learn) {
+        if (mode == Mode::Learn || mode == Mode::Automatic) {
             // Called only after guest/render threads joined. No IO on demand
             // decode, no per-frame queue, and only retained entries are learned.
             auto entries = cache.profile_snapshot(file_limit - 28 - identity.size(), cache.stats().budget_bytes, job_limit);
             if (entries.empty()) {
                 report.status = "empty-learning"; // Preserve an older good pack.
             } else {
+                TextureProfileStorage storage(profile.parent_path().parent_path());
+                uint64_t incoming = 28 + identity.size();
+                for (const auto &entry : entries)
+                    incoming += 40 + entry.compressed.size();
+                if (std::filesystem::is_symlink(profile.parent_path()) || std::filesystem::is_symlink(profile))
+                    throw std::runtime_error("profile path is a symlink");
+                storage.reserve(profile, incoming);
                 std::filesystem::create_directories(profile.parent_path());
                 auto temporary = profile;
                 temporary += ".tmp-" + std::to_string(Clock::now().time_since_epoch().count());
@@ -244,6 +265,8 @@ public:
         return report;
     }
 
+    bool active() const { return mode != Mode::Off; }
+
     void fail() noexcept {
         if (mode != Mode::Off)
             cache.clear();
@@ -260,7 +283,7 @@ private:
         if (output.empty())
             return;
         std::ofstream stream(output, std::ios::trunc);
-        stream << "{\"status\":\"" << report.status << "\",\"profileEntries\":" << report.profile_entries
+        stream << "{\"mode\":\"" << report.mode << "\",\"status\":\"" << report.status << "\",\"profileEntries\":" << report.profile_entries
                << ",\"preparedEntries\":" << report.prepared_entries << ",\"preparedResidentBytes\":" << report.prepared_bytes
                << ",\"prepareNs\":" << report.prepare_ns << ",\"savedEntries\":" << report.saved_entries
                << ",\"profileHash\":" << report.profile_hash << "}\n";

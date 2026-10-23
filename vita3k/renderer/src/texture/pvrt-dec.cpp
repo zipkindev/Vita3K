@@ -983,21 +983,39 @@ static renderer::LearnedTextureProfile &texture_profile() {
     return profile;
 }
 
-std::string PVRTCStartTextureProfile(const std::string &root, const std::string &title, const std::string &identity) {
+std::string PVRTCStartTextureProfile(const std::string &root, const std::string &title, const std::string &identity, bool automatic) {
     using Profile = renderer::LearnedTextureProfile;
     const char *text = std::getenv("VITA3K_DIAG_PVRTC_PROFILE_MODE");
-    const std::string mode = text ? text : "off";
+    const std::string mode = text && *text ? text : automatic ? "auto"
+                                                              : "off";
     const char *output = std::getenv("VITA3K_DIAG_PVRTC_PRELOAD_REPORT");
     const auto path = [](const std::string &s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); };
     try {
         const auto report = texture_profile().begin(path(root), title, identity,
-            mode == "learn" ? Profile::Mode::Learn : mode == "preload" ? Profile::Mode::Preload
-                                                                       : Profile::Mode::Off,
+            mode == "auto" ? Profile::Mode::Automatic : mode == "learn" ? Profile::Mode::Learn
+                : mode == "preload"                                     ? Profile::Mode::Preload
+                                                                        : Profile::Mode::Off,
             output ? path(output) : std::filesystem::path{}, PVRTDecompressPVRTCParallel);
         return mode + ": " + report.status + ", prepared=" + std::to_string(report.prepared_entries) + ", ns=" + std::to_string(report.prepare_ns);
     } catch (...) {
         texture_profile().fail();
         return "profile error; normal demand decoding continues";
+    }
+}
+
+bool PVRTCClearTextureProfiles(const std::string &root, const std::string &title, std::string &message) {
+    if (texture_profile().active()) {
+        message = "Close the game normally before clearing saved texture profiles.";
+        return false;
+    }
+    try {
+        const auto directory = std::filesystem::path(std::u8string(root.begin(), root.end())) / "decoded-textures";
+        const auto count = std::filesystem::exists(directory) ? renderer::TextureProfileStorage(directory).clear(title) : 0;
+        message = "Cleared " + std::to_string(count) + " saved texture profile files.";
+        return true;
+    } catch (...) {
+        message = "Could not clear saved profiles. Another emulator may be using them, or storage is unavailable.";
+        return false;
     }
 }
 

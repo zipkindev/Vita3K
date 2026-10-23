@@ -1011,6 +1011,18 @@ QGroupBox[flat=&quot;true&quot;]::title {
                   <item><widget class="QComboBox" name="decoded_texture_cache_mb"/></item>
                  </layout>
                 </item>
+                <item row="3" column="0" colspan="2">
+                 <widget class="QCheckBox" name="automatic_texture_preparation">
+                  <property name="text"><string>Automatic Texture Preparation (Experimental)</string></property>
+                  <property name="toolTip"><string>Prepare learned PVRTC textures when launching this game and update its profile when the game closes normally. Requires a nonzero Decoded Texture Cache budget. Saved profiles use up to 64 MiB per game and 1 GiB total; older profiles are removed automatically. May add loading time. Takes effect on the next game launch.</string></property>
+                 </widget>
+                </item>
+                <item row="4" column="0" colspan="2">
+                 <layout class="QHBoxLayout" name="saved_texture_profiles_layout">
+                  <item><widget class="QPushButton" name="clear_game_texture_profile"><property name="text"><string>Clear This Game's Texture Profile</string></property></widget></item>
+                  <item><widget class="QPushButton" name="clear_all_texture_profiles"><property name="text"><string>Clear All Saved Texture Profiles</string></property></widget></item>
+                 </layout>
+                </item>
                 <item row="1" column="0" colspan="2">
                  <widget class="QGroupBox" name="gb_shaders">
                   <property name="title">
