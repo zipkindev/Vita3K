@@ -330,6 +330,12 @@ void SettingsDialog::load_config() {
     m_ui->vsync->setChecked(m_config.v_sync);
     m_ui->disable_surface_sync->setChecked(m_config.disable_surface_sync);
     m_ui->async_pipeline_compilation->setChecked(m_config.async_pipeline_compilation);
+    m_ui->decoded_texture_cache_mb->clear();
+    m_ui->decoded_texture_cache_mb->addItem(tr("Off"), 0);
+    for (int mib : { 128, 256, 512 })
+        m_ui->decoded_texture_cache_mb->addItem(tr("%1 MiB").arg(mib), mib);
+    const int cache_index = m_ui->decoded_texture_cache_mb->findData(m_config.decoded_texture_cache_mb);
+    m_ui->decoded_texture_cache_mb->setCurrentIndex(cache_index >= 0 ? cache_index : 0);
     m_ui->accurate_thread_scheduling->setChecked(m_config.accurate_thread_scheduling);
     m_ui->guest_cores_box->clear();
     for (int cores = 1; cores <= 3; cores++)
@@ -627,6 +633,7 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     current.v_sync = m_ui->vsync->isChecked();
     current.disable_surface_sync = m_ui->disable_surface_sync->isChecked();
     current.async_pipeline_compilation = m_ui->async_pipeline_compilation->isChecked();
+    current.decoded_texture_cache_mb = m_ui->decoded_texture_cache_mb->currentData().toInt();
     current.accurate_thread_scheduling = m_ui->accurate_thread_scheduling->isChecked();
     current.guest_cores = m_ui->guest_cores_box->currentData().toInt();
     current.memory_mapping = m_ui->memory_mapping_box->currentData().toString().toStdString();
@@ -1223,6 +1230,7 @@ void SettingsDialog::setup_connections() {
         { m_ui->renderer_accuracy_box, tr("Rendering Accuracy"), m_tooltips->renderer_accuracy },
         { m_ui->vsync, tr("V-Sync"), m_tooltips->vsync },
         { m_ui->disable_surface_sync, tr("Disable Surface Sync"), m_tooltips->disable_surface_sync },
+        { m_ui->decoded_texture_cache_mb, tr("Decoded Texture Cache"), m_tooltips->decoded_texture_cache },
         { m_ui->async_pipeline_compilation, tr("Asynchronous Pipeline Compilation"), m_tooltips->async_pipeline },
         { m_ui->accurate_thread_scheduling, tr("Accurate Thread Scheduling"), m_tooltips->accurate_thread_scheduling },
         { m_ui->guest_cores_box, tr("Guest CPU Cores"), m_tooltips->guest_cores },

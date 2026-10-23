@@ -62,6 +62,7 @@ target_include_directories(pvrtc-cache-tests PRIVATE include)
 target_link_libraries(pvrtc-cache-tests PRIVATE xxHash::xxhash Threads::Threads)
 add_test(NAME pvrtc-cache COMMAND pvrtc-cache-tests)
 add_test(NAME pvrtc-cache-disabled COMMAND pvrtc-cache-tests disabled)
+add_test(NAME pvrtc-cache-configured COMMAND pvrtc-cache-tests configured)
 
 if(ANDROID)
 	target_link_libraries(renderer PRIVATE android adrenotools)

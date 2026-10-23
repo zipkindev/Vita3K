@@ -31,6 +31,13 @@ int main() {
     assert(cache.stats().entries == 2 && cache.stats().resident_bytes <= 16);
     cache.insert(b, std::vector<uint8_t>(17), pixels, 0);
     assert(cache.stats().resident_bytes <= 16);
+    cache.set_budget(0);
+    assert(cache.stats().entries == 0 && cache.stats().resident_bytes == 0);
+    cache.insert(a,input,pixels,1);
+    assert(!cache.copy(a,input,output,result));
+    cache.set_budget(16);
+    cache.insert(a,input,pixels,32);
+    assert(cache.copy(a,input,output,result) && result == 32);
     Cache disabled(0);
     assert(!disabled.eligible(1,1));
     disabled.insert(a,input,pixels,1);

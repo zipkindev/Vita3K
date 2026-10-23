@@ -77,6 +77,7 @@ public:
     QString check_for_updates;
     QString log_compat_warn;
     QString texture_cache;
+    QString decoded_texture_cache;
     QString archive_log;
     QString log_level;
     QString discord_rpc;

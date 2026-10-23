@@ -44,6 +44,8 @@ QString restart_required_setting_label(config::RestartRequiredSetting setting) {
         return QCoreApplication::translate("SettingsDialogTooltips", "Vulkan Validation Layer");
     case config::RestartRequiredSetting::AccurateThreadScheduling:
         return QCoreApplication::translate("SettingsDialogTooltips", "Accurate Thread Scheduling");
+    case config::RestartRequiredSetting::DecodedTextureCache:
+        return QCoreApplication::translate("SettingsDialogTooltips", "Decoded Texture Cache");
     case config::RestartRequiredSetting::GuestCores:
         return QCoreApplication::translate("SettingsDialogTooltips", "Guest CPU Cores");
     }
@@ -145,6 +147,7 @@ SettingsDialogTooltips::SettingsDialogTooltips(QObject *parent)
     , check_for_updates(tr("Choose whether Vita3K checks for updates at startup.\n\"Check\" notifies you when a newer build is available, and \"Don't Check\" disables startup checks."))
     , log_compat_warn(tr("Log compatibility database related warnings."))
     , texture_cache(tr("Enable the texture cache. Improves performance in games at the cost of additional VRAM usage."))
+    , decoded_texture_cache(tr("Experimental: use RAM to reuse decoded PVRTC textures and reduce repeated decoding pauses. New textures still need decoding. The limit covers texture payload; bookkeeping uses additional memory. Restart the game after changing this setting."))
     , archive_log(tr("Keep a duplicate of the log file named after the current title when an app runs."))
     , log_level(tr("Select the verbosity of the logging system."))
     , discord_rpc(tr("Enable Discord Rich Presence to show what app you're running on Discord."))

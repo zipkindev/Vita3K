@@ -53,6 +53,7 @@
 #include <packages/sfo.h>
 #include <regmgr/state.h>
 #include <renderer/functions.h>
+#include <renderer/pvrtc-cache.h>
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
 #include <touch/state.h>
@@ -237,6 +238,9 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
         case config::RestartRequiredSetting::GuestCores:
             runtime_current.guest_cores = previous_current.guest_cores;
             break;
+        case config::RestartRequiredSetting::DecodedTextureCache:
+            runtime_current.decoded_texture_cache_mb = previous_current.decoded_texture_cache_mb;
+            break;
         }
     }
 
@@ -245,6 +249,7 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
 
 void set_current_config(EmuEnvState &emuenv, const std::string &app_path) {
     config::set_current_config(emuenv.cfg, emuenv.config_path, app_path);
+    pvr::PVRTCConfigureDecodeCache(emuenv.cfg.current_config.decoded_texture_cache_mb);
     set_backend_renderer(emuenv, emuenv.cfg.current_config.backend_renderer);
     emuenv.audio.set_global_volume(emuenv.cfg.current_config.audio_volume / 100.f);
     lang::set_locale(emuenv.cfg.current_config.sys_lang);

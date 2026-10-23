@@ -826,7 +826,7 @@ uint32_t PVRTDecompressPVRTCUncached(const void *pCompressedData, uint32_t Do2bi
 }
 
 static renderer::DecodedTextureCache &decoded_cache() {
-    // Diagnostic opt-in, read once per process. Zero leaves the decoder uncached.
+    // The environment also supports standalone decoder tests before app setup.
     static renderer::DecodedTextureCache cache([]() -> size_t {
         const char *text = std::getenv("VITA3K_DIAG_PVRTC_CACHE_MB");
         if (!text || *text < '0' || *text > '9')
@@ -836,6 +836,16 @@ static renderer::DecodedTextureCache &decoded_cache() {
         return *end == '\0' && mb <= 512 ? size_t(mb) * 1024 * 1024 : 0;
     }());
     return cache;
+}
+
+void PVRTCConfigureDecodeCache(int configured_mib) {
+    size_t mib = std::clamp(configured_mib, 0, 512);
+    if (const char *text = std::getenv("VITA3K_DIAG_PVRTC_CACHE_MB")) {
+        char *end = nullptr;
+        const auto override_mib = std::strtoul(text, &end, 10);
+        mib = *text >= '0' && *text <= '9' && *end == '\0' && override_mib <= 512 ? override_mib : 0;
+    }
+    decoded_cache().set_budget(mib * 1024 * 1024);
 }
 
 renderer::DecodedTextureCache::Stats PVRTCDecodeCacheStats() {

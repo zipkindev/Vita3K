@@ -33,6 +33,7 @@ public:
         : budget(budget), max_entries(max_entries) {}
 
     bool eligible(size_t compressed, size_t decoded) const {
+        std::lock_guard lock(mutex);
         return max_entries && compressed <= budget && decoded <= budget - compressed;
     }
 
@@ -56,9 +57,9 @@ public:
     }
 
     void insert(const Key &key, std::vector<uint8_t> compressed, std::span<const uint8_t> decoded, uint32_t result) {
-        if (!eligible(compressed.capacity(), decoded.size()))
-            return;
         std::lock_guard lock(mutex);
+        if (!max_entries || compressed.capacity() > budget || decoded.size() > budget - compressed.capacity())
+            return;
         const auto [begin, end] = lookup.equal_range(key);
         for (auto it = begin; it != end; ++it) {
             if (it->second->compressed == compressed && it->second->decoded.size() == decoded.size())
@@ -98,6 +99,17 @@ public:
         counts.decode_ns += nanoseconds;
     }
 
+    void set_budget(size_t bytes) {
+        std::lock_guard lock(mutex);
+        if (budget == bytes)
+            return;
+        counts.evictions += lru.size();
+        lookup.clear();
+        lru.clear();
+        resident = 0;
+        budget = bytes;
+    }
+
     Stats stats() const {
         std::lock_guard lock(mutex);
         auto value = counts;
@@ -118,7 +130,8 @@ private:
             return static_cast<size_t>(key.hash ^ (uint64_t(key.width) << 32) ^ key.height ^ (uint64_t(key.format) << 48));
         }
     };
-    const size_t budget, max_entries;
+    size_t budget;
+    const size_t max_entries;
     mutable std::mutex mutex;
     std::list<Entry> lru;
     std::unordered_multimap<Key, std::list<Entry>::iterator, Hash> lookup;
