@@ -1,15 +1,39 @@
-# Vita3K-ZipZ
+# Vita3K-Go
 
-Performance experiments and optimized Windows diagnostics based on [Vita3K-Plus](https://github.com/nckstwrt/Vita3K-Plus), building on the original [Vita3K](https://github.com/Vita3K/Vita3K) emulator. This repository retains the original GitHub fork relationship; the diagnostic releases use the separately pinned Plus `all-enhancements` baseline with reviewed patches.
+Performance and diagnostic development focused on Windows on the **Lenovo Legion Go**. Other AMD handhelds, including Steam Deck and ROG Ally, are potential secondary targets; they are not validated by the Legion Go measurements. Memory budgets remain configurable. Platform compatibility and performance require device-specific testing.
 
-- [Diagnostic downloads and matching symbols](https://github.com/zipkindev/Vita3K-ZipZ/releases)
-- [Diagnostic usage and maintenance](https://github.com/zipkindev/Vita3K-ZipZ/blob/experiment/pvrtc-decoded-cache/docs/windows-diagnostics.md)
-- [Ubermall measurements and limitations](https://github.com/zipkindev/Vita3K-ZipZ/blob/experiment/pvrtc-decoded-cache/docs/ubermall-cache-20261023.md)
-- [Cache experiment draft PR](https://github.com/zipkindev/Vita3K-ZipZ/pull/1)
+## Attribution and origins
 
-The default branch currently retains mainline source plus build infrastructure. The active Plus-derived emulator changes live on `experiment/pvrtc-decoded-cache`; no mainline/nx merge is implied. Cache trials remain opt-in. Runtime and matching PDB downloads are separate. Heavy Windows builds use the dedicated self-hosted Windows runner; local native builds support diagnostic iteration.
+This project builds on the work of several communities:
 
-The original upstream introduction follows for attribution and general emulator information.
+- [Vita3K](https://github.com/Vita3K/Vita3K): the original emulator and primary upstream reference. This repository remains in its GitHub fork network.
+- [Vita3K-Plus](https://github.com/nckstwrt/Vita3K-Plus/tree/all-enhancements): the source baseline for this experimental line, including its scheduling, compatibility and frontend enhancements.
+- [Vita3K-nx](https://github.com/NaGaa95/Vita3K-nx): selected applicable shared-code correctness fixes. Switch-specific changes are not assumed useful on Windows.
+- Our additions: measured PVRTC decoded-texture caching, bounded parallel decoding, learned and automatic per-game texture preparation, lightweight telemetry, optimized symbol-enabled diagnostic packages and handheld testing.
+
+We incorporate selected, reviewed changes rather than automatically merging entire fork histories. [Curated integration provenance](docs/curated-candidate-1.md) records the initial mainline NGS handle-validation import (`e9225f90f04cdf0d6d7c6fe617c0c70a5a0af84a`) and nx pipeline-cache read validation (`1881b9adb608bbb7e532c2d66e3a12aa0e97ae9e`). Original authorship, copyright and license notices are preserved. We claim our additions, not authorship of the upstream emulator or fork work.
+
+[Diagnostic downloads](https://github.com/zipkindev/Vita3K-Go/releases) · [Usage and exact-symbol provenance](docs/windows-diagnostics.md) · [Automatic textures](docs/automatic-textures.md)
+
+The candidate branch includes the Plus-derived patch line and selected imports. The default branch carries build infrastructure on its own source history; release manifests identify the exact candidate commit, support patches, submodules, recipe, toolchain and EXE/PDB hashes. This is experimental software, not an official upstream release. Historical measurements apply only to their documented build/device/settings.
+
+## Automatic texture preparation
+
+This experimental feature reduces repeated CPU decoding work for eligible PVRTC I/II textures. Enable **Automatic Texture Preparation** in Graphics and select a nonzero **Decoded Texture Cache** budget globally or per game. The first session learns as you play; close the game normally to save its bounded profile. Later launches prepare compatible learned textures before guest execution and continue learning during normal use. No manual profile selection or race-specific setup is required.
+
+RAM and disk limits are separate: decoded textures stay within the selected RAM budget (up to512 MiB), while saved profiles contain compressed inputs, limited to64 MiB per game and1 GiB total. Least recently used saved profiles are pruned as space is needed. **Clear This Game's Texture Profile** and **Clear All Saved Texture Profiles** are available when no game is active; saves, game files and shader caches are preserved. Missing, changed or incompatible content falls back to ordinary decoding. See [behavior, limits and diagnostics](docs/automatic-textures.md).
+
+On a Legion Go, the earlier `.5` prototype prepared3,151 learned WipEout textures in2.23 seconds using about314 MiB of the512 MiB RAM budget. In one owner-confirmed fresh-process Chenghou Rapier pair, recorded intervals over50 ms were6 with Off versus 0 with Preload, maximum interval161.75 ms versus 36.62 ms, and demand decodes1,776 versus 2 over about89 seconds of complete telemetry. Both90-second races retained music/controls and the same EXE/PDB/settings. This was one sequential pair with differing effects/traffic; recording followed driving confirmation and can omit initial race seconds. It supports further testing, not universal speedup or input-latency claims. The newer automatic lifecycle, UI and storage controls require their own gameplay validation.
+
+Preparation is CPU-side, using at most one decoder helper plus the caller, with no background preparation left competing during gameplay. It adds startup work, uses bounded scratch memory beyond the RAM payload budget, and does not preload GPU resources or warm CPU JIT code. It cannot predict truly unseen textures or fix unrelated GPU/CPU bottlenecks. Crashes do not save a new learned profile; normal exit does. Game-derived profile data stays local and must not be uploaded with bug reports.
+
+## Releases and diagnostics
+
+Each approved build produces a **runtime download** and a **matching diagnostics/symbols download** from the same optimized executable. Symbols are stored in a separate PDB; the runtime package excludes them. This is optimized RelWithDebInfo with full symbols, not an unoptimized Debug build. Use only the PDB whose GUID/age and EXE hash match your build. Per-release notes identify features, fixes, measured improvements, validation, limitations and exact provenance. Diagnostic candidates remain experimental until gameplay validation; see [release notes](docs/releases/v1.3.3-win11merge.6.md).
+
+Original upstream documentation follows.
+
+# Vita3K
 
 [![C/C++ CI](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml/badge.svg)](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml)
 [![Release](https://img.shields.io/github/v/release/Vita3K/Vita3K-builds?include_prereleases)](https://github.com/Vita3K/Vita3K/releases)
@@ -61,7 +85,6 @@ You can download the latest builds from [here](https://github.com/Vita3K/Vita3K/
     * [vita3k-git](https://aur.archlinux.org/packages/vita3k-git)<sup><small>AUR</small></sup>
   * Requirements:
     * xdg-desktop-portal
-    * OpenGL or Vulkan runtime libraries
 * Android
     * [Adreno drivers](https://github.com/K11MCH1/AdrenoToolsDrivers/releases/)
 * Others
