@@ -56,6 +56,8 @@ if($LASTEXITCODE){throw 'Public source clone failed'}
 if($LASTEXITCODE){throw 'Requested source commit unavailable'}
 & git -C $source submodule update --init --recursive --jobs $Parallel
 if($LASTEXITCODE){throw 'Pinned submodule checkout failed'}
+& $python "$PSScriptRoot\ApplyDependencyPatches.py" --source $source
+if($LASTEXITCODE){throw 'Source-pinned dependency patch failed'}
 if((Get-Content "$source\vita3k\ngs\src\modules\atrac9.cpp" -Raw) -notmatch 'superframe_bytes_left'){throw 'Selected source lacks the corrected bounded NGS audio caller'}
 foreach($name in @('diagnostic-identity.patch','diagnostic-build-support.patch','atrac9-input-span.patch')){
  & git -C $source apply "$PSScriptRoot\patches\$name"
@@ -88,6 +90,10 @@ $env:PATH="$build\bin\RelWithDebInfo;$env:PATH"
 if($LASTEXITCODE){throw 'Tests failed'}
 & git diff --binary | Set-Content "$evidence\source.patch"
 & git -C external/LibAtrac9 diff --binary | Set-Content "$evidence\libatrac9.patch"
+& git -C external/dynarmic diff --binary | Set-Content "$evidence\dynarmic.patch"
+if(Test-Path "$source/tools/dependency-patches/manifest.json"){
+ Copy-Item "$source/tools/dependency-patches/manifest.json" "$evidence/dependency-patches.json"
+}
 & git submodule status --recursive | Set-Content "$evidence\submodules.txt"
 & cl.exe /Bv 2>&1 | Out-File "$evidence\compiler.txt"
 & $python "$PSScriptRoot\Collect.py" --source $source --build $build --evidence $evidence --label $BuildLabel
