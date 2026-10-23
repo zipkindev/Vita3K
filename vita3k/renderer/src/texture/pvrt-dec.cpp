@@ -40,6 +40,7 @@
 #include <cstring>
 #include <vector>
 
+#include <renderer/parallel_decode_worker.h>
 #include <renderer/pvrt-dec.h>
 #include <renderer/pvrtc-cache.h>
 #include <xxhash.h>
@@ -825,6 +826,126 @@ uint32_t PVRTDecompressPVRTCUncached(const void *pCompressedData, uint32_t Do2bi
     return retval;
 }
 
+int PVRTCDecodeParallelism() {
+    // Diagnostic A/B control, read once per process. 1 disables; default is 2.
+    static const int threads = [] {
+        const char *text = std::getenv("VITA3K_DIAG_PVRTC_THREADS");
+        return text && std::strcmp(text, "1") == 0 ? 1 : 2;
+    }();
+    return threads;
+}
+
+static int pvrtcDecompressParallel(uint8_t *pCompressedData, Pixel32 *pDecompressedData, uint32_t ui32Width, uint32_t ui32Height, uint8_t ui8Bpp, uint32_t uiII) {
+    uint32_t ui32WordWidth = 4;
+    uint32_t ui32WordHeight = 4;
+    if (ui8Bpp == 2) {
+        ui32WordWidth = 8;
+    }
+
+    uint32_t *pWordMembers = reinterpret_cast<uint32_t *>(pCompressedData);
+    Pixel32 *pOutData = pDecompressedData;
+
+    // Calculate number of words
+    int i32NumXWords = static_cast<int>(ui32Width / ui32WordWidth);
+    int i32NumYWords = static_cast<int>(ui32Height / ui32WordHeight);
+
+    auto rows = [&](int begin, int end) {
+        // Each task owns its scratch and writes disjoint output quadrants.
+        // Structs used for decompression
+        PVRTCWordIndices indices;
+        std::vector<Pixel32> pPixels(ui32WordWidth * ui32WordHeight);
+
+        // For each row of words
+        for (int wordY = begin; wordY < end; wordY++) {
+            // for each column of words
+            for (int wordX = -1; wordX < i32NumXWords - 1; wordX++) {
+                indices.P[0] = wrapWordIndex(i32NumXWords, wordX);
+                indices.P[1] = wrapWordIndex(i32NumYWords, wordY);
+                indices.Q[0] = wrapWordIndex(i32NumXWords, wordX + 1);
+                indices.Q[1] = wrapWordIndex(i32NumYWords, wordY);
+                indices.R[0] = wrapWordIndex(i32NumXWords, wordX);
+                indices.R[1] = wrapWordIndex(i32NumYWords, wordY + 1);
+                indices.S[0] = wrapWordIndex(i32NumXWords, wordX + 1);
+                indices.S[1] = wrapWordIndex(i32NumYWords, wordY + 1);
+
+                // Work out the offsets into the twiddle structs, multiply by two as there are two members per word.
+                uint32_t WordOffsets[4] = {
+                    TwiddleUV(i32NumXWords, i32NumYWords, indices.P[0], indices.P[1]) * 2,
+                    TwiddleUV(i32NumXWords, i32NumYWords, indices.Q[0], indices.Q[1]) * 2,
+                    TwiddleUV(i32NumXWords, i32NumYWords, indices.R[0], indices.R[1]) * 2,
+                    TwiddleUV(i32NumXWords, i32NumYWords, indices.S[0], indices.S[1]) * 2,
+                };
+
+                // Access individual elements to fill out PVRTCWord
+                PVRTCWord P, Q, R, S;
+                P.u32ColorData = static_cast<uint32_t>(pWordMembers[WordOffsets[0] + 1]);
+                P.u32ModulationData = static_cast<uint32_t>(pWordMembers[WordOffsets[0]]);
+                Q.u32ColorData = static_cast<uint32_t>(pWordMembers[WordOffsets[1] + 1]);
+                Q.u32ModulationData = static_cast<uint32_t>(pWordMembers[WordOffsets[1]]);
+                R.u32ColorData = static_cast<uint32_t>(pWordMembers[WordOffsets[2] + 1]);
+                R.u32ModulationData = static_cast<uint32_t>(pWordMembers[WordOffsets[2]]);
+                S.u32ColorData = static_cast<uint32_t>(pWordMembers[WordOffsets[3] + 1]);
+                S.u32ModulationData = static_cast<uint32_t>(pWordMembers[WordOffsets[3]]);
+
+                // assemble 4 words into struct to get decompressed pixels from
+                pvrtcGetDecompressedPixels(P, Q, R, S, pPixels.data(), ui8Bpp, uiII);
+                mapDecompressedData(pOutData, ui32Width, pPixels.data(), indices, ui8Bpp);
+
+            } // for each word
+        } // for each row of words
+    };
+    // Small images stay serial. No renderer/guest state is used by the helper.
+    if (uint64_t(ui32Width) * ui32Height >= 65536 && i32NumYWords >= 2) {
+        try {
+            static renderer::ParallelDecodeWorker worker;
+            const int split = i32NumYWords / 2 - 1;
+            if (worker.try_run([&] { rows(-1, split); }, [&] { rows(split, i32NumYWords - 1); }))
+                return ui32Width * ui32Height / static_cast<uint32_t>(ui32WordWidth / 2);
+        } catch (...) {
+            // All borrowed work has completed before an exception escapes.
+            // Thread creation/allocation failure retries the unchanged decoder.
+            return pvrtcDecompress(pCompressedData, pDecompressedData, ui32Width, ui32Height, ui8Bpp, uiII);
+        }
+    }
+    // Busy helper: do not queue or wait behind an unrelated decode.
+    return pvrtcDecompress(pCompressedData, pDecompressedData, ui32Width, ui32Height, ui8Bpp, uiII);
+}
+
+uint32_t PVRTDecompressPVRTCParallel(const void *pCompressedData, uint32_t Do2bitMode, uint32_t XDim, uint32_t YDim, uint32_t DoPvrtType, uint8_t *pResultImage) {
+    if (PVRTCDecodeParallelism() == 1)
+        return PVRTDecompressPVRTCUncached(pCompressedData, Do2bitMode, XDim, YDim, DoPvrtType, pResultImage);
+    // Cast the output buffer to a Pixel32 pointer.
+    Pixel32 *pDecompressedData = (Pixel32 *)pResultImage;
+    std::vector<Pixel32> pTempDataVector;
+
+    // Check the X and Y values are at least the minimum size.
+    uint32_t XTrueDim = std::max(XDim, ((Do2bitMode == 1u) ? 16u : 8u));
+    uint32_t YTrueDim = std::max(YDim, 8u);
+
+    // If the dimensions aren't correct, we need to create a new buffer instead of just using the provided one, as the buffer will overrun otherwise.
+    if ((XTrueDim != XDim) || (YTrueDim != YDim)) {
+        pTempDataVector.resize(XTrueDim * YTrueDim);
+        pDecompressedData = pTempDataVector.data();
+    }
+
+    // Decompress the surface.
+    int retval = pvrtcDecompressParallel((uint8_t *)pCompressedData, pDecompressedData, XTrueDim, YTrueDim, (Do2bitMode == 1 ? 2 : 4), DoPvrtType);
+
+    // If the dimensions were too small, then copy the new buffer back into the output buffer.
+    if ((XTrueDim != XDim) || (YTrueDim != YDim)) {
+        Pixel32 *pOriginalPtr = (Pixel32 *)pResultImage;
+
+        // Loop through all the required pixels.
+        for (uint32_t x = 0; x < XDim; ++x) {
+            for (uint32_t y = 0; y < YDim; ++y) {
+                pOriginalPtr[x + y * XDim] = pTempDataVector[x + y * XTrueDim];
+            }
+        }
+    }
+
+    return retval;
+}
+
 static renderer::DecodedTextureCache &decoded_cache() {
     // The environment also supports standalone decoder tests before app setup.
     static renderer::DecodedTextureCache cache([]() -> size_t {
@@ -864,7 +985,7 @@ uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width,
     if (!valid_layout || input_bytes > budget || uint64_t(width) * height > (budget - input_bytes) / 4) {
         cache.bypass();
         const auto start = std::chrono::steady_clock::now();
-        const auto result = PVRTDecompressPVRTCUncached(data, two_bit, width, height, type, output);
+        const auto result = PVRTDecompressPVRTCParallel(data, two_bit, width, height, type, output);
         cache.decoded(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
         return result;
     }
@@ -882,7 +1003,7 @@ uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width,
     if (cache.copy(key, compressed, pixels, result))
         return result;
     const auto start = std::chrono::steady_clock::now();
-    result = PVRTDecompressPVRTCUncached(compressed.data(), two_bit, width, height, type, output);
+    result = PVRTDecompressPVRTCParallel(compressed.data(), two_bit, width, height, type, output);
     cache.decoded(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
     cache.insert(key, std::move(compressed), pixels, result);
     return result;

@@ -52,6 +52,10 @@ target_link_libraries(renderer PUBLIC display mem stb shader glutil threads conf
 target_link_libraries(renderer PRIVATE dialog ddspp SDL3::SDL3 stb ffmpeg xxHash::xxhash concurrentqueue)
 
 find_package(Threads REQUIRED)
+add_executable(parallel-decode-worker-tests tests/parallel_decode_worker.cpp)
+target_include_directories(parallel-decode-worker-tests PRIVATE include)
+target_link_libraries(parallel-decode-worker-tests PRIVATE Threads::Threads)
+add_test(NAME parallel-decode-worker COMMAND parallel-decode-worker-tests)
 add_executable(decoded-texture-cache-tests tests/decoded_texture_cache.cpp)
 target_include_directories(decoded-texture-cache-tests PRIVATE include)
 target_link_libraries(decoded-texture-cache-tests PRIVATE Threads::Threads)
@@ -63,6 +67,7 @@ target_link_libraries(pvrtc-cache-tests PRIVATE xxHash::xxhash Threads::Threads)
 add_test(NAME pvrtc-cache COMMAND pvrtc-cache-tests)
 add_test(NAME pvrtc-cache-disabled COMMAND pvrtc-cache-tests disabled)
 add_test(NAME pvrtc-cache-configured COMMAND pvrtc-cache-tests configured)
+add_test(NAME pvrtc-cache-serial COMMAND pvrtc-cache-tests serial)
 
 if(ANDROID)
 	target_link_libraries(renderer PRIVATE android adrenotools)
