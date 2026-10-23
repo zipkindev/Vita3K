@@ -509,6 +509,7 @@ void shutdown_app_runtime(EmuEnvState &state) {
 
     state.renderer->preclose_action();
     renderer::stop_render_thread(*state.renderer);
+    LOG_INFO("[PVRTC-PRELOAD] {}", pvr::PVRTCFinishTextureProfile());
     state.renderer->wait_gpu_idle();
     gxm::destroy_all_contexts(state, true);
     gxm::destroy_all_render_targets(state, true);

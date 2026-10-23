@@ -41,6 +41,7 @@
 #include <vector>
 
 #include <renderer/decoded_texture_telemetry.h>
+#include <renderer/learned_texture_profile.h>
 #include <renderer/parallel_decode_worker.h>
 #include <renderer/pvrt-dec.h>
 #include <renderer/pvrtc-cache.h>
@@ -977,6 +978,39 @@ renderer::DecodedTextureCache::Stats PVRTCDecodeCacheStats() {
     return decoded_cache().stats();
 }
 
+static renderer::LearnedTextureProfile &texture_profile() {
+    static renderer::LearnedTextureProfile profile(decoded_cache());
+    return profile;
+}
+
+std::string PVRTCStartTextureProfile(const std::string &root, const std::string &title, const std::string &identity) {
+    using Profile = renderer::LearnedTextureProfile;
+    const char *text = std::getenv("VITA3K_DIAG_PVRTC_PROFILE_MODE");
+    const std::string mode = text ? text : "off";
+    const char *output = std::getenv("VITA3K_DIAG_PVRTC_PRELOAD_REPORT");
+    const auto path = [](const std::string &s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); };
+    try {
+        const auto report = texture_profile().begin(path(root), title, identity,
+            mode == "learn" ? Profile::Mode::Learn : mode == "preload" ? Profile::Mode::Preload
+                                                                       : Profile::Mode::Off,
+            output ? path(output) : std::filesystem::path{}, PVRTDecompressPVRTCParallel);
+        return mode + ": " + report.status + ", prepared=" + std::to_string(report.prepared_entries) + ", ns=" + std::to_string(report.prepare_ns);
+    } catch (...) {
+        texture_profile().fail();
+        return "profile error; normal demand decoding continues";
+    }
+}
+
+std::string PVRTCFinishTextureProfile() {
+    try {
+        const auto report = texture_profile().finish();
+        return report.status + ", saved=" + std::to_string(report.saved_entries);
+    } catch (...) {
+        texture_profile().fail();
+        return "profile save error; prior completed profile preserved";
+    }
+}
+
 uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width, uint32_t height, uint32_t type, uint8_t *output) {
     auto &cache = decoded_cache();
     const uint64_t true_width = std::max(width, two_bit == 1 ? 16u : 8u);
@@ -1008,8 +1042,9 @@ uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width,
         return result;
     const auto start = std::chrono::steady_clock::now();
     result = PVRTDecompressPVRTCParallel(compressed.data(), two_bit, width, height, type, output);
-    cache.decoded(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count(), width, height);
-    cache.insert(key, std::move(compressed), pixels, result);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+    cache.decoded(elapsed, width, height);
+    cache.insert(key, std::move(compressed), pixels, result, elapsed);
     return result;
 }
 

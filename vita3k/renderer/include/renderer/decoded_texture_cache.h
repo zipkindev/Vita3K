@@ -55,6 +55,7 @@ public:
             std::memcpy(output.data(), entry->decoded.data(), output.size());
             result = entry->result;
             lru.splice(lru.begin(), lru, entry);
+            ++entry->uses;
             ++counts.hits;
             return true;
         }
@@ -62,19 +63,21 @@ public:
         return false;
     }
 
-    void insert(const Key &key, std::vector<uint8_t> compressed, std::span<const uint8_t> decoded, uint32_t result) {
+    bool insert(const Key &key, std::vector<uint8_t> compressed, std::span<const uint8_t> decoded, uint32_t result, uint64_t decode_ns = 0, bool allow_eviction = true) {
         std::lock_guard lock(mutex);
         if (!max_entries || compressed.capacity() > budget || decoded.size() > budget - compressed.capacity())
-            return;
+            return false;
         const auto [begin, end] = lookup.equal_range(key);
         for (auto it = begin; it != end; ++it) {
             if (it->second->compressed == compressed && it->second->decoded.size() == decoded.size())
-                return; // Another decoder inserted this immutable content concurrently.
+                return false; // Another decoder inserted this immutable content concurrently.
         }
         std::vector<uint8_t> pixels(decoded.begin(), decoded.end());
         const size_t cost = compressed.capacity() + pixels.capacity();
         if (cost > budget)
-            return;
+            return false;
+        if (!allow_eviction && (resident > budget - cost || lru.size() >= max_entries))
+            return false;
         while (!lru.empty() && (resident > budget - cost || lru.size() >= max_entries)) {
             const bool bytes_full = resident > budget - cost;
             const bool entries_full = lru.size() >= max_entries;
@@ -96,9 +99,50 @@ public:
             lru.erase(victim);
             ++counts.evictions;
         }
-        lru.push_front({ key, std::move(compressed), std::move(pixels), result });
+        lru.push_front({ key, std::move(compressed), std::move(pixels), result, decode_ns, 0 });
         lookup.emplace(key, lru.begin());
         resident += cost;
+        return true;
+    }
+
+    struct ProfileInput {
+        Key key;
+        std::vector<uint8_t> compressed;
+        uint64_t decode_ns, uses;
+    };
+
+    // Session stop only: copies compressed bytes, never decoded pixels. The
+    // renderer must be joined before taking a learning snapshot or clearing it.
+    std::vector<ProfileInput> profile_snapshot(size_t file_budget, size_t resident_budget, size_t scratch_budget) const {
+        std::lock_guard lock(mutex);
+        std::vector<const Entry *> ranked;
+        for (const auto &entry : lru)
+            ranked.push_back(&entry);
+        std::stable_sort(ranked.begin(), ranked.end(), [](const Entry *a, const Entry *b) {
+            const auto score = [](const Entry *e) { return std::min<uint64_t>(e->decode_ns, 1000000000000ull) * (1 + std::min<uint64_t>(e->uses, 16)); };
+            return score(a) > score(b);
+        });
+        std::vector<ProfileInput> result;
+        size_t bytes = 0, pixels = 0;
+        for (const auto *entry : ranked) {
+            const size_t cost = entry->compressed.size() + entry->decoded.size();
+            const size_t packed = entry->compressed.size() + 40;
+            if (cost > scratch_budget || packed > file_budget - bytes || cost > resident_budget - pixels)
+                continue;
+            result.push_back({ entry->key, entry->compressed, entry->decode_ns, entry->uses });
+            bytes += packed;
+            pixels += cost;
+        }
+        return result;
+    }
+
+    void clear() {
+        std::lock_guard lock(mutex);
+        counts.evictions += lru.size();
+        counts.clear_evictions += lru.size();
+        lookup.clear();
+        lru.clear();
+        resident = 0;
     }
 
     void bypass() {
@@ -161,6 +205,7 @@ private:
         Key key;
         std::vector<uint8_t> compressed, decoded;
         uint32_t result;
+        uint64_t decode_ns, uses;
     };
     struct Hash {
         size_t operator()(const Key &key) const {

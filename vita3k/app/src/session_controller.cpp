@@ -28,7 +28,10 @@
 #include <kernel/state.h>
 #include <motion/state.h>
 #include <overlay/display_manager.h>
+#include <packages/sfo.h>
 #include <renderer/functions.h>
+#include <renderer/pvrtc-cache.h>
+#include <util/fs.h>
 #include <util/log.h>
 
 namespace app {
@@ -121,6 +124,8 @@ bool AppSessionController::load_and_run() {
 
     emuenv.renderer->set_app(emuenv.io.title_id.c_str(), emuenv.self_name.c_str());
     prepare_game_launch_overlay(emuenv);
+
+    LOG_INFO("[PVRTC-PRELOAD] {}", pvr::PVRTCStartTextureProfile(fs_utils::path_to_utf8(emuenv.cache_path), emuenv.io.title_id, emuenv.app_info.app_version + "|" + emuenv.self_name));
 
     if (run_app(emuenv, main_module_id, active_launch_request) != Success)
         return false;

@@ -102,3 +102,12 @@ add_executable(decoded-texture-telemetry-tests tests/decoded_texture_telemetry.c
 target_include_directories(decoded-texture-telemetry-tests PRIVATE include)
 target_link_libraries(decoded-texture-telemetry-tests PRIVATE Threads::Threads)
 add_test(NAME decoded-texture-telemetry COMMAND decoded-texture-telemetry-tests)
+
+add_executable(learned-texture-profile-tests tests/learned_texture_profile.cpp src/texture/pvrt-dec.cpp)
+target_include_directories(learned-texture-profile-tests PRIVATE include)
+target_link_libraries(learned-texture-profile-tests PRIVATE xxHash::xxhash Threads::Threads)
+add_test(NAME learned-texture-profile COMMAND learned-texture-profile-tests)
+add_executable(texture-profile-lifecycle-tests tests/texture_profile_lifecycle.cpp src/texture/pvrt-dec.cpp)
+target_include_directories(texture-profile-lifecycle-tests PRIVATE include)
+target_link_libraries(texture-profile-lifecycle-tests PRIVATE xxHash::xxhash Threads::Threads)
+add_test(NAME texture-profile-lifecycle COMMAND texture-profile-lifecycle-tests)
