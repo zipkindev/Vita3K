@@ -1,3 +1,11 @@
+# Vita3K-ZipZ
+
+Plus-derived performance experiments and optimized Windows diagnostics. Diagnostic source is pinned from [Vita3K-Plus all-enhancements](https://github.com/nckstwrt/Vita3K-Plus/tree/all-enhancements); original emulator credit belongs to [Vita3K](https://github.com/Vita3K/Vita3K). The GitHub fork parent remains original Vita3K.
+
+[Diagnostic downloads](https://github.com/zipkindev/Vita3K-ZipZ/releases) · [Usage](docs/windows-diagnostics.md) · [Ubermall measurements](docs/ubermall-cache-20261023.md)
+
+This branch contains the experimental opt-in decoded PVRTC cache and corrected diagnostic audio handling. The default branch retains mainline source plus Windows build infrastructure; neither implies a completed mainline/nx integration. Releases document exact source support patches and EXE/PDB hashes. Original Plus documentation follows.
+
 # Vita3K
 
 [![C/C++ CI](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml/badge.svg)](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml)
