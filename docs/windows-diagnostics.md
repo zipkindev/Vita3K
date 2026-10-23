@@ -8,6 +8,12 @@ The runtime ZIP contains the executable, runtime dependencies and version/proven
 
 Extract into a separate directory and configure your own installation. Close an existing emulator normally before copying a consistent portable save/config snapshot. Preserve your original installation and frontend mapping. This experimental build disables upstream automatic-update eligibility so a different binary cannot silently replace the measured executable.
 
+## UI cache candidate
+
+The UI candidate built from `6c068af9d54340a5437b2250114b157f84483edd` exposes **Settings → Graphics → Textures → Decoded Texture Cache (Experimental)**, with Off/128/256/512 MiB choices. Global settings default to Off; game-specific settings can override them. A change during gameplay is saved for the next game restart. Older profiles without the field inherit the global value.
+
+The explicit `VITA3K_DIAG_PVRTC_CACHE_MB` diagnostic environment variable takes precedence over saved UI settings. Remove it from the launch environment to test the UI control. The dedicated UI-trial launcher does this for its child process. Source/configured-cache/native tests passed; on-device UI/gameplay validation is pending. The earlier `.2` release uses the environment setting described below.
+
 ## Decoded PVRTC cache trial
 
 The cache is disabled by default. First verify audio, graphics and controls with caching disabled. In a PowerShell terminal opened in the diagnostic runtime directory:
