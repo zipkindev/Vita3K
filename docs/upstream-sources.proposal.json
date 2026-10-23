@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-23",
+  "proposalOnly": true,
+  "sources": {
+    "mainline": {
+      "repository": "https://github.com/Vita3K/Vita3K",
+      "branch": "master",
+      "observedCommit": "5844e21fb6d7259a31ba1f13b98ed1a648170052"
+    },
+    "plus": {
+      "repository": "https://github.com/nckstwrt/Vita3K-Plus",
+      "branch": "all-enhancements",
+      "observedCommit": "a86b5f93db43e4c4640ad1527e2a4695aad0f35b"
+    },
+    "nx": {
+      "repository": "https://github.com/NaGaa95/Vita3K-nx",
+      "branch": "master",
+      "observedCommit": "db030b5ab121b37d3e1c12fd78562b60c5ef86ff"
+    }
+  },
+  "testedReference": {
+    "release": "v1.3.3-win11diag.2",
+    "source": "82e12040cdad72b8509ff19d0aa90f98d73a2787",
+    "requiresRecordedSupportPatches": true
+  },
+  "policy": {
+    "autoPromote": false,
+    "autoDeployToDevice": false,
+    "windowsRunnerLabels": [
+      "self-hosted",
+      "Windows",
+      "X64",
+      "vita3k-windows",
+      "server2022"
+    ],
+    "candidateWindowsParallelism": 6
+  }
+}
