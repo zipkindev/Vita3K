@@ -130,11 +130,11 @@ int main() {
     const auto &t = tests.back();
     cache.insert(t.key, t.input, t.expected, t.result, 999);
     assert(profile.finish().saved_entries == 1 && read(file) != valid);
-    Cache small(1024, 1);
+    Cache bounded_cache(1024, 1);
     const auto &a = tests.front();
-    assert(small.insert(a.key, a.input, a.expected, a.result, 1, false));
-    const auto before = small.stats();
-    assert(!small.insert(t.key, t.input, t.expected, t.result, 1, false));
-    assert(small.stats().entries == before.entries && small.stats().evictions == before.evictions);
+    assert(bounded_cache.insert(a.key, a.input, a.expected, a.result, 1, false));
+    const auto before = bounded_cache.stats();
+    assert(!bounded_cache.insert(t.key, t.input, t.expected, t.result, 1, false));
+    assert(bounded_cache.stats().entries == before.entries && bounded_cache.stats().evictions == before.evictions);
     std::cout << tests.size() << " profile reloads byte-identical; bounds, corruption, lifecycle passed\n";
 }
