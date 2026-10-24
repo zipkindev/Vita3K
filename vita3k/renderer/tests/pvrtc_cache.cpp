@@ -6,8 +6,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <renderer/pvrt-dec.h>
 #include <renderer/pvrtc-cache.h>
 #include <string_view>
@@ -21,7 +23,13 @@ int main(int argc, char **argv) {
 #endif
     const bool configured = argc > 1 && std::string_view(argv[1]) == "configured";
     const bool serial = argc > 1 && std::string_view(argv[1]) == "serial";
-    const bool disabled = argc > 1 && !configured && !serial;
+    const bool reuse = argc > 1 && std::string_view(argv[1]) == "reuse";
+    const bool disabled = argc > 1 && !configured && !serial && !reuse;
+    const auto report = std::filesystem::temp_directory_path() / ("vita3k-reuse-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".csv");
+    if (reuse) {
+        pvr::PVRTCConfigureDecodeTelemetry(report.string().c_str());
+        assert(pvr::PVRTCDecodeCacheStats().reuse.enabled);
+    }
 #ifdef _WIN32
     _putenv_s("VITA3K_DIAG_PVRTC_CACHE_MB", disabled ? "0" : "1");
 #else
@@ -107,5 +115,23 @@ int main(int argc, char **argv) {
     else
         assert(stats.hits > 0 && stats.misses > 0 && stats.evictions > 0 && stats.bypasses > 0);
     assert(stats.decodes == stats.requests - stats.hits);
+    if (reuse) {
+        uint64_t classified = 0, classified_ns = 0;
+        for (size_t i = 0; i < 4; ++i) {
+            classified += stats.reuse.decodes[i];
+            classified_ns += stats.reuse.decode_ns[i];
+            assert(stats.reuse.decodes[i] == stats.reuse.misses[i]);
+        }
+        assert(classified == stats.misses);
+        assert(classified + stats.reuse.untracked_decodes == stats.decodes);
+        assert(stats.reuse.untracked_decodes == stats.bypasses);
+        assert(classified_ns <= stats.decode_ns && classified_ns > 0);
+        assert(stats.reuse.history_replacements == 0);
+        assert(stats.reuse.misses[0] > 0 && stats.reuse.demand_hits == stats.hits);
+        pvr::PVRTCConfigureDecodeTelemetry(nullptr);
+        assert(!pvr::PVRTCDecodeCacheStats().reuse.enabled);
+        assert(std::filesystem::file_size(report) > 0);
+        std::filesystem::remove(report);
+    }
     printf("%u byte-identical decode comparisons; requests=%llu hits=%llu misses=%llu evictions=%llu resident=%zu budget=%zu\n", cases, (unsigned long long)stats.requests, (unsigned long long)stats.hits, (unsigned long long)stats.misses, (unsigned long long)stats.evictions, stats.resident_bytes, stats.budget_bytes);
 }

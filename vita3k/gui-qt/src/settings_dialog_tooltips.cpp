@@ -51,7 +51,7 @@ QString restart_required_setting_label(config::RestartRequiredSetting setting) {
     case config::RestartRequiredSetting::ParallelTextureDecode:
         return QObject::tr("Parallel Texture Decoding");
     case config::RestartRequiredSetting::DecodedTextureTelemetry:
-        return QObject::tr("Texture Cache Telemetry");
+        return QObject::tr("Texture Cache and Reuse Telemetry");
     case config::RestartRequiredSetting::AutomaticTexturePreparation:
         return QCoreApplication::translate("SettingsDialogTooltips", "Automatic Texture Preparation");
     case config::RestartRequiredSetting::DecodedTextureCache:

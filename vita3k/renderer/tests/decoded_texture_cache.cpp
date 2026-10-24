@@ -88,7 +88,61 @@ int main() {
     const auto reset = both_limited.telemetry_stats();
     assert(reset.interval_max_decode_ns == 0 && reset.interval_max_width == 0);
     assert(reset.decode_ns == peak.decode_ns && reset.max_decode_ns == peak.max_decode_ns);
+    // Reuse diagnostics must distinguish capacity removal from explicit clear,
+    // preserve actual decoded pixels, and carry miss classification to decode.
+    Cache measured(8, 1);
+    Cache::Observation observation;
+    assert(!measured.stats().reuse.enabled);
+    measured.acquire_reuse_tracking();
+    measured.acquire_reuse_tracking(); // Two writers share one history epoch.
+    assert(!measured.copy(a, input, output, result, &observation));
+    assert(observation.classification == Cache::MissClass::FirstObserved);
+    measured.decoded(100, 8, 8, observation);
+    assert(measured.insert(a, input, pixels, 32));
+    assert(measured.copy(a, input, output, result, &observation));
+    assert(observation.classification == Cache::MissClass::Untracked);
+    assert(result == 32 && std::equal(output.begin(), output.end(), pixels.begin()));
+    assert(measured.insert(b, input, pixels, 32));
+    assert(!measured.copy(a, input, output, result, &observation));
+    assert(observation.classification == Cache::MissClass::CapacityEvicted);
+    measured.decoded(200, 8, 8, observation);
+    // A second outstanding miss is seen but cannot be attributed to a second eviction.
+    assert(!measured.copy(a, input, output, result, &observation));
+    assert(observation.classification == Cache::MissClass::SeenOther);
+    measured.decoded(300, 8, 8, observation);
+    assert(measured.insert(a, input, pixels, 32));
+    measured.clear();
+    assert(!measured.copy(a, input, output, result, &observation));
+    assert(observation.classification == Cache::MissClass::Cleared);
+    measured.decoded(400, 8, 8, observation);
+    assert(measured.insert(a, input, pixels, 32, 100, false));
+    assert(measured.copy(a, input, output, result));
+    measured.set_budget(16);
+    assert(!measured.copy(a, input, output, result, &observation));
+    assert(observation.classification == Cache::MissClass::Cleared);
+    measured.decoded(500, 8, 8, observation);
+    measured.decoded(600); // Bypassed decoding has no eligible identity.
+    auto reuse = measured.stats().reuse;
+    assert((reuse.misses == std::array<uint64_t, 4>{ 1, 1, 2, 1 }));
+    assert((reuse.decodes == std::array<uint64_t, 4>{ 1, 1, 2, 1 }));
+    assert((reuse.decode_ns == std::array<uint64_t, 4>{ 100, 200, 900, 300 }));
+    assert(reuse.preloaded_hits == 1 && reuse.demand_hits == 1 && reuse.untracked_decodes == 1);
+    assert(reuse.epochs == 1 && reuse.history_entries == 2 && reuse.history_capacity == 65536);
+    measured.release_reuse_tracking();
+    assert(measured.stats().reuse.enabled);
+    // Exercise bounded history replacement; forgotten identities become first
+    // observed again, not first-ever. Telemetry never changes hit validation.
+    for (uint64_t n = 100; n < 100100; ++n)
+        measured.copy({ n, 8, 8, 0 }, input, output, result, &observation);
+    reuse = measured.stats().reuse;
+    assert(reuse.history_entries <= reuse.history_capacity && reuse.history_replacements > 0);
+    measured.release_reuse_tracking();
+    assert(!measured.stats().reuse.enabled);
+    measured.acquire_reuse_tracking();
+    assert(measured.stats().reuse.epochs == 2 && measured.stats().reuse.history_entries == 0);
+    measured.release_reuse_tracking();
     Cache shared(4096, 16);
+    shared.acquire_reuse_tracking();
     std::vector<std::thread> workers;
     for (unsigned n = 0; n < 8; ++n)
         workers.emplace_back([&, n] {
@@ -105,4 +159,6 @@ int main() {
     for (auto &worker : workers)
         worker.join();
     assert(shared.stats().entries == 8 && shared.stats().resident_bytes <= 4096);
+    assert(shared.stats().reuse.history_entries == 8);
+    shared.release_reuse_tracking();
 }

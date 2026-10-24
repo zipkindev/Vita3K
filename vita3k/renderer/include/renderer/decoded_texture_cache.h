@@ -4,9 +4,11 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <unordered_map>
@@ -23,6 +25,22 @@ public:
         uint32_t width, height, format;
         bool operator==(const Key &) const = default;
     };
+    enum class MissClass : uint8_t { FirstObserved,
+        CapacityEvicted,
+        Cleared,
+        SeenOther,
+        Untracked };
+    struct Observation {
+        MissClass classification;
+        Observation(MissClass value = MissClass::Untracked)
+            : classification(value) {}
+    };
+    struct ReuseStats {
+        std::array<uint64_t, 4> misses{}, decodes{}, decode_ns{};
+        uint64_t history_replacements = 0, history_entries = 0, history_capacity = 0;
+        uint64_t epochs = 0, preloaded_hits = 0, demand_hits = 0, untracked_decodes = 0;
+        bool enabled = false;
+    };
     struct Stats {
         uint64_t requests = 0, hits = 0, misses = 0, bypasses = 0;
         uint64_t evictions = 0, decodes = 0, decode_ns = 0;
@@ -32,6 +50,7 @@ public:
         uint64_t max_decode_ns = 0, interval_max_decode_ns = 0;
         uint32_t interval_max_width = 0, interval_max_height = 0;
         size_t resident_bytes = 0, entries = 0, budget_bytes = 0;
+        ReuseStats reuse;
     };
 
     explicit DecodedTextureCache(size_t budget, size_t max_entries = 16384)
@@ -43,9 +62,11 @@ public:
         return max_entries && compressed <= budget && decoded <= budget - compressed;
     }
 
-    bool copy(const Key &key, std::span<const uint8_t> compressed, std::span<uint8_t> output, uint32_t &result) {
+    bool copy(const Key &key, std::span<const uint8_t> compressed, std::span<uint8_t> output, uint32_t &result, Observation *observation = nullptr) {
         std::lock_guard lock(mutex);
         ++counts.requests;
+        if (observation)
+            *observation = {};
         const auto [begin, end] = lookup.equal_range(key);
         for (auto it = begin; it != end; ++it) {
             auto entry = it->second;
@@ -57,9 +78,28 @@ public:
             lru.splice(lru.begin(), lru, entry);
             ++entry->uses;
             ++counts.hits;
+            if (reuse) {
+                auto &slot = reuse_slot(key, compressed.size(), output.size());
+                if (slot.state == ReuseState::Preloaded)
+                    ++counts.reuse.preloaded_hits;
+                else
+                    ++counts.reuse.demand_hits;
+                slot.state = slot.state == ReuseState::Preloaded ? ReuseState::Preloaded : ReuseState::Resident;
+            }
             return true;
         }
         ++counts.misses;
+        if (reuse) {
+            auto &slot = reuse_slot(key, compressed.size(), output.size());
+            const auto classification = slot.state == ReuseState::New ? MissClass::FirstObserved
+                : slot.state == ReuseState::CapacityEvicted           ? MissClass::CapacityEvicted
+                : slot.state == ReuseState::Cleared                   ? MissClass::Cleared
+                                                                      : MissClass::SeenOther;
+            ++counts.reuse.misses[static_cast<size_t>(classification)];
+            slot.state = ReuseState::Pending;
+            if (observation)
+                observation->classification = classification;
+        }
         return false;
     }
 
@@ -95,6 +135,8 @@ public:
                     break;
                 }
             }
+            if (reuse)
+                reuse_slot(victim->key, victim->compressed.size(), victim->decoded.size()).state = ReuseState::CapacityEvicted;
             resident -= victim->compressed.capacity() + victim->decoded.capacity();
             lru.erase(victim);
             ++counts.evictions;
@@ -102,6 +144,8 @@ public:
         lru.push_front({ key, std::move(compressed), std::move(pixels), result, decode_ns, 0 });
         lookup.emplace(key, lru.begin());
         resident += cost;
+        if (reuse)
+            reuse_slot(key, lru.front().compressed.size(), decoded.size()).state = allow_eviction ? ReuseState::Resident : ReuseState::Preloaded;
         return true;
     }
 
@@ -140,6 +184,9 @@ public:
         std::lock_guard lock(mutex);
         counts.evictions += lru.size();
         counts.clear_evictions += lru.size();
+        if (reuse)
+            for (const auto &entry : lru)
+                reuse_slot(entry.key, entry.compressed.size(), entry.decoded.size()).state = ReuseState::Cleared;
         lookup.clear();
         lru.clear();
         resident = 0;
@@ -151,9 +198,18 @@ public:
         ++counts.bypasses;
     }
 
-    void decoded(uint64_t nanoseconds, uint32_t width = 0, uint32_t height = 0) {
+    void decoded(uint64_t nanoseconds, uint32_t width = 0, uint32_t height = 0, Observation observation = {}) {
         std::lock_guard lock(mutex);
         ++counts.decodes;
+        if (reuse) {
+            const auto index = static_cast<size_t>(observation.classification);
+            if (index < counts.reuse.decodes.size()) {
+                ++counts.reuse.decodes[index];
+                counts.reuse.decode_ns[index] += nanoseconds;
+            } else {
+                ++counts.reuse.untracked_decodes;
+            }
+        }
         counts.decode_ns += nanoseconds;
         counts.decode_ge2ms += nanoseconds >= 2000000;
         counts.decode_ge10ms += nanoseconds >= 10000000;
@@ -172,10 +228,41 @@ public:
             return;
         counts.evictions += lru.size();
         counts.clear_evictions += lru.size();
+        if (reuse)
+            for (const auto &entry : lru)
+                reuse_slot(entry.key, entry.compressed.size(), entry.decoded.size()).state = ReuseState::Cleared;
         lookup.clear();
         lru.clear();
         resident = 0;
         budget = bytes;
+    }
+
+    // Enable only for optional telemetry. Fixed four-way history stores no
+    // texture bytes. Classification is fingerprint-based and has bounded recall.
+    void acquire_reuse_tracking() {
+        std::lock_guard lock(mutex);
+        if (reuse_users++ == 0) {
+            try {
+                reuse = std::make_unique<std::array<ReuseSlot, reuse_capacity>>();
+            } catch (...) {
+                --reuse_users;
+                throw;
+            }
+            counts.reuse.enabled = true;
+            counts.reuse.history_capacity = reuse_capacity;
+            counts.reuse.history_entries = 0;
+            ++counts.reuse.epochs;
+            for (const auto &entry : lru)
+                reuse_slot(entry.key, entry.compressed.size(), entry.decoded.size()).state = ReuseState::Resident;
+        }
+    }
+
+    void release_reuse_tracking() {
+        std::lock_guard lock(mutex);
+        if (reuse_users && --reuse_users == 0) {
+            reuse.reset();
+            counts.reuse.enabled = false;
+        }
     }
 
     Stats stats() const {
@@ -193,6 +280,51 @@ public:
     }
 
 private:
+    enum class ReuseState : uint8_t { Empty,
+        New,
+        Pending,
+        Resident,
+        Preloaded,
+        CapacityEvicted,
+        Cleared };
+    struct ReuseSlot {
+        Key key{};
+        size_t compressed = 0, decoded = 0;
+        uint64_t sequence = 0;
+        ReuseState state = ReuseState::Empty;
+    };
+    static_assert(sizeof(ReuseSlot) <= 64);
+    static constexpr size_t reuse_capacity = 65536;
+    static constexpr size_t reuse_ways = 4;
+
+    ReuseSlot &reuse_slot(const Key &key, size_t compressed, size_t decoded) {
+        // Mix all identity fields, retaining the original fingerprint for full
+        // slot comparison. A 64-bit collision can affect diagnostics only;
+        // actual cache hits still require byte-for-byte source equality.
+        uint64_t mixed = key.hash ^ (uint64_t(key.width) << 32) ^ key.height
+            ^ (uint64_t(key.format) << 48) ^ compressed ^ (uint64_t(decoded) << 17);
+        mixed ^= mixed >> 33;
+        mixed *= 0xff51afd7ed558ccdULL;
+        mixed ^= mixed >> 33;
+        const size_t base = (mixed % (reuse_capacity / reuse_ways)) * reuse_ways;
+        auto *oldest = &(*reuse)[base];
+        for (size_t i = base; i < base + reuse_ways; ++i) {
+            auto &slot = (*reuse)[i];
+            if (slot.state != ReuseState::Empty && slot.key == key && slot.compressed == compressed && slot.decoded == decoded) {
+                slot.sequence = ++reuse_sequence;
+                return slot;
+            }
+            if (slot.sequence < oldest->sequence)
+                oldest = &slot;
+        }
+        if (oldest->state == ReuseState::Empty)
+            ++counts.reuse.history_entries;
+        else
+            ++counts.reuse.history_replacements;
+        *oldest = { key, compressed, decoded, ++reuse_sequence, ReuseState::New };
+        return *oldest;
+    }
+
     Stats stats_unlocked() const {
         auto value = counts;
         value.resident_bytes = resident;
@@ -219,5 +351,8 @@ private:
     std::unordered_multimap<Key, std::list<Entry>::iterator, Hash> lookup;
     size_t resident = 0;
     Stats counts;
+    std::unique_ptr<std::array<ReuseSlot, reuse_capacity>> reuse;
+    uint64_t reuse_sequence = 0;
+    size_t reuse_users = 0;
 };
 } // namespace renderer

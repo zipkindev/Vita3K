@@ -44,12 +44,15 @@ int main() {
     std::vector<std::string> values;
     while (std::getline(fields, row, ','))
         values.push_back(row);
-    assert(values.size() == 26);
-    assert(values[0] == "1" && std::stoull(values[1]) > 0 && std::stoull(values[2]) > 0);
+    assert(values.size() == 46);
+    assert(values[0] == "2" && std::stoull(values[1]) > 0 && std::stoull(values[2]) > 0);
 #ifdef _WIN32
     assert(std::stoull(values[3]) > 0 && std::stoull(values[4]) > 0);
 #endif
     assert(values[14] == "200" && values[15] == "600000000" && values[16] == "200");
+    assert(values[26] == "1" && values[29] == "65536");
+    assert(values[45] == "200");
+    assert(!cache.stats().reuse.enabled);
     assert(values[17] == "0" && values[18] == "0" && values[19] == "3000000");
     file.close();
     const auto size = std::filesystem::file_size(output);

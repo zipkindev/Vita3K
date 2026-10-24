@@ -1070,12 +1070,13 @@ uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width,
     };
     const std::span<uint8_t> pixels(output, size_t(output_bytes));
     uint32_t result;
-    if (cache.copy(key, compressed, pixels, result))
+    renderer::DecodedTextureCache::Observation observation;
+    if (cache.copy(key, compressed, pixels, result, &observation))
         return result;
     const auto start = std::chrono::steady_clock::now();
     result = PVRTDecompressPVRTCParallel(compressed.data(), two_bit, width, height, type, output);
     const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-    cache.decoded(elapsed, width, height);
+    cache.decoded(elapsed, width, height, observation);
     cache.insert(key, std::move(compressed), pixels, result, elapsed);
     return result;
 }

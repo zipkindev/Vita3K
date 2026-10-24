@@ -1235,10 +1235,10 @@ QGroupBox[flat=&quot;true&quot;]::title {
                 <item>
                  <widget class="QCheckBox" name="decoded_texture_telemetry">
                   <property name="text">
-                   <string>Texture Cache Telemetry</string>
+                   <string>Texture Cache and Reuse Telemetry</string>
                   </property>
                   <property name="toolTip">
-                   <string>Writes bounded counters once per second (up to four hours). Includes hits, misses, decode time and evictions; no texture contents.</string>
+                   <string>Writes bounded counters once per second (up to four hours), including decoding after capacity eviction versus first-observed textures. Uses up to 4 MiB additional fingerprint history; history replacement and clears are reported. Diagnostic only; does not improve speed. No texture contents or fingerprints are written.</string>
                   </property>
                  </widget>
                 </item>

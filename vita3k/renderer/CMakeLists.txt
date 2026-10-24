@@ -68,6 +68,7 @@ add_test(NAME pvrtc-cache COMMAND pvrtc-cache-tests)
 add_test(NAME pvrtc-cache-disabled COMMAND pvrtc-cache-tests disabled)
 add_test(NAME pvrtc-cache-configured COMMAND pvrtc-cache-tests configured)
 add_test(NAME pvrtc-cache-serial COMMAND pvrtc-cache-tests serial)
+add_test(NAME pvrtc-cache-reuse COMMAND pvrtc-cache-tests reuse)
 
 if(ANDROID)
 	target_link_libraries(renderer PRIVATE android adrenotools)
