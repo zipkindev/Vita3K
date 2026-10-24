@@ -10,3 +10,10 @@ to external/dynarmic before configuration. Never update the submodule gitlink
 to a different base or silently build without the observer patch. The observer
 is default-off and implemented only in the x64 A32 backend. Original Dynarmic
 license and notices are retained.
+
+The .20 candidate extends this cumulative patch with an x64 A32 compile-only
+PrepareBlock API and a default-deny pre-emission validation callback. It never
+runs generated code, requires a quiescent JIT, preserves pending invalidations,
+and skips preparation rather than flushing for low code-cache headroom.
+Normal compilation and profiling keep their existing paths. See the .20 release
+notes for exact read validation and the experimental preparation limits.

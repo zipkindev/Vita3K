@@ -17,6 +17,7 @@
 
 #include "cpu/common.h"
 #include <cpu/impl/dynarmic_cpu.h>
+#include <cpu/jit_preparation.h>
 #include <cpu/jit_profile.h>
 #include <cpu/state.h>
 #include <util/log.h>
@@ -192,16 +193,77 @@ public:
         , cpu(&cpu) {}
 
     ~ArmDynarmicCallback() override = default;
+    std::chrono::steady_clock::time_point learning_begin;
+    void preparation_read(uint32_t address, uint32_t value, bool hook = false) noexcept {
+        if (parent->jit_preparation)
+            parent->jit_preparation->read(address, value, hook);
+    }
+    bool AllowJitPreparedBlock(uint64_t descriptor, uint32_t end_pc) noexcept override {
+        const auto &p = parent->jit_preparation;
+        if (!p || !p->allow_emit(descriptor, end_pc))
+            return false;
+        const auto *block = p->replay_block();
+        for (size_t i = 0; i < block->count; ++i) {
+            const auto &r = block->reads[i];
+            const Ptr<uint32_t> ptr{ r.address };
+            if (!ptr.valid(*parent->mem) || !Ptr<uint8_t>{ r.address + 3 }.valid(*parent->mem))
+                return false;
+            uint32_t actual;
+            std::memcpy(&actual, ptr.get(*parent->mem), sizeof(actual));
+            if (actual != r.value)
+                return false;
+        }
+        return true;
+    }
+    std::optional<uint32_t> prepared_read(uint32_t address, bool hook) {
+        if (!parent->jit_preparation->expects_read(address, hook)) {
+            parent->jit_preparation->invalid_read();
+            return std::nullopt;
+        }
+        const Ptr<uint32_t> ptr{ address };
+        if (!ptr.valid(*parent->mem) || !Ptr<uint8_t>{ address + 3 }.valid(*parent->mem)) {
+            parent->jit_preparation->invalid_read();
+            return std::nullopt;
+        }
+        uint32_t value;
+        std::memcpy(&value, ptr.get(*parent->mem), sizeof(value));
+        return parent->jit_preparation->replay_read(address, value, hook);
+    }
 
     bool IsJitCompileProfilingEnabled() const noexcept override {
-        return parent->jit_profile && parent->jit_profile->enabled();
+        return (parent->jit_profile && parent->jit_profile->enabled()) || bool(parent->jit_preparation);
     }
-    void JitCompileBegin(std::uint64_t descriptor) noexcept override { parent->jit_profile->begin(descriptor); }
-    void JitCompileComplete(std::uint32_t end_pc, std::size_t bytes) noexcept override { parent->jit_profile->complete(end_pc, bytes); }
-    void JitCompileAborted() noexcept override { parent->jit_profile->abort(); }
-    void JitCacheInvalidated() noexcept override { parent->jit_profile->invalidated(); }
+    void JitCompileBegin(std::uint64_t descriptor) noexcept override {
+        if (parent->jit_profile)
+            parent->jit_profile->begin(descriptor);
+        if (parent->jit_preparation) {
+            learning_begin = std::chrono::steady_clock::now();
+            parent->jit_preparation->begin(descriptor);
+        }
+    }
+    void JitCompileComplete(std::uint32_t end_pc, std::size_t bytes) noexcept override {
+        if (parent->jit_profile)
+            parent->jit_profile->complete(end_pc, bytes);
+        if (parent->jit_preparation)
+            parent->jit_preparation->complete(end_pc,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - learning_begin).count());
+    }
+    void JitCompileAborted() noexcept override {
+        if (parent->jit_profile)
+            parent->jit_profile->abort();
+        if (parent->jit_preparation)
+            parent->jit_preparation->abort();
+    }
+    void JitCacheInvalidated() noexcept override {
+        if (parent->jit_profile)
+            parent->jit_profile->invalidated();
+        if (parent->jit_preparation)
+            parent->jit_preparation->invalidated();
+    }
 
     std::optional<std::uint32_t> MemoryReadCode(Dynarmic::A32::VAddr addr) override {
+        if (parent->jit_preparation && parent->jit_preparation->is_replaying())
+            return prepared_read(addr, false);
         if (cpu->log_mem)
             LOG_TRACE("Instruction fetch at address 0x{:X}", addr);
         const Ptr<uint32_t> ptr{ static_cast<Address>(addr) };
@@ -250,11 +312,14 @@ public:
                 }
                 LOG_CRITICAL("Memory at register targets (words -2..+5):\n{}", reg_mem);
             }
+            if (parent->jit_preparation)
+                parent->jit_preparation->invalid_read();
             if (parent->jit_profile)
                 parent->jit_profile->invalid_read();
             return std::nullopt;
         }
         const auto value = MemoryRead32(addr);
+        preparation_read(addr, value);
         if (parent->jit_profile)
             parent->jit_profile->code_read(addr, value);
         return value;
@@ -341,13 +406,18 @@ public:
         static constexpr size_t BODY_WORDS = 19;
 
         const auto word_at = [&](size_t i) -> std::optional<uint32_t> {
+            if (parent->jit_preparation && parent->jit_preparation->is_replaying())
+                return prepared_read(static_cast<Address>(pc + i * 4), true);
             const Ptr<uint32_t> word{ static_cast<Address>(pc + i * 4) };
             if (!word.valid(*parent->mem)) {
+                if (parent->jit_preparation)
+                    parent->jit_preparation->invalid_read();
                 if (parent->jit_profile)
                     parent->jit_profile->invalid_read();
                 return std::nullopt;
             }
             const auto value = *word.get(*parent->mem);
+            preparation_read(word.address(), value, true);
             if (parent->jit_profile)
                 parent->jit_profile->code_read(word.address(), value, true);
             return value;
@@ -703,6 +773,49 @@ DynarmicCPU::DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt
 }
 
 DynarmicCPU::~DynarmicCPU() = default;
+
+void DynarmicCPU::prepare_jit() {
+#if defined(_M_X64) || defined(__x86_64__)
+    auto &p = parent->jit_preparation;
+    if (!p || jit->IsExecuting() || log_code || log_mem)
+        return;
+    const auto blocks = p->ranked();
+    const auto start = std::chrono::steady_clock::now();
+    for (const auto &b : blocks) {
+        auto &stats = p->stats;
+        stats.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        if (stats.elapsed_ms >= cpu::JitPreparation::time_limit_ms) {
+            stats.deadline = true;
+            break;
+        }
+        if (stats.native_bytes >= cpu::JitPreparation::native_limit) {
+            stats.native_cap = true;
+            break;
+        }
+        ++stats.attempted;
+        p->replay(b);
+        try {
+            const auto bytes = jit->PrepareBlock(b.descriptor);
+            if (bytes) {
+                ++stats.prepared;
+                stats.native_bytes += bytes;
+            } else
+                ++stats.skipped;
+        } catch (...) {
+            ++stats.skipped;
+            p->end_replay();
+            stats.prepared = 0;
+            stats.native_bytes = 0;
+            rebuild_jit(); // Discard potentially partial emission before demand fallback.
+            break;
+        }
+        p->end_replay();
+    }
+    p->stats.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    p->report();
+    LOG_INFO("[JIT-PREPARE] {} learned blocks loaded; prepared {}, skipped {} in {} ms; {} native bytes", p->stats.loaded, p->stats.prepared, p->stats.skipped, p->stats.elapsed_ms, p->stats.native_bytes);
+#endif
+}
 
 int DynarmicCPU::run() {
     // apply deferred logging changes now safely outside of jit->Run()

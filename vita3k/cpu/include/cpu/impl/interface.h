@@ -26,6 +26,7 @@ struct CPUInterface {
     virtual ~CPUInterface() = default;
 
     virtual int run() = 0;
+    virtual void prepare_jit() {}
     virtual void stop() = 0;
 
     virtual uint32_t get_reg(uint8_t idx) = 0;

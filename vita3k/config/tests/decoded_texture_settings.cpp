@@ -13,6 +13,7 @@ int main() {
     Config cfg;
     assert(cfg.decoded_texture_cache_mb == 0);
     assert(!cfg.automatic_texture_preparation);
+    assert(!cfg.jit_preparation);
     assert(!cfg.jit_compile_telemetry && !cfg.sync_wait_telemetry && !cfg.decoded_texture_telemetry && !cfg.pipeline_telemetry);
     assert(cfg.parallel_texture_decode);
     Config::CurrentConfig settings;
@@ -25,6 +26,7 @@ int main() {
         settings.jit_compile_telemetry = mib == 512;
         settings.sync_wait_telemetry = mib == 256;
         settings.pipeline_telemetry = mib == 512;
+        settings.jit_preparation = mib == 256;
         settings.decoded_texture_telemetry = mib == 128;
         settings.parallel_texture_decode = mib != 0;
         assert(config::save_custom_config(settings, dir, "TEST"));
@@ -35,6 +37,7 @@ int main() {
         assert(loaded.jit_compile_telemetry == (mib == 512));
         assert(loaded.sync_wait_telemetry == (mib == 256));
         assert(loaded.pipeline_telemetry == (mib == 512));
+        assert(loaded.jit_preparation == (mib == 256));
         assert(loaded.decoded_texture_telemetry == (mib == 128));
         assert(loaded.parallel_texture_decode == (mib != 0));
     }
@@ -68,6 +71,7 @@ int main() {
     assert(auto_restart.size() == 1 && auto_restart[0] == config::RestartRequiredSetting::AutomaticTexturePreparation);
     for (auto [member, expected] : { std::pair{ &Config::CurrentConfig::jit_compile_telemetry, config::RestartRequiredSetting::JitCompileTelemetry },
              std::pair{ &Config::CurrentConfig::sync_wait_telemetry, config::RestartRequiredSetting::SyncWaitTelemetry },
+             std::pair{ &Config::CurrentConfig::jit_preparation, config::RestartRequiredSetting::JitPreparation },
              std::pair{ &Config::CurrentConfig::pipeline_telemetry, config::RestartRequiredSetting::PipelineTelemetry },
              std::pair{ &Config::CurrentConfig::decoded_texture_telemetry, config::RestartRequiredSetting::DecodedTextureTelemetry },
              std::pair{ &Config::CurrentConfig::parallel_texture_decode, config::RestartRequiredSetting::ParallelTextureDecode } }) {

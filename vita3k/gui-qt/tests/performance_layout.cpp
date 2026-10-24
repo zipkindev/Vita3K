@@ -67,5 +67,12 @@ int main(int argc, char **argv) {
                 assert(!box.intersects(QRect(other->mapTo(&dialog, QPoint(0, 0)), other->size())));
             }
         }
+        ui.tab_widget_settings->setCurrentWidget(ui.cpu_tab);
+        ui.cpu_scroll_area->ensureWidgetVisible(ui.jit_preparation);
+        app.processEvents();
+        assert(ui.cpu_tab->isAncestorOf(ui.jit_preparation));
+        assert(ui.jit_preparation->width() >= ui.jit_preparation->minimumSizeHint().width());
+        assert(ui.jit_preparation->height() >= ui.jit_preparation->minimumSizeHint().height());
+        ui.tab_widget_settings->setCurrentWidget(ui.performance_tab);
     }
 }

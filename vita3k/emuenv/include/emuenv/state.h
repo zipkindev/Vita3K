@@ -93,7 +93,8 @@ using NIDSet = std::set<uint32_t>;
  */
 namespace cpu {
 class JitCompileProfile;
-}
+class JitPreparation;
+} // namespace cpu
 
 struct EmuEnvState {
     // declare this first as the unique_ptr need to be initialized before the references
@@ -146,6 +147,7 @@ public:
     Config &cfg;
     SceUID main_thread_id{};
     std::shared_ptr<cpu::JitCompileProfile> jit_compile_profile;
+    std::shared_ptr<cpu::JitPreparation> jit_preparation;
     std::shared_ptr<util::SyncWaitProfile> sync_wait_profile;
     std::shared_ptr<util::PipelineProfile> pipeline_profile;
     size_t frame_count = 0;

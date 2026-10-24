@@ -58,6 +58,7 @@ public:
     DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt);
     ~DynarmicCPU() override;
     int run() override;
+    void prepare_jit() override;
     void stop() override;
 
     uint32_t get_reg(uint8_t idx) override;

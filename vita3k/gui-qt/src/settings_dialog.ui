@@ -418,6 +418,21 @@ QGroupBox[flat=&quot;true&quot;]::title {
               </widget>
              </item>
              <item>
+              <widget class="QGroupBox" name="gb_jit_preparation">
+               <property name="title"><string>JIT Preparation — Performance Experiment</string></property>
+               <layout class="QVBoxLayout" name="jit_preparation_layout">
+                <item><widget class="QCheckBox" name="jit_preparation">
+                 <property name="text"><string>Learn and Prepare Main-Thread Code (Experimental)</string></property>
+                 <property name="toolTip"><string>Windows/x64 prototype. Learns bounded instruction-read manifests during play and saves on normal exit. On later launches, validates the loaded executable and every read before compile-only preparation. No guest code is executed. Preparation may reduce first-use compilation stalls; benefits are not yet validated. Compilation is budgeted to 1.5 seconds plus the final block; profile validation also adds startup time. Uses up to 8 MiB plus one block of native code and bounded learning overhead. Restart required.</string></property>
+                </widget></item>
+                <item><widget class="QLabel" name="jit_preparation_description">
+                 <property name="text"><string>First play a learning session and close normally. Later launches can prepare eligible main-thread blocks before gameplay. Profiles store instruction bytes, not native code: at most 2,048 blocks, 16 MiB per game and 64 MiB total; oldest profiles are removed at the storage limit. Exact code or configuration mismatches fall back to normal compilation. This prototype does not detect individual race-loading screens.</string></property>
+                 <property name="wordWrap"><bool>true</bool></property>
+                </widget></item>
+               </layout>
+              </widget>
+             </item>
+             <item>
               <spacer name="cpu_tab_content_spacer">
                <property name="orientation">
                 <enum>Qt::Orientation::Vertical</enum>

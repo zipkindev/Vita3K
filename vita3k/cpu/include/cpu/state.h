@@ -27,7 +27,8 @@
 
 namespace cpu {
 class JitCompileProfile;
-}
+class JitPreparation;
+} // namespace cpu
 
 struct CPUState {
     CPUState() = default;
@@ -37,6 +38,7 @@ struct CPUState {
     DisasmState disasm;
 
     std::shared_ptr<cpu::JitCompileProfile> jit_profile;
+    std::shared_ptr<cpu::JitPreparation> jit_preparation;
     CPUInterfacePtr cpu;
     bool svc_called;
     uint32_t svc;

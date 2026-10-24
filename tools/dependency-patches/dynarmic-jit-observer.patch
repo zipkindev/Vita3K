@@ -1,12 +1,38 @@
 diff --git a/src/dynarmic/backend/x64/a32_interface.cpp b/src/dynarmic/backend/x64/a32_interface.cpp
-index d690aada..69cd91cb 100644
+index d690aada..6beb08d0 100644
 --- a/src/dynarmic/backend/x64/a32_interface.cpp
 +++ b/src/dynarmic/backend/x64/a32_interface.cpp
-@@ -206,6 +206,15 @@ private:
+@@ -201,13 +201,45 @@ private:
+         return GetBasicBlock(A32::LocationDescriptor{GetCurrentLocation()}.SetSingleStepping(true)).entrypoint;
+     }
+ 
++    struct PreparationRejected {};
++    bool preparing_block = false;
++
++public:
++    std::size_t PrepareBlock(u64 value) {
++        ASSERT(!jit_interface->is_executing);
++        if (preparing_block || emitter.GetBasicBlock(IR::LocationDescriptor{value})
++            || Has(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)), HaltReason::CacheInvalidation))
++            return 0;
++        const A32::LocationDescriptor location{IR::LocationDescriptor{value}};
++        if (location.UniqueHash() != value || location.SingleStepping())
++            return 0;
++        const auto before = block_of_code.SpaceRemaining();
++        preparing_block = true;
++        SCOPE_EXIT { preparing_block = false; };
++        try { GetBasicBlock(IR::LocationDescriptor{value}); }
++        catch (const PreparationRejected&) { return 0; }
++        return before - block_of_code.SpaceRemaining();
++    }
++
++private:
+     A32EmitX64::BlockDescriptor GetBasicBlock(IR::LocationDescriptor descriptor) {
+         auto block = emitter.GetBasicBlock(descriptor);
          if (block)
              return *block;
  
-+        const bool profiling = conf.callbacks->IsJitCompileProfilingEnabled();
++        const bool profiling = !preparing_block && conf.callbacks->IsJitCompileProfilingEnabled();
 +        bool observed_complete = false;
 +        if (profiling)
 +            conf.callbacks->JitCompileBegin(descriptor.Value());
@@ -17,12 +43,18 @@ index d690aada..69cd91cb 100644
 +
          constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
          if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
++            if (preparing_block)
++                throw PreparationRejected{};
              invalidate_entire_cache = true;
-@@ -227,7 +236,13 @@ private:
+             PerformRequestedCacheInvalidation(HaltReason::CacheInvalidation);
+         }
+@@ -227,7 +259,15 @@ private:
          }
          Optimization::IdentityRemovalPass(ir_block);
          Optimization::VerificationPass(ir_block);
 -        return emitter.Emit(ir_block);
++        if (preparing_block && !conf.callbacks->AllowJitPreparedBlock(descriptor.Value(), A32::LocationDescriptor{ir_block.EndLocation()}.PC()))
++            throw PreparationRejected{};
 +        const auto result = emitter.Emit(ir_block);
 +        if (profiling) {
 +            conf.callbacks->JitCompileComplete(A32::LocationDescriptor{ir_block.EndLocation()}.PC(),
@@ -33,7 +65,7 @@ index d690aada..69cd91cb 100644
      }
  
      void PerformRequestedCacheInvalidation(HaltReason hr) {
-@@ -240,6 +255,8 @@ private:
+@@ -240,6 +280,8 @@ private:
                  return;
              }
  
@@ -42,11 +74,38 @@ index d690aada..69cd91cb 100644
              jit_state.ResetRSB();
              if (invalidate_entire_cache) {
                  block_of_code.ClearCache();
+@@ -280,6 +322,10 @@ HaltReason Jit::Step() {
+     return impl->Step();
+ }
+ 
++std::size_t Jit::PrepareBlock(std::uint64_t descriptor) {
++    return impl->PrepareBlock(descriptor);
++}
++
+ void Jit::ClearCache() {
+     impl->ClearCache();
+ }
+diff --git a/src/dynarmic/interface/A32/a32.h b/src/dynarmic/interface/A32/a32.h
+index e1c5b40f..416aef07 100644
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -34,6 +34,11 @@ public:
+      */
+     HaltReason Step();
+ 
++    // Compile only, while the owner is quiescent. Never runs generated code.
++    // Requires exact code-read validation through AllowJitPreparedBlock.
++    // Returns emitted bytes, or zero for a hit, invalidation, rejection or low headroom.
++    std::size_t PrepareBlock(std::uint64_t descriptor);
++
+     /**
+      * Clears the code cache of all compiled code.
+      * Can be called at any time. Halts execution if called within a callback.
 diff --git a/src/dynarmic/interface/A32/config.h b/src/dynarmic/interface/A32/config.h
-index 360df06e..cac5da62 100644
+index 360df06e..058561c2 100644
 --- a/src/dynarmic/interface/A32/config.h
 +++ b/src/dynarmic/interface/A32/config.h
-@@ -61,6 +61,15 @@ enum class Exception {
+@@ -61,6 +61,16 @@ enum class Exception {
  struct UserCallbacks : public TranslateCallbacks {
      virtual ~UserCallbacks() = default;
  
@@ -57,6 +116,7 @@ index 360df06e..cac5da62 100644
 +    virtual void JitCompileComplete(std::uint32_t, std::size_t) noexcept {}
 +    virtual void JitCompileAborted() noexcept {}
 +    virtual void JitCacheInvalidated() noexcept {}
++    virtual bool AllowJitPreparedBlock(std::uint64_t, std::uint32_t) noexcept { return false; }
 +
 +
      // All reads through this callback are 4-byte aligned.

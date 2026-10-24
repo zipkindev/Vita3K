@@ -45,6 +45,7 @@ enum class RestartRequiredSetting : uint8_t {
     JitCompileTelemetry = 13,
     SyncWaitTelemetry = 14,
     PipelineTelemetry = 17,
+    JitPreparation = 18,
 };
 
 std::vector<RestartRequiredSetting> get_restart_required_settings(

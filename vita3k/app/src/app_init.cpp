@@ -28,6 +28,7 @@
 #include <config/state.h>
 #include <config/version.h>
 #include <cpu/functions.h>
+#include <cpu/jit_preparation.h>
 #include <cpu/jit_profile.h>
 #include <ctrl/functions.h>
 #include <ctrl/state.h>
@@ -249,6 +250,9 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
             break;
         case config::RestartRequiredSetting::JitCompileTelemetry:
             runtime_current.jit_compile_telemetry = previous_current.jit_compile_telemetry;
+            break;
+        case config::RestartRequiredSetting::JitPreparation:
+            runtime_current.jit_preparation = previous_current.jit_preparation;
             break;
         case config::RestartRequiredSetting::PipelineTelemetry:
             runtime_current.pipeline_telemetry = previous_current.pipeline_telemetry;
@@ -534,6 +538,10 @@ void shutdown_app_runtime(EmuEnvState &state) {
         state.renderer->command_buffer_queue.abort();
 
     state.kernel.process_exit();
+    if (state.jit_preparation) {
+        LOG_INFO("[JIT-PREPARE] {}", state.jit_preparation->finish() ? "learning profile saved" : "profile write failed");
+        state.jit_preparation.reset();
+    }
     if (state.jit_compile_profile) {
         LOG_INFO("[JIT-PROFILE] {}", state.jit_compile_profile->finish() ? "saved" : "report write failed");
         state.jit_compile_profile.reset();

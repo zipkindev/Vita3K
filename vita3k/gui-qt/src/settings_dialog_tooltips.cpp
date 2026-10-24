@@ -46,6 +46,8 @@ QString restart_required_setting_label(config::RestartRequiredSetting setting) {
         return QCoreApplication::translate("SettingsDialogTooltips", "Accurate Thread Scheduling");
     case config::RestartRequiredSetting::JitCompileTelemetry:
         return QObject::tr("JIT Compilation Telemetry");
+    case config::RestartRequiredSetting::JitPreparation:
+        return QObject::tr("JIT Preparation (Experimental)");
     case config::RestartRequiredSetting::PipelineTelemetry:
         return QObject::tr("Vulkan Pipeline Telemetry");
     case config::RestartRequiredSetting::SyncWaitTelemetry:

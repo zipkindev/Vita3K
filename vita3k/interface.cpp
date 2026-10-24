@@ -49,11 +49,14 @@
 #include <util/vita_theme_utils.h>
 
 #include <cpu/functions.h>
+#include <cpu/jit_preparation.h>
 #include <cpu/jit_profile.h>
 #include <cpu/state.h>
 #include <cstdlib>
 #include <gdbstub/functions.h>
 #include <stb_image_write.h>
+#include <stdexcept>
+#include <util/hash.h>
 
 #if USE_DISCORD
 #include <app/discord.h>
@@ -864,6 +867,38 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
             LOG_INFO("[JIT-PROFILE] Main-thread compilation observer armed (65536 rolling records; bounded session summaries; no prewarming)");
         } catch (const std::exception &e) {
             LOG_WARN("[JIT-PROFILE] Diagnostic disabled: {}", e.what());
+        }
+    }
+#endif
+
+    // The main CPU has not been started. Prepare only verified app executable regions.
+#if defined(_M_X64) || defined(__x86_64__)
+    if (emuenv.cfg.current_config.jit_preparation) {
+        try {
+            std::vector<cpu::JitPreparation::Region> regions;
+            std::string identity = "jit-preparation20-v1-dynarmic86458a-hooks1-x64:" + emuenv.io.title_id + ":" + emuenv.app_info.app_version + ":" + emuenv.self_name + ":" + std::to_string(emuenv.kernel.cpu_opt);
+            size_t bytes = 0;
+            const auto module = emuenv.kernel.loaded_modules.at(main_module_id);
+            for (const auto &seg : module->info.segments) {
+                if (!seg.memsz || (seg.perms & 7) != 5)
+                    continue; // Read/execute, never writable data.
+                bytes += seg.memsz;
+                if (bytes > 32 * 1024 * 1024 || !seg.vaddr.valid(emuenv.mem)
+                    || !Ptr<uint8_t>{ seg.vaddr.address() + seg.memsz - 1 }.valid(emuenv.mem))
+                    throw std::runtime_error("Executable region outside preparation bounds");
+                regions.push_back({ seg.vaddr.address(), seg.memsz });
+                identity += ":" + std::to_string(seg.vaddr.address()) + ":" + std::to_string(seg.memsz) + ":" + hex_string(sha256(seg.vaddr.get(emuenv.mem), seg.memsz));
+            }
+            if (emuenv.io.title_id.empty() || emuenv.io.title_id.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") != std::string::npos)
+                throw std::runtime_error("Invalid title for JIT preparation cache");
+            const auto path = std::filesystem::path(emuenv.cache_path.native()) / "jit-preparation" / (emuenv.io.title_id + ".pj20");
+            emuenv.jit_preparation = std::make_shared<cpu::JitPreparation>(path, sha256(identity.data(), identity.size()), std::move(regions));
+            main_thread->cpu->jit_preparation = emuenv.jit_preparation;
+            main_thread->cpu->cpu->prepare_jit();
+        } catch (const std::exception &e) {
+            emuenv.jit_preparation.reset();
+            main_thread->cpu->jit_preparation.reset();
+            LOG_WARN("[JIT-PREPARE] Disabled; normal compilation remains active: {}", e.what());
         }
     }
 #endif

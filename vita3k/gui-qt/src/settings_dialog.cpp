@@ -337,6 +337,7 @@ void SettingsDialog::load_config() {
     m_ui->jit_compile_telemetry->setChecked(m_config.jit_compile_telemetry);
     m_ui->sync_wait_telemetry->setChecked(m_config.sync_wait_telemetry);
     m_ui->pipeline_telemetry->setChecked(m_config.pipeline_telemetry);
+    m_ui->jit_preparation->setChecked(m_config.jit_preparation);
     m_ui->parallel_texture_decode->setChecked(m_config.parallel_texture_decode);
     m_ui->decoded_texture_telemetry->setChecked(m_config.decoded_texture_telemetry);
     m_ui->automatic_texture_preparation->setChecked(m_config.automatic_texture_preparation);
@@ -646,6 +647,7 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     current.jit_compile_telemetry = m_ui->jit_compile_telemetry->isChecked();
     current.sync_wait_telemetry = m_ui->sync_wait_telemetry->isChecked();
     current.pipeline_telemetry = m_ui->pipeline_telemetry->isChecked();
+    current.jit_preparation = m_ui->jit_preparation->isChecked();
     current.parallel_texture_decode = m_ui->parallel_texture_decode->isChecked();
     current.decoded_texture_telemetry = m_ui->decoded_texture_telemetry->isChecked();
     current.automatic_texture_preparation = m_ui->automatic_texture_preparation->isChecked();

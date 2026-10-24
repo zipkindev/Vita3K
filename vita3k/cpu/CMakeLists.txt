@@ -1,6 +1,7 @@
 set(SOURCE_LIST
 include/cpu/state.h
 include/cpu/jit_profile.h
+include/cpu/jit_preparation.h
 include/cpu/common.h
 include/cpu/functions.h
 include/cpu/impl/dynarmic_cpu.h
@@ -11,6 +12,7 @@ include/cpu/disasm/state.h
 src/disasm.cpp
 src/cpu.cpp
 src/jit_profile.cpp
+src/jit_preparation.cpp
 src/dynarmic_cpu.cpp
 )
 
@@ -31,4 +33,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64)$")
     target_include_directories(jit-profile-tests PRIVATE include "${PROJECT_SOURCE_DIR}/external/dynarmic/tests/A32")
     target_link_libraries(jit-profile-tests PRIVATE dynarmic merry::mcl)
     add_test(NAME jit-profile COMMAND jit-profile-tests)
+    add_executable(jit-preparation-tests tests/jit_preparation.cpp src/jit_preparation.cpp)
+    target_include_directories(jit-preparation-tests PRIVATE include "${PROJECT_SOURCE_DIR}/external/dynarmic/tests/A32")
+    target_link_libraries(jit-preparation-tests PRIVATE dynarmic merry::mcl)
+    add_test(NAME jit-preparation COMMAND jit-preparation-tests)
 endif()

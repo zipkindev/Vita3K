@@ -61,6 +61,7 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.jit_compile_telemetry = cfg.jit_compile_telemetry;
     current.sync_wait_telemetry = cfg.sync_wait_telemetry;
     current.pipeline_telemetry = cfg.pipeline_telemetry;
+    current.jit_preparation = cfg.jit_preparation;
     current.parallel_texture_decode = cfg.parallel_texture_decode;
     current.decoded_texture_telemetry = cfg.decoded_texture_telemetry;
     current.automatic_texture_preparation = cfg.automatic_texture_preparation;
@@ -116,6 +117,7 @@ void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.jit_compile_telemetry = current.jit_compile_telemetry;
     cfg.sync_wait_telemetry = current.sync_wait_telemetry;
     cfg.pipeline_telemetry = current.pipeline_telemetry;
+    cfg.jit_preparation = current.jit_preparation;
     cfg.parallel_texture_decode = current.parallel_texture_decode;
     cfg.decoded_texture_telemetry = current.decoded_texture_telemetry;
     cfg.automatic_texture_preparation = current.automatic_texture_preparation;
@@ -168,6 +170,7 @@ std::vector<RestartRequiredSetting> get_restart_required_settings(
     append_if_changed(before.jit_compile_telemetry != after.jit_compile_telemetry, RestartRequiredSetting::JitCompileTelemetry);
     append_if_changed(before.sync_wait_telemetry != after.sync_wait_telemetry, RestartRequiredSetting::SyncWaitTelemetry);
     append_if_changed(before.pipeline_telemetry != after.pipeline_telemetry, RestartRequiredSetting::PipelineTelemetry);
+    append_if_changed(before.jit_preparation != after.jit_preparation, RestartRequiredSetting::JitPreparation);
     append_if_changed(before.parallel_texture_decode != after.parallel_texture_decode, RestartRequiredSetting::ParallelTextureDecode);
     append_if_changed(before.decoded_texture_telemetry != after.decoded_texture_telemetry, RestartRequiredSetting::DecodedTextureTelemetry);
     append_if_changed(before.automatic_texture_preparation != after.automatic_texture_preparation, RestartRequiredSetting::AutomaticTexturePreparation);
@@ -236,6 +239,7 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
         out.jit_compile_telemetry = gpu.attribute("jit-compile-telemetry").as_bool(out.jit_compile_telemetry);
         out.sync_wait_telemetry = gpu.attribute("sync-wait-telemetry").as_bool(out.sync_wait_telemetry);
         out.pipeline_telemetry = gpu.attribute("pipeline-telemetry").as_bool(out.pipeline_telemetry);
+        out.jit_preparation = gpu.attribute("jit-preparation").as_bool(out.jit_preparation);
         out.parallel_texture_decode = gpu.attribute("parallel-texture-decode").as_bool(out.parallel_texture_decode);
         out.decoded_texture_telemetry = gpu.attribute("decoded-texture-telemetry").as_bool(out.decoded_texture_telemetry);
         out.automatic_texture_preparation = gpu.attribute("automatic-texture-preparation").as_bool(out.automatic_texture_preparation);
@@ -334,6 +338,7 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
     gpu_child.append_attribute("jit-compile-telemetry") = cc.jit_compile_telemetry;
     gpu_child.append_attribute("sync-wait-telemetry") = cc.sync_wait_telemetry;
     gpu_child.append_attribute("pipeline-telemetry") = cc.pipeline_telemetry;
+    gpu_child.append_attribute("jit-preparation") = cc.jit_preparation;
     gpu_child.append_attribute("parallel-texture-decode") = cc.parallel_texture_decode;
     gpu_child.append_attribute("decoded-texture-telemetry") = cc.decoded_texture_telemetry;
     gpu_child.append_attribute("automatic-texture-preparation") = cc.automatic_texture_preparation;

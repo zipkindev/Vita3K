@@ -170,6 +170,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "jit-compile-telemetry", false, jit_compile_telemetry)                             \
     code(bool, "sync-wait-telemetry", false, sync_wait_telemetry)                                 \
     code(bool, "pipeline-telemetry", false, pipeline_telemetry)                                 \
+    code(bool, "jit-preparation", false, jit_preparation)                                      \
     code(bool, "parallel-texture-decode", true, parallel_texture_decode) \
     code(bool, "decoded-texture-telemetry", false, decoded_texture_telemetry) \
     code(bool, "automatic-texture-preparation", false, automatic_texture_preparation)              \
