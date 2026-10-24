@@ -1127,7 +1127,7 @@ QGroupBox[flat=&quot;true&quot;]::title {
              <item>
               <widget class="QGroupBox" name="gb_texture_performance">
                <property name="title">
-                <string>Texture Decoding and Preparation (Experimental)</string>
+                <string>Texture Decoding and Preparation</string>
                </property>
                <layout class="QVBoxLayout" name="texture_performance_layout">
                 <item>

@@ -1,43 +1,57 @@
 # Vita3K-Go
 
-Performance and diagnostic development focused on Windows on the **Lenovo Legion Go**. Other AMD handhelds, including Steam Deck and ROG Ally, are potential secondary targets; they are not validated by the Legion Go measurements. Memory budgets remain configurable. Platform compatibility and performance require device-specific testing.
+Performance and diagnostic development focused on **Windows on the Lenovo Legion Go**, with WipEout 2048 as the primary test workload. The changes use shared emulator paths and automatic per-game learning, so other games with compatible textures can benefit without game-specific profiles or track lists. Benefits depend on the game's actual bottleneck. Steam Deck, ROG Ally and other devices require their own validation.
 
-## Attribution and origins
+[Downloads](https://github.com/zipkindev/Vita3K-Go/releases) · [Community findings and measurements](docs/performance-findings.md) · [Setup and dependencies](docs/windows-setup.md) · [Using matching symbols](docs/windows-symbols.md)
 
-This project builds on the work of several communities:
+## Credits and source origins
 
-- [Vita3K](https://github.com/Vita3K/Vita3K): the original emulator and primary upstream reference. This repository remains in its GitHub fork network.
-- [Vita3K-Plus](https://github.com/nckstwrt/Vita3K-Plus/tree/all-enhancements): the source baseline for this experimental line, including its scheduling, compatibility and frontend enhancements.
-- [Vita3K-nx](https://github.com/NaGaa95/Vita3K-nx): selected applicable shared-code correctness fixes. Switch-specific changes are not assumed useful on Windows.
-- Our additions: measured PVRTC decoded-texture caching, bounded parallel decoding, learned and automatic per-game texture preparation, lightweight telemetry, optimized symbol-enabled diagnostic packages and handheld testing.
+This project builds on the work of these communities:
 
-We incorporate selected, reviewed changes rather than automatically merging entire fork histories. [Curated integration provenance](docs/curated-candidate-1.md) records the initial mainline NGS handle-validation import (`e9225f90f04cdf0d6d7c6fe617c0c70a5a0af84a`) and nx pipeline-cache read validation (`1881b9adb608bbb7e532c2d66e3a12aa0e97ae9e`). Original authorship, copyright and license notices are preserved. We claim our additions, not authorship of the upstream emulator or fork work.
+- [Vita3K](https://github.com/Vita3K/Vita3K): the original emulator and primary upstream. This repository remains in its GitHub fork network.
+- [Vita3K-Plus](https://github.com/nckstwrt/Vita3K-Plus/tree/all-enhancements): the source baseline for this experimental line, including its scheduling, compatibility and frontend work.
+- [Vita3K-nx](https://github.com/NaGaa95/Vita3K-nx): selected shared-code correctness fixes. Switch-specific changes are not assumed useful on Windows.
 
-[Diagnostic downloads](https://github.com/zipkindev/Vita3K-Go/releases) · [Usage and exact-symbol provenance](docs/windows-diagnostics.md) · [Automatic textures](docs/automatic-textures.md)
+Our work adds measured PVRTC decoded-texture caching, bounded parallel decoding, automatic per-game texture learning and preparation, lightweight diagnostics, exact-symbol release packages and Legion Go validation. Async pipeline compilation is an existing emulator capability; our DOA5 Plus work identifies and tests its effect rather than claiming authorship of that feature.
 
-The candidate branch includes the Plus-derived patch line and selected imports. The default branch carries build infrastructure on its own source history; release manifests identify the exact candidate commit, support patches, submodules, recipe, toolchain and EXE/PDB hashes. This is experimental software, not an official upstream release. Historical measurements apply only to their documented build/device/settings.
+We review selected imports instead of automatically merging entire fork histories. [Integration provenance](docs/curated-candidate-1.md) records the mainline NGS handle-validation change and nx pipeline-cache validation change. Original authorship, copyright and license notices are preserved. This is an experimental fork, not an official upstream release. The candidate branch carries emulator changes; the default branch currently carries build infrastructure on a separate history. Release manifests identify the exact source and recipe commits, patches, submodules, toolchain and EXE/PDB hashes.
 
-## Automatic texture preparation
+## Enhancements
 
-This experimental feature reduces repeated CPU decoding work for eligible PVRTC I/II textures. Enable **Automatic Texture Preparation** in **Settings → Texture Decoding (Perf. Tweaks)** and select a nonzero **Decoded Texture Cache** budget globally or per game. The first session learns as you play; close the game normally to save its bounded profile. Later launches prepare compatible learned textures before guest execution and continue learning during normal use. No manual profile selection or race-specific setup is required.
+- **Decoded texture cache:** reuse decoded PVRTC textures in a configurable RAM budget, reducing repeated CPU decompression.
+- **Parallel texture decoding:** the caller and one helper share eligible decode work; small textures keep the serial path.
+- **Automatic texture preparation:** learn compressed inputs per game, merge previous compatible learning and prepare selected textures at the next game launch. The bounded history survives eviction of decoded copies.
+- **Optional diagnostics:** texture reuse counters, JIT compilation profiling and synchronization-wait summaries help distinguish remaining causes of hitches. These measure behavior; they do not warm the JIT.
+- **Reproducible Windows packages:** one optimized executable, an optional exact matching PDB, dependency patches and build evidence.
 
-RAM and disk limits are separate: decoded textures stay within the selected RAM budget (up to512MiB), while saved profiles contain compressed inputs, limited to64MiB per game and1GiB total. Least recently used saved profiles are pruned as space is needed. **Clear This Game's Texture Profile** and **Clear All Saved Texture Profiles** are available when no game is active; saves, game files and shader caches are preserved. Missing, changed or incompatible content falls back to ordinary decoding. See [behavior, limits and diagnostics](docs/automatic-textures.md).
+## What testing shows so far
 
-The `.13` learning candidate, based on `.11`, retains a bounded compressed-input history after decoded-cache eviction and merges valid previous profiles. It uses up to64MiB additional RAM plus bounded metadata while learning; it does not increase the decoded cache budget. Merged archives may exceed what can be prepared in one launch, so preparation selects fitting entries within the existing budget/deadline. The `.12` retention-order experiment is excluded. See [release details and limitations](docs/releases/v1.3.3-win11merge.13.md); WipEout gameplay validation is pending.
+Legion Go captures show fewer long presentation stalls in tested workloads. These are frame-presentation and CPU-trace measurements, **not measured controller-to-display input latency** or a promise of gains in every game.
 
-On a Legion Go, the earlier `.5` prototype prepared3151learned WipEout textures in2.23s using about314MiB of the512MiB RAM budget. In one owner-confirmed fresh-process Chenghou Rapier pair, recorded intervals over50ms were6Off versus0Preload, maximum interval161.75ms versus36.62ms, and demand decodes1776versus2 over about89s of complete telemetry. Both90s races retained music/controls and the same EXE/PDB/settings. This was one sequential pair with differing effects/traffic; recording followed driving confirmation and can omit initial race seconds. It supports further testing, not universal speedup or input-latency claims. The newer automatic lifecycle, UI and storage controls require their own gameplay validation.
+| Workload | Observed result |
+|---|---|
+| WipEout 2048, Ubermall, decoded cache off versus 256 MiB | Intervals above 50 ms fell from 10 to 1; maximum interval fell from 242.36 to 63.84 ms in a sequential 45-second pair. |
+| WipEout 2048, Chenghou Rapier, learned preparation Off versus On | An earlier 90-second pair had 6 versus 0 intervals above 50 ms; maximum interval 161.75 versus 36.62 ms. |
+| WipEout 2048, `.13`, fresh process with merged learning at 512 MiB | A clean 90-second run had median 33.36 ms, p99 35.30 ms and one 97.01 ms interval near the start. The owner reported “felt flawless.” All 7,281 prior texture inputs were retained and 68 added on normal close. |
+| DOA5 Plus, `.11`, synchronous versus async pipeline compilation | At 1×, intervals above 50 ms fell from 7 to 0; maximum interval 298.20 versus 36.35 ms. A subsequent 2× async run also had no intervals above 50 ms, with correct graphics reported. |
 
-Preparation is CPU-side, using at most one decoder helper plus the caller, with no background preparation left competing during gameplay. It adds startup work, uses bounded scratch memory beyond the RAM payload budget, and does not preload GPU resources or warm CPU JIT code. It cannot predict truly unseen textures or fix unrelated GPU/CPU bottlenecks. Crashes do not save a new learned profile; normal exit does. Game-derived profile data stays local and must not be uploaded with bug reports.
+The DOA5 improvement was associated with moving Vulkan pipeline compilation off the renderer, not demonstrated PVRTC cache gains. Sequential order, retained disk caches, changing opponents/effects and unknown exact fight stages limit causal comparisons. The `.12` preload-retention experiment worsened cache reuse and was not adopted. [The findings report](docs/performance-findings.md) includes unsuccessful experiments, trace evidence, build identities and open questions.
 
-## Texture decoding
+## Texture decoding and automatic learning
 
-**Settings → Texture Decoding (Perf. Tweaks)** (also available per game) groups decoded texture RAM budgets, parallel decoding, Automatic Texture Preparation and saved-profile clearing. Short descriptions explain the benefit and cost of each feature. Parallel decoding uses the caller and at most one helper; its checkbox selects serial decoding for comparison without changing the cache budget. The larger 16,384-entry limit is internal and still bounded by the chosen RAM budget. Graphics → Texture Import and Export contains texture replacement and export options. FPS Hack remains separately under GPU settings.
+Open **Settings → Texture Decoding (Perf. Tweaks)**, globally or per game. Select a nonzero **Decoded Texture Cache** budget and enable **Automatic Texture Preparation**. Play normally and close normally to save learning. Later game launches validate and prepare compatible learned inputs, then continue learning. No manual race selection, profile management or game-specific whitelist is needed. This is dynamic learning across launches, not prediction of unseen textures or a job scheduled at each race loading screen.
 
-Optional texture, JIT and synchronization telemetry switches are in the same tab under **Diagnostics**. They default off and are measurement tools, not speedups or JIT prewarming. Settings persist globally/per game and require a new game launch. Normal closure saves reports under the portable cache's `diagnostics` directory. Each launch creates new reports; delete old diagnostic sessions when no longer needed. Texture counters are sampled once per second for at most four hours; JIT and wait reports use bounded session summaries and rolling detail. Diagnostic launchers can override output locations through documented environment variables. Reports should stay private. See [synchronization telemetry](docs/synchronization-telemetry.md).
+Decoded cache choices are Off, 128, 256 and 512 MiB, with at most 16,384 entries. Learning keeps up to 64 MiB of compressed-input history plus bounded metadata, separately from the decoded RAM budget. Saved profiles are limited to 64 MiB per game and 1 GiB total; older observations/profiles can be evicted at their bounds. Preparation has a five-second soft deadline and can prepare only part of a profile that exceeds the RAM budget. Extra loading work and bounded scratch memory are costs of preparation. **Clear This Game's Texture Profile** and **Clear All Saved Texture Profiles** remove managed profiles when no game is running; saves and shader caches remain intact.
 
-## Releases and diagnostics
+The current texture path supports eligible PVRTC I/II 2/4 bpp inputs. Other formats, GPU saturation, pipeline compilation, guest JIT work, I/O and synchronization can still cause stalls. Preparation runs on the CPU before guest execution; it does not preload GPU resources or warm JIT code. Game-derived learned profiles stay local. See [automatic texture behavior and limits](docs/automatic-textures.md).
 
-Each approved build produces a **runtime download** and a **matching diagnostics/symbols download** from the same optimized executable. Symbols are stored in a separate PDB; the runtime package excludes them. This is optimized RelWithDebInfo with full symbols, not an unoptimized Debug build. Use only the PDB whose GUID/age and EXE hash match your build. Per-release notes identify features, fixes, measured improvements, validation, limitations and exact provenance. Diagnostic candidates remain experimental until gameplay validation; see [release notes](docs/releases/v1.3.3-win11merge.6.md).
+Graphics → **Texture Import and Export** contains texture replacement/export controls. Optional texture, JIT and synchronization telemetry is under **Diagnostics** inside the texture-decoding tab. Diagnostic switches default off; they add measurement work and save reports on normal close. Changes to these settings apply at the next game launch. [Texture reuse](docs/texture-reuse-telemetry.md) and [synchronization telemetry](docs/synchronization-telemetry.md) document their interpretation limits.
+
+## Downloads, symbols and contributing findings
+
+Each release uses **one optimized build with two downloads**: the runtime ZIP contains the EXE and dependencies; the optional diagnostics ZIP adds the exact matching PDB and build evidence. Symbols live in a separate file and do not require an unoptimized Debug executable. Match the EXE hash and PDB GUID/age to the release manifest. [Symbol instructions](docs/windows-symbols.md) cover installation, verification and WinDbg use; [setup instructions](docs/windows-setup.md) explain bundled libraries, ATRAC9 audio and user prerequisites.
+
+Release notes should identify changes, observed results, limitations and exact provenance. Share reproducible steps, game/version, hardware, graphics settings, cache/preparation state, build label and whether a capture contains continuous gameplay. Read [the findings report](docs/performance-findings.md) before attributing a hitch to a particular subsystem. Raw dumps/traces can include private data; review them before sharing and keep game files, saves, credentials and learned texture bytes out of public issues.
 
 Original upstream documentation follows.
 
@@ -123,5 +137,3 @@ Thank you to the supporters and to all those who support us on our [ko-fi](https
 The purpose of this emulator is not to enable illegal activity. You can dump games from a Vita by using [NoNpDrm](https://github.com/TheOfficialFloW/NoNpDrm) or [FAGDec](https://github.com/CelesteBlue-dev/PSVita-RE-tools/tree/master/FAGDec/build). You can get homebrew programs from [VitaDB](https://www.rinnegatamante.eu/vitadb/#/).
 
 PlayStation, PlayStation Vita and PlayStation Network are all registered trademarks of Sony Interactive Entertainment Inc. This emulator is not related to or endorsed by Sony, or derived from confidential materials belonging to Sony.
-
-Texture reuse diagnostics: [bounded texture reuse telemetry](docs/texture-reuse-telemetry.md) explains the optional Performance setting, decoding after eviction, memory bounds and interpretation limits.
