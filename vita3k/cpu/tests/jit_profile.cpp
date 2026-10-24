@@ -6,6 +6,7 @@
 #include "testenv.h"
 #include <cassert>
 #include <chrono>
+#include <cpu/invalid_code.h>
 #include <cpu/jit_profile.h>
 #include <fstream>
 #include <memory>
@@ -158,7 +159,61 @@ static void rolling_session_test(Temp &temp) {
     assert(json.find("\"retainedCompileNs\":35000000") != std::string::npos);
 }
 
-int main() {
+template <class Base>
+class InvalidCodeEnv : public Base {
+public:
+    Dynarmic::A32::Jit *jit = nullptr;
+    unsigned faults = 0;
+    uint32_t fault_pc = 0;
+    bool returned = false, crashed = false;
+    std::optional<uint32_t> MemoryReadCode(uint32_t address) override {
+        if (cpu::is_guest_first_page(address) || address >= 8192)
+            return std::nullopt;
+        return Base::MemoryReadCode(address);
+    }
+    void ExceptionRaised(uint32_t pc, Dynarmic::A32::Exception exception) override {
+        assert(exception == Dynarmic::A32::Exception::NoExecuteFault);
+        ++faults;
+        fault_pc = pc;
+        returned = cpu::is_guest_first_page(pc);
+        crashed = !returned;
+        jit->HaltExecution();
+    }
+};
+
+template <class Base>
+void invalid_code_test(bool thumb) {
+    for (uint32_t target : { 0u, 4u, thumb ? 4094u : 4092u, 8192u }) {
+        InvalidCodeEnv<Base> env;
+        const size_t entry = 4096 / sizeof(typename Base::InstructionType);
+        env.code_mem.resize(entry + 2, 0);
+        // BX r0 executes from a valid page, then branches into an invalid one.
+        if constexpr (sizeof(typename Base::InstructionType) == 4)
+            env.code_mem[entry] = 0xE12FFF10;
+        else
+            env.code_mem[entry] = 0x4700;
+        env.PadCodeMem();
+        Dynarmic::A32::Jit jit{ Dynarmic::A32::UserConfig{ &env } };
+        env.jit = &jit;
+        jit.Regs()[15] = 4096;
+        jit.Regs()[0] = target | (thumb ? 1u : 0u);
+        jit.SetCpsr(thumb ? 0x30 : 0x10);
+        env.ticks_left = 100;
+        jit.Run();
+        assert(env.faults == 1 && env.fault_pc == target);
+        assert(env.returned == (target < 4096));
+        assert(env.crashed == (target >= 4096));
+    }
+    assert(!cpu::is_guest_first_page(4096));
+    assert(!cpu::is_guest_first_page(65535));
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && std::string(argv[1]) == "invalid-code") {
+        invalid_code_test<ArmTestEnv>(false);
+        invalid_code_test<ThumbTestEnv>(true);
+        return 0;
+    }
     Temp temp;
     rolling_session_test(temp);
     execution_test<ArmTestEnv>(temp, "arm", false);

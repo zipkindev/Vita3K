@@ -17,6 +17,7 @@
 
 #include "cpu/common.h"
 #include <cpu/impl/dynarmic_cpu.h>
+#include <cpu/invalid_code.h>
 #include <cpu/jit_profile.h>
 #include <cpu/state.h>
 #include <util/log.h>
@@ -204,6 +205,11 @@ public:
     std::optional<std::uint32_t> MemoryReadCode(Dynarmic::A32::VAddr addr) override {
         if (cpu->log_mem)
             LOG_TRACE("Instruction fetch at address 0x{:X}", addr);
+        if (::cpu::is_guest_first_page(addr)) {
+            if (parent->jit_profile)
+                parent->jit_profile->invalid_read();
+            return std::nullopt;
+        }
         const Ptr<uint32_t> ptr{ static_cast<Address>(addr) };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
             if (!confirm_invalid_access(addr, "instruction fetch")) {
@@ -640,8 +646,13 @@ public:
             break;
         }
         case Dynarmic::A32::Exception::NoExecuteFault:
-            LOG_CRITICAL("Halting thread: attempted to execute unmapped memory at pc = 0x{:X}\n{}", pc, cpu->save_context().description());
-            cpu->crashed = true;
+            if (::cpu::is_guest_first_page(pc)) {
+                LOG_CRITICAL("PC is 0x{:x}, stopping thread {}\n{}", pc, parent->thread_id, cpu->save_context().description());
+                cpu->halted = true;
+            } else {
+                LOG_CRITICAL("Halting thread: attempted to execute unmapped memory at pc = 0x{:X}\n{}", pc, cpu->save_context().description());
+                cpu->crashed = true;
+            }
             cpu->jit->HaltExecution();
             break;
         default:
