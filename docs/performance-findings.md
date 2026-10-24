@@ -108,7 +108,7 @@ Native Windows tests cover cache/decoder correctness, learning bounds and mergin
 |---|---|---|
 | `.11` | `215f584c9be5eff44160671a741238e82ed0c213` | Working reuse-telemetry baseline; DOA tests |
 | `.13` | `5a88690e5b1584f5b1e2be452f3f9a29cdcd869a` | Bounded learning and profile merging |
-| `.14` | `c6d284595f6655f38fb7b6374ca1025c9ab98991` | UI-label follow-up; build/staging results tracked in release notes |
+| `.14` | Recorded in the release manifest | UI-label and documentation follow-up; build/staging results tracked in release notes |
 
 `.13` EXE SHA-256: `647344142a59a623189511dd5072f8eb4dfff3d279e16ccdf08412b2fd288cc2`. Its PDB SHA-256 is `fea199909354d4e1bbcb2c27a6f8365a15bbd46ab76f1cd07f27c1dccbf8d7fb`, GUID `0f40747a-ac7c-48be-a107-8b372aea0d3a`, age 1. The [Windows runner job](https://github.com/zipkindev/Vita3K-Go/actions/runs/40077345873) identifies the build. Manifests additionally record the recipe and applied support/dependency patches; the source commit alone is not the full build recipe. [Symbol instructions](windows-symbols.md).
 
