@@ -269,7 +269,7 @@
    </property>
   </action>
   <action name="settings_performance_action">
-   <property name="text"><string>Texture Decoding (Perf. Tweaks)</string></property>
+   <property name="text"><string>Texture Decoding</string></property>
   </action>
   <action name="settings_audio_action">
    <property name="text">

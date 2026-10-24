@@ -1104,7 +1104,7 @@ QGroupBox[flat=&quot;true&quot;]::title {
        </widget>
        <widget class="QWidget" name="performance_tab">
         <attribute name="title">
-         <string>Texture Decoding (Perf. Tweaks)</string>
+         <string>Texture Decoding</string>
         </attribute>
         <layout class="QVBoxLayout" name="performance_tab_layout">
          <item>
@@ -1115,9 +1115,24 @@ QGroupBox[flat=&quot;true&quot;]::title {
            <widget class="QWidget" name="performance_content">
             <layout class="QVBoxLayout" name="performance_content_layout">
              <item>
+              <widget class="QLabel" name="texture_decoding_heading">
+               <property name="font">
+                <font>
+                 <bold>true</bold>
+                </font>
+               </property>
+               <property name="text">
+                <string>Texture Decoding — Performance Tweaks</string>
+               </property>
+               <property name="wordWrap">
+                <bool>true</bool>
+               </property>
+              </widget>
+             </item>
+             <item>
               <widget class="QLabel" name="performance_intro">
                <property name="text">
-                <string>Control texture decoding, RAM caching and learned texture preparation. Optional diagnostics record decoding, JIT compilation and synchronization waits. Settings apply on the next game launch.</string>
+                <string>Performance tweaks for eligible PVRTC textures: RAM caching, parallel decoding and learned preparation can reduce decoding stalls. Tested primarily with WipEout 2048 on Legion Go; results vary by game. Optional diagnostics record texture decoding, JIT compilation and synchronization waits. Settings apply on the next game launch.</string>
                </property>
                <property name="wordWrap">
                 <bool>true</bool>

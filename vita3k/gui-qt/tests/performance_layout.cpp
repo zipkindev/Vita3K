@@ -7,7 +7,10 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QDialog>
+#include <QFontMetrics>
+#include <QListWidgetItem>
 #include <QScrollArea>
+#include <QTabBar>
 #include <array>
 #include <cassert>
 #include <gui-qt/settings_tabs.h>
@@ -24,6 +27,12 @@ int main(int argc, char **argv) {
     assert(ui.tab_widget_settings->indexOf(ui.debug_tab) == static_cast<int>(SettingsTab::Debug));
     for (size_t i = 0; i < pages.size(); ++i)
         assert(ui.tab_widget_settings->widget(static_cast<int>(i)) == pages[i]);
+    // Match the real settings sidebar's fixed row height and hidden tab bar.
+    ui.tab_widget_settings->tabBar()->hide();
+    for (int i = 0; i < ui.tab_widget_settings->count(); ++i) {
+        auto *item = new QListWidgetItem(ui.tab_widget_settings->tabText(i), ui.settingsCategory);
+        item->setSizeHint(QSize(0, 34));
+    }
     ui.tab_widget_settings->setCurrentWidget(ui.performance_tab);
     const std::array<QCheckBox *, 5> switches{ ui.automatic_texture_preparation, ui.parallel_texture_decode,
         ui.jit_compile_telemetry, ui.sync_wait_telemetry, ui.decoded_texture_telemetry };
@@ -31,6 +40,15 @@ int main(int argc, char **argv) {
         dialog.resize(size);
         dialog.show();
         app.processEvents();
+        const auto *category = ui.settingsCategory->item(static_cast<int>(SettingsTab::Performance));
+        const QFontMetrics font(ui.settingsCategory->font());
+        const auto text = font.boundingRect(QRect(0, 0, ui.settingsCategory->viewport()->width() - 12, 1000),
+            Qt::TextWordWrap, category->text());
+        assert(text.height() <= category->sizeHint().height());
+        ui.performance_scroll->ensureWidgetVisible(ui.texture_decoding_heading);
+        app.processEvents();
+        assert(ui.texture_decoding_heading->wordWrap());
+        assert(ui.texture_decoding_heading->height() >= ui.texture_decoding_heading->heightForWidth(ui.texture_decoding_heading->width()));
         for (auto *control : switches) {
             assert(ui.performance_tab->isAncestorOf(control));
             assert(!ui.gb_fps_hack->isAncestorOf(control));

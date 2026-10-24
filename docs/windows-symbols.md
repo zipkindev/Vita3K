@@ -51,7 +51,7 @@ Advanced CDB users can perform a noninvasive, nonsuspending live symbol check wi
 
 For WPA/ETW analysis, keep the exact EXE/PDB available and add their folder to the analyzer's symbol search path. Verify the recorded module identity before attributing samples. A PDB for Vita3K does not provide AMD driver internals, JIT-generated guest-code source mapping or symbols for every dependency. Missing third-party private symbols can limit attribution.
 
-Optional texture, JIT and synchronization diagnostics are controlled separately in **Settings → Texture Decoding (Perf. Tweaks) → Diagnostics**. They default off, add measurement work and normally save reports on a clean game shutdown. A PDB alone neither starts recording nor improves frame rate.
+Optional texture, JIT and synchronization diagnostics are controlled separately in **Settings → Texture Decoding → Diagnostics**. They default off, add measurement work and normally save reports on a clean game shutdown. A PDB alone neither starts recording nor improves frame rate.
 
 ## What to include in a report
 

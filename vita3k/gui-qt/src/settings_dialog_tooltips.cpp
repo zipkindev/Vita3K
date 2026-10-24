@@ -97,7 +97,7 @@ QString SettingsDialogTooltips::category_summary(SettingsTab tab) const {
     case SettingsTab::Graphics:
         return tr("Tune renderer behavior, textures, and shader behavior.");
     case SettingsTab::Performance:
-        return tr("Control decoded texture caching, parallel decoding and learned texture preparation. Optional telemetry records texture reuse, JIT compilation and synchronization waits; changes apply on the next game launch.");
+        return tr("Performance tweaks for eligible PVRTC textures: decoded caching, parallel decoding and learned preparation. Tested primarily with WipEout 2048 on Legion Go; results vary by game. Optional diagnostics record remaining hitches. Changes apply on the next game launch.");
     case SettingsTab::Audio:
         return tr("Adjust audio.");
     case SettingsTab::Camera:
