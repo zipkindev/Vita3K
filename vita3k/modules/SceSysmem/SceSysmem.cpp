@@ -21,6 +21,7 @@
 #include <kernel/state.h>
 #include <kernel/types.h>
 #include <modules/sysmem_state.h>
+#include <modules/sysmem_budget.h>
 #include <renderer/commands.h>
 #include <renderer/functions.h>
 
@@ -180,33 +181,19 @@ EXPORT(int, sceKernelFreeMemBlockForVM, SceUID uid) {
     return SCE_KERNEL_OK;
 }
 
+uint32_t get_max_user_memory(EmuEnvState &emuenv) {
+    std::string attribute2;
+    if (sfo::get_data_by_key(attribute2, emuenv.sfo_handle, "ATTRIBUTE2")) {
+        return sysmem::user_memory_budget(string_utils::stoi_def(attribute2, 0, "memory expansion mode"));
+    }
+    LOG_WARN_ONCE("ATTRIBUTE2 key not found in SFO data.");
+    return sysmem::user_memory_budget(0);
+}
+
 EXPORT(int, sceKernelGetFreeMemorySize, SceKernelFreeMemorySizeInfo *info) {
     TRACY_FUNC(sceKernelGetFreeMemorySize, info);
 
-    // Default memory configuration
-    uint32_t max_user = MiB(256);
-
-    // if DevKit then max_user = MB(512); else check sfo file for memory expansion mode
-    // Fetch the "ATTRIBUTE2" key from the SFO file to check for memory expansion mode
-    std::string attribute2;
-    if (sfo::get_data_by_key(attribute2, emuenv.sfo_handle, "ATTRIBUTE2")) {
-        // Convert the string to an unsigned 32-bit integer
-        const uint32_t attr_val = string_utils::stoi_def(attribute2, 0, "memory expansion mode");
-
-        switch (attr_val & 0x0C) {
-        case 0x4: // Check for the +29MiB mode
-            max_user += MiB(29);
-            break;
-        case 0x8: // Check for the +77MiB mode
-            max_user += MiB(77);
-            break;
-        case 0xC: // Check for the +109MiB mode
-            max_user += MiB(109);
-            break;
-        default: break;
-        }
-    } else
-        LOG_WARN_ONCE("ATTRIBUTE2 key not found in SFO data.");
+    const uint32_t max_user = get_max_user_memory(emuenv);
 
     // Define other memory limits
     constexpr uint32_t max_cdram = MiB(112); // Max cdram memory (112 MiB)

@@ -16,7 +16,9 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include "SceSysmemForDriver.h"
+#include "SceSysmem.h"
 #include <modules/sysmem_state.h>
+#include <modules/sysmem_budget.h>
 
 #include <kernel/state.h>
 #include <mem/functions.h>
@@ -116,6 +118,9 @@ EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType 
 
     const auto state = emuenv.kernel.obj_store.get<SysmemState>();
     const auto guard = std::lock_guard<std::mutex>(state->mutex);
+
+    if (sysmem::takes_from_user(type) && sysmem::exceeds_user_memory_budget(type, state->allocated_user, size, get_max_user_memory(emuenv)))
+        return RET_ERROR(SCE_KERNEL_ERROR_NO_MEMORY);
 
     Ptr<void> address;
     if (base_address) {
