@@ -45,6 +45,7 @@
 #include <unordered_map>
 
 #include <SDL3/SDL_cpuinfo.h>
+#include <util/pipeline_profile.h>
 
 #if defined(__linux__)
 #include <sys/resource.h>
@@ -123,6 +124,7 @@ struct CompileRequest {
     bool has_color_surface_data;
     shader::Hints hints;
     bool has_casts;
+    uint64_t telemetry_key = 0, telemetry_pair = 0, telemetry_queued = 0;
 
     // the content of the record useful for the pipeline creation
     alignas(8) uint8_t record_data[record_pipeline_len];
@@ -1346,12 +1348,21 @@ void PipelineCache::compiler_thread(MemState &mem) {
             break;
 
         if (drain_compile_workers) {
+            util::PipelineScope cancelled(util::PipelineKind::QueueCancelled, { request->telemetry_key, request->telemetry_pair, 1 });
             *request->pipeline = nullptr;
             delete request;
             continue;
         }
 
-        vk::Pipeline pipeline = compile_pipeline(request->type, request->render_pass, *request->vertex_program_binding, *request->fragment_program_binding, *request->get_record(), request->has_color_surface_data, request->hints, request->has_casts, mem);
+        if (request->telemetry_queued) {
+            util::PipelineScope queue_delay(util::PipelineKind::QueueDelay, { request->telemetry_key, request->telemetry_pair, 1 }, request->telemetry_queued);
+        }
+        vk::Pipeline pipeline;
+        {
+            util::PipelineScope compiling(util::PipelineKind::AsyncCompile, { request->telemetry_key, request->telemetry_pair, 1 });
+            pipeline = compile_pipeline(request->type, request->render_pass, *request->vertex_program_binding, *request->fragment_program_binding, *request->get_record(), request->has_color_surface_data, request->hints, request->has_casts, mem);
+            compiling.result(bool(pipeline));
+        }
         // mark a refused pipeline as failed rather than leaving it null, which would make every
         // later draw queue the same doomed compilation again
         *request->pipeline = pipeline ? pipeline : std::bit_cast<vk::Pipeline, uint64_t>(~1ULL);
@@ -1771,16 +1782,22 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     auto it = pipelines.find(key);
     if (it != pipelines.end()) {
         if (it->second != nullptr) {
-            if (it->second == pipeline_failed)
+            if (it->second == pipeline_failed) {
+                util::PipelineScope failed(util::PipelineKind::FailedCached, { key });
                 return nullptr;
+            }
             if (raw_pipeline_keys_seen.insert(raw_key).second)
                 state.pipelines_redundant_avoided++;
             if (it->second == pipeline_compiling) {
                 // a worker is compiling it for an earlier draw (a draw that must not be skipped waits for it)
-                if (!use_async_compilation || !must_not_skip_draw(record, consider_for_async))
+                if (!use_async_compilation || !must_not_skip_draw(record, consider_for_async)) {
+                    util::PipelineScope skipped(util::PipelineKind::AsyncSkipped, { key, 0, use_async_compilation ? 1u : 0u });
                     return nullptr;
+                }
+                util::PipelineScope waiting(util::PipelineKind::ProtectedWait, { key, 0, 5 });
                 while (it->second == pipeline_compiling)
                     std::this_thread::yield();
+                waiting.result(it->second != pipeline_failed);
                 return it->second == pipeline_failed ? nullptr : it->second;
             }
             return it->second;
@@ -1863,11 +1880,17 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     }
 
     const bool compile_pipeline_async = !already_in_cache && use_async_compilation && !must_not_skip_draw(record, consider_for_async);
+    const uint32_t telemetry_reason = (use_async_compilation ? 1u : 0u) | (already_in_cache ? 2u : 0u) | (must_not_skip_draw(record, consider_for_async) ? 4u : 0u);
 
     if (compile_pipeline_async && probe_before_defer && support_cache_only_creation) {
         // the driver can already hold this pipeline, for example the same shaders with other render state, and then
         // hands it over without compiling
-        const vk::Pipeline probed = compile_pipeline(type, render_pass, *vertex_program_binding, *fragment_program_binding, record, static_cast<bool>(record.color_surface.data), context.shader_hints, has_casts, mem, true);
+        vk::Pipeline probed;
+        {
+            util::PipelineScope probe(util::PipelineKind::CacheProbe, { key, draw_pair, telemetry_reason });
+            probed = compile_pipeline(type, render_pass, *vertex_program_binding, *fragment_program_binding, record, static_cast<bool>(record.color_surface.data), context.shader_hints, has_casts, mem, true);
+            probe.result(bool(probed));
+        }
         if (probed) {
             next_pipeline_cache_save = now_s() + pipeline_cache_save_delay;
             state.shaders_count_compiled++;
@@ -1892,12 +1915,24 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
         memcpy(request->record_data, &record, record_pipeline_len);
         it->second = pipeline_compiling;
 
+        request->telemetry_key = key;
+        request->telemetry_pair = draw_pair;
+        request->telemetry_queued = util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0;
         pipeline_compile_queue.enqueue(pipeline_compile_queue_token, request);
+        util::PipelineScope queued(util::PipelineKind::AsyncQueued, { key, draw_pair, telemetry_reason });
 
         return nullptr;
     } else {
         // can't wait, compile it right now
-        vk::Pipeline result = compile_pipeline(type, render_pass, *vertex_program_binding, *fragment_program_binding, record, static_cast<bool>(record.color_surface.data), context.shader_hints, has_casts, mem);
+        vk::Pipeline result;
+        {
+            const auto reason = !use_async_compilation ? util::PipelineKind::SyncDisabled
+                : already_in_cache                     ? util::PipelineKind::SyncKnownCache
+                                                       : util::PipelineKind::SyncProtected;
+            util::PipelineScope synchronous(reason, { key, draw_pair, telemetry_reason });
+            result = compile_pipeline(type, render_pass, *vertex_program_binding, *fragment_program_binding, record, static_cast<bool>(record.color_surface.data), context.shader_hints, has_casts, mem);
+            synchronous.result(bool(result));
+        }
 
         const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         next_pipeline_cache_save = time_s + pipeline_cache_save_delay;
@@ -1960,7 +1995,7 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
         if (!warm_pairs_requested.insert(pair).second)
             return;
     }
-    warm_queue.enqueue(new WarmRequest{ vertex, fragment, pair });
+    warm_queue.enqueue(new WarmRequest{ vertex, fragment, pair, util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0 });
 }
 
 void PipelineCache::warm_thread(MemState &mem) {
@@ -1973,6 +2008,9 @@ void PipelineCache::warm_thread(MemState &mem) {
         warm_queue.wait_dequeue(request);
         if (!request)
             break;
+        if (request->telemetry_queued) {
+            util::PipelineScope delay(util::PipelineKind::WarmQueueDelay, { 0, request->pair_key }, request->telemetry_queued);
+        }
         if (!warm_stopping)
             warm_pair(*request, mem);
         delete request;
@@ -2041,6 +2079,7 @@ bool PipelineCache::shader_available(const SceGxmProgram &program, const Sha256H
 }
 
 void PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
+    util::PipelineScope total(util::PipelineKind::WarmTotal, { 0, request.pair_key });
     const ProgramBinding &vertex_binding = *request.vertex;
     const ProgramBinding &fragment_binding = *request.fragment;
     const SceGxmProgram &vertex_gxp = *vertex_binding.program();
@@ -2050,8 +2089,10 @@ void PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
     {
         std::lock_guard<std::mutex> guard(warm_mutex);
         // a draw already created a pipeline for it, so the driver cache holds that draw's state
-        if (pairs_drawn.contains(request.pair_key))
+        if (pairs_drawn.contains(request.pair_key)) {
+            util::PipelineScope skipped(util::PipelineKind::WarmSkipDrawn, { 0, request.pair_key });
             return;
+        }
         states = warm_states;
     }
     if (states.empty()) {
@@ -2072,14 +2113,18 @@ void PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
     hints.output_register_format = fragment_binding.fragment_program->output_register_format;
 
     // a stage with no cached module is only generated here when the draw would generate the same module
-    if (!shader_available(vertex_gxp, vertex_binding.vertex_program->hash, true, hints) && !codegen_ignores_draw_hints(vertex_gxp, true, hints))
+    if (!shader_available(vertex_gxp, vertex_binding.vertex_program->hash, true, hints) && !codegen_ignores_draw_hints(vertex_gxp, true, hints)) {
+        util::PipelineScope skipped(util::PipelineKind::WarmMissingShader, { 0, request.pair_key });
         return;
+    }
 
     const bool interlock = state.features.support_shader_interlock && fragment_gxp.is_frag_color_used();
     for (const WarmState &warm_state : states) {
         hints.color_format = static_cast<SceGxmColorFormat>(warm_state.color_format);
-        if (!shader_available(fragment_gxp, fragment_binding.fragment_program->hash, false, hints) && !codegen_ignores_draw_hints(fragment_gxp, false, hints))
+        if (!shader_available(fragment_gxp, fragment_binding.fragment_program->hash, false, hints) && !codegen_ignores_draw_hints(fragment_gxp, false, hints)) {
+            util::PipelineScope skipped(util::PipelineKind::WarmMissingShader, { 0, request.pair_key });
             continue;
+        }
         const vk::RenderPass render_pass = interlock ? warm_state.interlock_render_pass : warm_state.render_pass;
         if (!render_pass)
             continue;
@@ -2088,10 +2133,16 @@ void PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
         const bool has_color_surface_data = warm_state.raw || record.color_base_format != SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16;
 
         vk::Pipeline pipeline;
-        if (support_cache_only_creation)
+        if (support_cache_only_creation) {
+            util::PipelineScope probe(util::PipelineKind::WarmProbe, { 0, request.pair_key });
             pipeline = compile_pipeline(SCE_GXM_PRIMITIVE_TRIANGLES, render_pass, vertex_binding, fragment_binding, record, has_color_surface_data, hints, warm_state.casts, mem, true);
-        if (!pipeline)
+            probe.result(bool(pipeline));
+        }
+        if (!pipeline) {
+            util::PipelineScope compile(util::PipelineKind::WarmCompile, { 0, request.pair_key });
             pipeline = compile_pipeline(SCE_GXM_PRIMITIVE_TRIANGLES, render_pass, vertex_binding, fragment_binding, record, has_color_surface_data, hints, warm_state.casts, mem);
+            compile.result(bool(pipeline));
+        }
         if (!pipeline)
             continue;
         // only the driver cache entry is wanted: the draw creates its own pipeline from it

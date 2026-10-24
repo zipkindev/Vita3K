@@ -137,3 +137,5 @@ Thank you to the supporters and to all those who support us on our [ko-fi](https
 The purpose of this emulator is not to enable illegal activity. You can dump games from a Vita by using [NoNpDrm](https://github.com/TheOfficialFloW/NoNpDrm) or [FAGDec](https://github.com/CelesteBlue-dev/PSVita-RE-tools/tree/master/FAGDec/build). You can get homebrew programs from [VitaDB](https://www.rinnegatamante.eu/vitadb/#/).
 
 PlayStation, PlayStation Vita and PlayStation Network are all registered trademarks of Sony Interactive Entertainment Inc. This emulator is not related to or endorsed by Sony, or derived from confidential materials belonging to Sony.
+
+Pipeline investigation builds also provide **Vulkan Pipeline Telemetry** in **Texture Decoding → Diagnostics (Optional)**. This restart-required option explains queue delays, protected-draw waits, renderer compilation and background warm-up activity. It collects bounded reports on normal close; leave it off for routine play. It does not change async compilation or promise a performance gain. See [the .19 diagnostic notes](docs/releases/v1.3.3-win11merge.19.md) for report limits and matching-symbol requirements.

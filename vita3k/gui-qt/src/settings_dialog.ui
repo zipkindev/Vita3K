@@ -1277,6 +1277,16 @@ QGroupBox[flat=&quot;true&quot;]::title {
                   </property>
                  </widget>
                 </item>
+                <item>
+                 <widget class="QCheckBox" name="pipeline_telemetry">
+                  <property name="text">
+                   <string>Vulkan Pipeline Telemetry</string>
+                  </property>
+                  <property name="toolTip">
+                   <string>Records selected pipeline queue delays, compilation, protected-draw waits, cache probes and background warm-up outcomes. Uses bounded summaries and rolling detail for spans of at least 2 ms. Diagnostic only: adds overhead and does not change async behaviour. Close normally to save reports. Restart required.</string>
+                  </property>
+                 </widget>
+                </item>
                </layout>
               </widget>
              </item>

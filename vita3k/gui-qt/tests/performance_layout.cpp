@@ -34,8 +34,8 @@ int main(int argc, char **argv) {
         item->setSizeHint(QSize(0, 34));
     }
     ui.tab_widget_settings->setCurrentWidget(ui.performance_tab);
-    const std::array<QCheckBox *, 5> switches{ ui.automatic_texture_preparation, ui.parallel_texture_decode,
-        ui.jit_compile_telemetry, ui.sync_wait_telemetry, ui.decoded_texture_telemetry };
+    const std::array<QCheckBox *, 6> switches{ ui.automatic_texture_preparation, ui.parallel_texture_decode,
+        ui.jit_compile_telemetry, ui.sync_wait_telemetry, ui.decoded_texture_telemetry, ui.pipeline_telemetry };
     for (const auto size : { QSize(780, 676), QSize(1280, 720) }) {
         dialog.resize(size);
         dialog.show();

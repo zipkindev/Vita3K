@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <app/functions.h>
+#include <util/pipeline_profile.h>
 #include <util/sync_wait_profile.h>
 
 #include <exception>
@@ -248,6 +249,9 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
             break;
         case config::RestartRequiredSetting::JitCompileTelemetry:
             runtime_current.jit_compile_telemetry = previous_current.jit_compile_telemetry;
+            break;
+        case config::RestartRequiredSetting::PipelineTelemetry:
+            runtime_current.pipeline_telemetry = previous_current.pipeline_telemetry;
             break;
         case config::RestartRequiredSetting::SyncWaitTelemetry:
             runtime_current.sync_wait_telemetry = previous_current.sync_wait_telemetry;
@@ -590,6 +594,11 @@ void shutdown_app_runtime(EmuEnvState &state) {
     state.renderer->cleanup();
     state.renderer.reset();
     pvr::PVRTCConfigureDecodeTelemetry(nullptr);
+    if (state.pipeline_profile) {
+        util::publish_pipeline_profile({});
+        LOG_INFO("[PIPELINE-PROFILE] {}", state.pipeline_profile->finish() ? "saved" : "report write failed");
+        state.pipeline_profile.reset();
+    }
     if (state.sync_wait_profile) {
         util::publish_sync_wait_profile({});
         LOG_INFO("[SYNC-PROFILE] {}", state.sync_wait_profile->finish() ? "saved" : "report write failed");

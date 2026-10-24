@@ -125,6 +125,7 @@ private:
         std::shared_ptr<ProgramBinding> vertex;
         std::shared_ptr<ProgramBinding> fragment;
         uint64_t pair_key;
+        uint64_t telemetry_queued = 0;
     };
     moodycamel::BlockingConcurrentQueue<WarmRequest *> warm_queue;
     std::vector<std::thread> warm_threads;

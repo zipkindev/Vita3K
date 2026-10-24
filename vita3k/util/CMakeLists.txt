@@ -10,6 +10,7 @@ add_library(
 	src/logging.cpp
 	src/mem_snapshot.cpp
 	src/net_utils.cpp
+	src/pipeline_profile.cpp
 	src/sync_wait_profile.cpp
 	src/string_utils.cpp
 	src/tracy.cpp
@@ -32,3 +33,8 @@ add_executable(sync-wait-profile-tests tests/sync_wait_profile.cpp src/sync_wait
 target_include_directories(sync-wait-profile-tests PRIVATE include)
 target_link_libraries(sync-wait-profile-tests PRIVATE Threads::Threads)
 add_test(NAME sync-wait-profile COMMAND sync-wait-profile-tests)
+
+add_executable(pipeline-profile-tests tests/pipeline_profile.cpp src/pipeline_profile.cpp)
+target_include_directories(pipeline-profile-tests PRIVATE include)
+target_link_libraries(pipeline-profile-tests PRIVATE Threads::Threads)
+add_test(NAME pipeline-profile COMMAND pipeline-profile-tests)

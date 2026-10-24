@@ -30,7 +30,8 @@
 
 namespace util {
 class SyncWaitProfile;
-}
+class PipelineProfile;
+} // namespace util
 
 // forward declare everything used in EmuEnvState
 namespace sfo {
@@ -146,6 +147,7 @@ public:
     SceUID main_thread_id{};
     std::shared_ptr<cpu::JitCompileProfile> jit_compile_profile;
     std::shared_ptr<util::SyncWaitProfile> sync_wait_profile;
+    std::shared_ptr<util::PipelineProfile> pipeline_profile;
     size_t frame_count = 0;
     uint32_t fps = 0;
     uint32_t avg_fps = 0;

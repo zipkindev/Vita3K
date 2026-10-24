@@ -96,6 +96,7 @@ struct Config {
         bool automatic_texture_preparation = false;
         bool jit_compile_telemetry = false;
         bool sync_wait_telemetry = false;
+        bool pipeline_telemetry = false;
         bool stretch_the_display_area = false;
         bool fullscreen_hd_res_pixel_perfect = false;
         int file_loading_delay = 0;

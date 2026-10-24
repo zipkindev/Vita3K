@@ -17,6 +17,7 @@
 
 #include "interface.h"
 #include "archive.h"
+#include <util/pipeline_profile.h>
 #include <util/sync_wait_profile.h>
 
 #include "module/load_module.h"
@@ -802,6 +803,17 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
         return InitThreadFailed;
     }
     emuenv.main_thread_id = main_thread->id;
+
+    try {
+        if (emuenv.cfg.current_config.pipeline_telemetry && emuenv.renderer->current_backend == renderer::Backend::Vulkan) {
+            const auto directory = util::fresh_diagnostic_path(emuenv.cache_path.native(), "pipelines");
+            emuenv.pipeline_profile = std::make_shared<util::PipelineProfile>(directory, emuenv.io.title_id);
+            util::publish_pipeline_profile(emuenv.pipeline_profile);
+            LOG_INFO("[PIPELINE-PROFILE] Armed bounded Vulkan pipeline diagnostics: {}", directory.string());
+        }
+    } catch (const std::exception &e) {
+        LOG_WARN("[PIPELINE-PROFILE] Diagnostic disabled: {}", e.what());
+    }
 
     // Run `module_start` export (entry point) of loaded libraries
     for (auto &[_, module] : emuenv.kernel.loaded_modules) {
