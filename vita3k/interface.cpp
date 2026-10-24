@@ -879,7 +879,10 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
             std::vector<cpu::JitPreparation::Region> regions;
             std::string identity = "jit-preparation20-v1-dynarmic86458a-hooks1-x64:" + emuenv.io.title_id + ":" + emuenv.app_info.app_version + ":" + emuenv.self_name + ":" + std::to_string(emuenv.kernel.cpu_opt);
             size_t bytes = 0;
-            const auto module = emuenv.kernel.loaded_modules.at(main_module_id);
+            const auto module = [&] {
+                const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
+                return emuenv.kernel.loaded_modules.at(main_module_id);
+            }();
             for (const auto &seg : module->info.segments) {
                 if (!seg.memsz || (seg.perms & 7) != 5)
                     continue; // Read/execute, never writable data.
