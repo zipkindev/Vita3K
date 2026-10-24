@@ -94,8 +94,8 @@ int main() {
     cache.stop_learning();
     assert(cache.learning_stats().bytes == 0);
     // A large selected input must not prevent smaller later records fitting.
-    Cache small(300, 16384);
-    Profile limited(small);
+    Cache limited_cache(300, 16384);
+    Profile limited(limited_cache);
     auto partial = limited.begin(root, "TEST01", "1.00|eboot", Profile::Mode::Preload, {}, decode);
     assert(partial.prepared_entries == 1 && partial.preload_budget_skips == 3);
     limited.finish();
