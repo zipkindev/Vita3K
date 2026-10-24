@@ -832,7 +832,7 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
             }
             emuenv.jit_compile_profile = std::make_shared<cpu::JitCompileProfile>(std::move(profile));
             main_thread->cpu->jit_profile = emuenv.jit_compile_profile;
-            LOG_INFO("[JIT-PROFILE] Main-thread compilation observer armed (65536 records; no prewarming)");
+            LOG_INFO("[JIT-PROFILE] Main-thread compilation observer armed (65536 rolling records; bounded session summaries; no prewarming)");
         } catch (const std::exception &e) {
             LOG_WARN("[JIT-PROFILE] Diagnostic disabled: {}", e.what());
         }

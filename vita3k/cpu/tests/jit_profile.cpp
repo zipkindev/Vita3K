@@ -104,8 +104,63 @@ void execution_test(Temp &temp, const char *name, bool thumb) {
     assert(std::filesystem::file_size(temp.parent / name / "compilations.csv") > 100);
 }
 
+static uint64_t fake_qpc = 1000;
+static uint64_t fake_counter() noexcept { return fake_qpc; }
+
+static void rolling_session_test(Temp &temp) {
+    JitCompileProfile profile(temp.config("rolling", 2), { fake_counter, 1000 });
+    for (unsigned i = 0; i < 5; ++i) {
+        profile.begin(16 + i * 4);
+        fake_qpc += 10;
+        profile.complete(20 + i * 4, i + 1);
+    }
+    assert(profile.enabled());
+    assert(profile.chronological_record(0).sequence == 3);
+    assert(profile.chronological_record(1).sequence == 4);
+    assert(profile.used_buckets() == 1);
+    assert(profile.session_buckets()[0].count == 5);
+    assert(profile.session_buckets()[0].compile_ns == 50000000);
+    assert(profile.session_buckets()[0].emitted_bytes == 15);
+    fake_qpc = 1000 + 4097ull * 1000;
+    profile.invalidated(); // Forces summary compaction, even during idle time.
+    assert(profile.bucket_width() == 2000);
+    assert(profile.session_buckets()[0].count == 5);
+    profile.begin(128);
+    fake_qpc += 25;
+    profile.complete(132, 20);
+    fake_qpc = 1000 + 20000ull * 1000;
+    profile.begin(256);
+    fake_qpc += 1;
+    profile.abort(); // More folds, preserving prior counts/maxima and aborts.
+    assert(profile.finish());
+    assert(!profile.enabled());
+    uint64_t count = 0, ns = 0, bytes = 0, aborts = 0, invalidations = 0;
+    for (size_t i = 0; i < profile.used_buckets(); ++i) {
+        const auto &b = profile.session_buckets()[i];
+        count += b.count;
+        ns += b.compile_ns;
+        bytes += b.emitted_bytes;
+        aborts += b.aborted;
+        invalidations += b.invalidations;
+    }
+    assert(count == 6 && ns == 75000000 && bytes == 35);
+    assert(aborts == 1 && invalidations == 1);
+    assert(profile.chronological_record(0).sequence == 4);
+    assert(profile.chronological_record(1).sequence == 5);
+    const auto &b = profile.session_buckets()[4097 / 8];
+    assert(b.count == 1 && b.max_ns == 25000000);
+    assert(profile.used_buckets() <= JitCompileProfile::bucket_limit);
+    assert(std::filesystem::file_size(temp.parent / "rolling" / "session.csv") > 100);
+    std::ifstream report(temp.parent / "rolling" / "summary.json");
+    std::string json((std::istreambuf_iterator<char>(report)), {});
+    assert(json.find("\"totalCompilations\":6") != std::string::npos);
+    assert(json.find("\"overwrittenRecords\":4") != std::string::npos);
+    assert(json.find("\"retainedCompileNs\":35000000") != std::string::npos);
+}
+
 int main() {
     Temp temp;
+    rolling_session_test(temp);
     execution_test<ArmTestEnv>(temp, "arm", false);
     execution_test<ThumbTestEnv>(temp, "thumb", true);
     {
@@ -121,12 +176,16 @@ int main() {
         for (size_t i = 0; i < JitCompileProfile::read_limit + 2; ++i)
             bounded.code_read(8192, 1);
         bounded.complete(36, 32);
-        assert(!bounded.enabled());
-        bounded.begin(0x30);
-        bounded.complete(52, 8);
+        assert(bounded.enabled());
+
         assert(bounded.records().size() == 2);
         assert(bounded.records()[0].hook_reads == 1);
         assert(bounded.records()[1].flags == (JitCompileProfile::OutsideStartupRegion | JitCompileProfile::ReadLimit | JitCompileProfile::InvalidRead | JitCompileProfile::InvalidatedDuringCompile));
+        bounded.begin(0x30);
+        bounded.complete(52, 8);
+        assert(bounded.records().size() == 2);
+        assert(bounded.chronological_record(0).sequence == 1);
+        assert(bounded.chronological_record(1).descriptor == 0x30);
         assert(bounded.finish());
         bool rejected = false;
         try {
