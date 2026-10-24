@@ -1,0 +1,7 @@
+# Decoded-texture cache entry-limit trial
+
+Based on parallel-decoder candidate1ff11ff2 (`v1.3.3-win11merge.2`). The only runtime change is increasing the default decoded-content entry cap from4096to16384. The independently configured byte budget is unchanged; compare at512MiB with two-way decoding and identical graphics settings. The entry cap remains bounded to limit indexing/metadata overhead; resident payload accounting continues to cover compressed+decoded vector capacities, not every allocator/container byte.
+
+A longer device session reached4096entries at approximately329MiB resident with932cumulative evictions, motivating this focused retention experiment. The snapshot does not attribute every eviction or recorded hitch to that cap. This change can retain more small textures below the byte budget; genuinely new/changed content still requires decoding. No new preloading, worker-count, scheduler, audio or upstream changes.
+
+Regression coverage fills16384small distinct entries under512MiB without premature eviction, touches the oldest entry, inserts a16385th and verifies exact LRU eviction/retention. A separate default-cap test with a16byte payload budget proves byte-driven eviction still operates independently. Existing collision-byte checks, layout/format identity, disabled cache, explicit entry caps and concurrent lookup/insertion remain covered. Windows optimized tests, exact matching native symbols and separate Go staging are required before owner comparisons. Intended diagnostic tag `v1.3.3-win11merge.3`.

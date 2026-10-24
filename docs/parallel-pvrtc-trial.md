@@ -1,0 +1,13 @@
+# Bounded parallel PVRTC decoding trial
+
+Based on curated candidate5c87451a (Plus scheduler, decoded cache/UI, corrected music decoder and two reviewed upstream correctness fixes). No other upstream imports. Intended tag `v1.3.3-win11merge.2`.
+
+PVRTC cache misses use the calling command worker plus one persistent CPU helper for textures with at least65536decoded pixels. Small images remain serial. One job may be admitted at a time; concurrent callers decode inline rather than queuing. Each task has private scratch and disjoint output quadrants, reads only the caller-owned immutable compressed snapshot, and completes before GPU upload or cache insertion. No guest pointer or renderer scratch lifetime is extended beyond the decode call. No asynchronous GPU work, preloading, disk texture packs, skipped draws or placeholder pixels are introduced.
+
+Helper/caller exceptions finish all borrowed work before propagating; the decoder then retries the unchanged reference core. Thread creation failure takes that same serial path. The original serial core and uncached reference entry point remain unchanged for independent pixel comparisons. This reduces a first-use dependency by parallelizing it; it does not hide it with speculative scheduling.
+
+Diagnostic environment switch (read once per process): `VITA3K_DIAG_PVRTC_THREADS=1` selects the original serial path; default/`2` selects caller+helper. This trial is enabled by default in this experimental build only. Cache budget remains separately controlled by the existing per-game UI; compare at512MiB with the same graphics, music and warmed shader-cache state. Restart between serial/parallel runs. A separate serial shortcut can use the same EXE/PDB pair for an additional control.
+
+Tests cover pixel/return equality with the unchanged decoder for PVRTC-I/II,2/4bpp, rectangular and cropped small mips, moved/changed source bytes, cache enabled/disabled/configured/serial, and concurrent512x512decodes. Worker tests cover reuse, bounded concurrent admission, failures from either half, completion before exception propagation and repeated idle shutdown. Queue saturation falls back inline. Required device validation still includes Sol2 effects-heavy first/repeat captures, music/controls/graphics and comparative long-gap attribution. Workstation synthetic speedups are not Go gameplay results.
+
+EXE/PDB, optimized flags, exact source and support patches must be recorded in the package provenance before staging. Preserve the existing merged.1/production installation and copy current saves only after verified normal emulator closure. Keep trace/game data private. This is an experimental diagnostic candidate, not a promoted release.
