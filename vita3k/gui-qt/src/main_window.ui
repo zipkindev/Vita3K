@@ -44,6 +44,7 @@
     <addaction name="settings_core_action"/>
     <addaction name="settings_cpu_action"/>
     <addaction name="settings_gpu_action"/>
+    <addaction name="settings_performance_action"/>
     <addaction name="settings_audio_action"/>
     <addaction name="settings_camera_action"/>
     <addaction name="settings_system_action"/>
@@ -266,6 +267,9 @@
    <property name="text">
     <string>Graphics</string>
    </property>
+  </action>
+  <action name="settings_performance_action">
+   <property name="text"><string>Performance</string></property>
   </action>
   <action name="settings_audio_action">
    <property name="text">

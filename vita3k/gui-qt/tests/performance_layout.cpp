@@ -10,11 +10,20 @@
 #include <QScrollArea>
 #include <array>
 #include <cassert>
+#include <gui-qt/settings_tabs.h>
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     QDialog dialog;
     Ui::vita3k_settings_dialog ui;
     ui.setupUi(&dialog);
+    const std::array<QWidget *, 11> pages{ ui.core_tab, ui.cpu_tab, ui.gpu_tab, ui.performance_tab,
+        ui.audio_tab, ui.camera_tab, ui.system_tab, ui.emulator_tab, ui.gui_tab, ui.network_tab, ui.debug_tab };
+    assert(ui.tab_widget_settings->count() == pages.size());
+    assert(ui.tab_widget_settings->indexOf(ui.performance_tab) == static_cast<int>(SettingsTab::Performance));
+    assert(ui.tab_widget_settings->indexOf(ui.audio_tab) == static_cast<int>(SettingsTab::Audio));
+    assert(ui.tab_widget_settings->indexOf(ui.debug_tab) == static_cast<int>(SettingsTab::Debug));
+    for (size_t i = 0; i < pages.size(); ++i)
+        assert(ui.tab_widget_settings->widget(static_cast<int>(i)) == pages[i]);
     ui.tab_widget_settings->setCurrentWidget(ui.performance_tab);
     const std::array<QCheckBox *, 5> switches{ ui.automatic_texture_preparation, ui.parallel_texture_decode,
         ui.jit_compile_telemetry, ui.sync_wait_telemetry, ui.decoded_texture_telemetry };

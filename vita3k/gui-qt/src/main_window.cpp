@@ -442,6 +442,7 @@ void MainWindow::initialize() {
     connect(m_ui->settings_core_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Core)); });
     connect(m_ui->settings_cpu_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::CPU)); });
     connect(m_ui->settings_gpu_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Graphics)); });
+    connect(m_ui->settings_performance_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Performance)); });
     connect(m_ui->settings_audio_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Audio)); });
     connect(m_ui->settings_camera_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Camera)); });
     connect(m_ui->settings_system_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::System)); });

@@ -19,6 +19,7 @@
 
 #include <app/functions.h>
 #include <config/state.h>
+#include <gui-qt/settings_tabs.h>
 
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -32,18 +33,7 @@ class GuiSettings;
 class SettingsDialogTooltips;
 class ThemeManager;
 
-enum class SettingsTab : int {
-    Core = 0,
-    CPU,
-    Graphics,
-    Audio,
-    Camera,
-    System,
-    Emulator,
-    Interface,
-    Network,
-    Debug,
-};
+
 
 namespace Ui {
 class vita3k_settings_dialog;
