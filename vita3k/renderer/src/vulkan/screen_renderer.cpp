@@ -459,7 +459,7 @@ bool ScreenRenderer::acquire_swapchain_image() {
     }
 
     if (swapchain) {
-        util::SyncWaitScope span(util::WaitKind::VulkanAcquire, { reinterpret_cast<uintptr_t>(this), current_frame });
+        util::SyncWaitScope span(util::WaitKind::VulkanAcquire, { reinterpret_cast<uintptr_t>(this), static_cast<uint64_t>(current_frame) });
         acquire_result = state.device.acquireNextImageKHR(swapchain,
             next_image_timeout, image_acquired_semaphores[current_frame], vk::Fence(), &swapchain_image_idx);
         span.result(static_cast<int32_t>(acquire_result));
