@@ -1171,7 +1171,7 @@ QGroupBox[flat=&quot;true&quot;]::title {
                    <string>Automatic Texture Preparation (Experimental)</string>
                   </property>
                   <property name="toolTip">
-                   <string>Prepare learned PVRTC textures when launching this game and update its profile when the game closes normally. Requires a nonzero Decoded Texture Cache budget. Saved profiles use up to 64 MiB per game and 1 GiB total; older profiles are removed automatically. May add loading time. Takes effect on the next game launch.</string>
+                   <string>Learn compressed PVRTC inputs even after decoded textures are evicted, merge valid previous learning, and prepare selected textures at the next game launch. May reduce repeated first-use hitches. Requires a nonzero Decoded Texture Cache budget. Learning uses up to 64 MiB extra RAM plus bounded metadata; saved profiles use up to 64 MiB per game and 1 GiB total. May add loading time. Close normally to save learning. Takes effect on the next game launch.</string>
                   </property>
                  </widget>
                 </item>

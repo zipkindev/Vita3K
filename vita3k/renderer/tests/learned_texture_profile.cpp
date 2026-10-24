@@ -88,7 +88,7 @@ int main() {
     profile.finish();
     cache.set_budget(64);
     report = profile.begin(root, "TEST01", "1.04|eboot", Profile::Mode::Preload, {}, decode);
-    assert(report.status == "partial-budget" && !report.prepared_entries && !cache.stats().entries);
+    assert(report.status == "partial-budget" && report.prepared_entries > 0 && cache.stats().resident_bytes <= 64);
     profile.finish();
     cache.set_budget(0);
     assert(profile.begin(root, "TEST01", "1.04|eboot", Profile::Mode::Learn, {}, decode).status == "cache-disabled");
@@ -100,7 +100,7 @@ int main() {
     profile.finish();
     assert(read(file) == valid);
     profile.begin(root, "TEST01", "1.04|eboot", Profile::Mode::Learn, {}, decode);
-    assert(profile.finish().status == "empty-learning" && read(file) == valid);
+    assert(profile.finish().saved_entries == tests.size() && read(file) == valid);
     // Unknown versions, truncation, lengths, dimensions, per-record hash, and
     // checksum. Re-seal mutations to exercise validation beyond checksum alone.
     const size_t first = 20 + std::string("TEST01|1.04|eboot").size();
@@ -129,7 +129,7 @@ int main() {
     profile.begin(root, "TEST01", "1.04|eboot", Profile::Mode::Learn, {}, decode);
     const auto &t = tests.back();
     cache.insert(t.key, t.input, t.expected, t.result, 999);
-    assert(profile.finish().saved_entries == 1 && read(file) != valid);
+    assert(profile.finish().saved_entries == tests.size() && read(file) != valid);
     Cache bounded_cache(1024, 1);
     const auto &a = tests.front();
     assert(bounded_cache.insert(a.key, a.input, a.expected, a.result, 1, false));

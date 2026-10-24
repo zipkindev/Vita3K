@@ -40,6 +40,8 @@ public:
         std::string status = "off";
         std::string mode = "off";
         uint64_t profile_entries = 0, prepared_entries = 0, prepared_bytes = 0, prepare_ns = 0, saved_entries = 0, profile_hash = 0;
+        uint64_t preload_budget_skips = 0, saved_decoded_bytes = 0;
+        DecodedTextureCache::LearningStats learning;
     };
 
     explicit LearnedTextureProfile(DecodedTextureCache &cache)
@@ -99,6 +101,7 @@ public:
     }
 
     Report begin(const std::filesystem::path &root, const std::string &title, const std::string &id, Mode requested, const std::filesystem::path &report_path, const Decode &decode, std::chrono::milliseconds deadline = std::chrono::seconds(5)) {
+        cache.stop_learning();
         mode = Mode::Off;
         report = {};
         output = report_path;
@@ -123,19 +126,19 @@ public:
         if (!cache.stats().budget_bytes) {
             mode = Mode::Off;
             report.status = "cache-disabled";
-        } else if (mode == Mode::Learn) {
-            report.status = "learn-ready";
         } else {
+            if (mode == Mode::Learn || mode == Mode::Automatic)
+                cache.start_learning(file_limit - 28 - identity.size());
             if (std::filesystem::is_symlink(profile.parent_path().parent_path()) || std::filesystem::is_symlink(profile.parent_path()) || std::filesystem::is_symlink(profile))
                 throw std::runtime_error("profile path is a symlink");
-            if (mode == Mode::Automatic) {
+            if (mode == Mode::Automatic || mode == Mode::Learn) {
                 TextureProfileStorage storage(profile.parent_path().parent_path());
                 storage.reserve(profile);
             }
             const auto start = Clock::now();
             std::error_code ec;
             const auto size = std::filesystem::file_size(profile, ec);
-            report.status = "no-profile";
+            report.status = mode == Mode::Learn ? "learn-ready" : "no-profile";
             if (!ec) {
                 report.status = "invalid-profile";
                 if (size <= file_limit) {
@@ -143,12 +146,19 @@ public:
                     std::ifstream input(profile, std::ios::binary);
                     std::vector<Record> records;
                     if (input.read(reinterpret_cast<char *>(bytes.data()), bytes.size()) && validate(bytes, identity, records)) {
-                        if (mode == Mode::Automatic)
+                        if (mode == Mode::Automatic || mode == Mode::Learn)
                             std::filesystem::last_write_time(profile, std::filesystem::file_time_type::clock::now());
                         report.profile_entries = records.size();
                         report.profile_hash = XXH3_64bits(bytes.data(), bytes.size());
-                        report.status = "preload-ready";
+                        // Merge every validated prior record, including records that
+                        // cannot fit the decoded cache. No decoded pixels retained here.
+                        if (mode == Mode::Automatic || mode == Mode::Learn)
+                            for (const auto &record : records)
+                                cache.merge_learning(record.key, std::span(bytes.data() + record.offset, record.size), record.decode_ns, record.uses);
+                        report.status = mode == Mode::Learn ? "learn-ready" : "preload-ready";
                         for (const auto &record : records) {
+                            if (mode == Mode::Learn)
+                                break;
                             if (Clock::now() - start >= deadline) {
                                 report.status = "partial-deadline";
                                 break;
@@ -158,7 +168,8 @@ public:
                             auto stats = cache.stats();
                             if (pixels + record.size > stats.budget_bytes - stats.resident_bytes || stats.entries >= 16384) {
                                 report.status = "partial-budget";
-                                break;
+                                ++report.preload_budget_skips;
+                                continue;
                             }
                             // At most 64 MiB input container plus one <=32 MiB
                             // decoded+compressed job; insertion copies pixels into
@@ -176,15 +187,23 @@ public:
             }
             report.prepare_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count();
         }
+        report.learning = cache.learning_stats();
         write_report();
         return report;
     }
 
     Report finish() {
         if (mode == Mode::Learn || mode == Mode::Automatic) {
-            // Called only after guest/render threads joined. No IO on demand
-            // decode, no per-frame queue, and only retained entries are learned.
-            auto entries = cache.profile_snapshot(file_limit - 28 - identity.size(), cache.stats().budget_bytes, job_limit);
+            // Called only after guest/render threads joined. Learning retains
+            // compressed inputs independently of decoded-cache eviction.
+            report.learning = cache.learning_stats();
+            auto entries = cache.learning_snapshot();
+            for (const auto &entry : entries) {
+                size_t pixels = 0;
+                if (!layout(entry.key, entry.compressed.size(), pixels))
+                    throw std::runtime_error("invalid learned texture layout");
+                report.saved_decoded_bytes += pixels + entry.compressed.size();
+            }
             if (entries.empty()) {
                 report.status = "empty-learning"; // Preserve an older good pack.
             } else {
@@ -260,6 +279,7 @@ public:
         }
         if (mode != Mode::Off)
             cache.clear();
+        cache.stop_learning();
         mode = Mode::Off;
         write_report();
         return report;
@@ -268,6 +288,7 @@ public:
     bool active() const { return mode != Mode::Off; }
 
     void fail() noexcept {
+        cache.stop_learning();
         if (mode != Mode::Off)
             cache.clear();
         mode = Mode::Off;
@@ -286,7 +307,12 @@ private:
         stream << "{\"mode\":\"" << report.mode << "\",\"status\":\"" << report.status << "\",\"profileEntries\":" << report.profile_entries
                << ",\"preparedEntries\":" << report.prepared_entries << ",\"preparedResidentBytes\":" << report.prepared_bytes
                << ",\"prepareNs\":" << report.prepare_ns << ",\"savedEntries\":" << report.saved_entries
-               << ",\"profileHash\":" << report.profile_hash << "}\n";
+               << ",\"profileHash\":" << report.profile_hash
+               << ",\"learningEntries\":" << report.learning.entries << ",\"learningBytes\":" << report.learning.bytes
+               << ",\"learningByteLimit\":" << report.learning.byte_limit << ",\"learningEntryLimit\":" << report.learning.entry_limit
+               << ",\"learningObservations\":" << report.learning.observations << ",\"mergedEntries\":" << report.learning.merged
+               << ",\"learningEvictions\":" << report.learning.evictions << ",\"learningDrops\":" << report.learning.dropped
+               << ",\"preloadBudgetSkips\":" << report.preload_budget_skips << ",\"savedDecodedBytes\":" << report.saved_decoded_bytes << "}\n";
     }
     DecodedTextureCache &cache;
     Mode mode = Mode::Off;

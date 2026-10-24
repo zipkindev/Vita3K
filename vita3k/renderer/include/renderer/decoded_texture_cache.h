@@ -10,6 +10,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -53,6 +54,56 @@ public:
         ReuseStats reuse;
     };
 
+    struct ProfileInput {
+        Key key;
+        std::vector<uint8_t> compressed;
+        uint64_t decode_ns, uses;
+    };
+
+    struct LearningStats {
+        uint64_t observations = 0, merged = 0, evictions = 0, dropped = 0;
+        size_t entries = 0, bytes = 0, byte_limit = 0, entry_limit = 0;
+    };
+    // Serialized game lifecycle only. Bounds include packed-record headers;
+    // list/index overhead is separately bounded by the entry limit.
+    void start_learning(size_t bytes, size_t entries = 16384) {
+        std::lock_guard lock(mutex);
+        stop_learning_unlocked();
+        learning_counts.byte_limit = std::min(bytes, size_t(64 * 1024 * 1024));
+        learning_counts.entry_limit = std::min(entries, size_t(16384));
+    }
+    void stop_learning() {
+        std::lock_guard lock(mutex);
+        stop_learning_unlocked();
+    }
+    void merge_learning(const Key &key, std::span<const uint8_t> input, uint64_t ns, uint64_t uses) {
+        std::lock_guard lock(mutex);
+        learn_unlocked(key, input, ns, uses, true);
+    }
+    LearningStats learning_stats() const {
+        std::lock_guard lock(mutex);
+        auto value = learning_counts;
+        value.entries = learning.size();
+        value.bytes = learning_bytes;
+        return value;
+    }
+    // Copies/moves compressed inputs only after guest/render threads joined.
+    std::vector<ProfileInput> learning_snapshot() {
+        std::lock_guard lock(mutex);
+        std::vector<ProfileInput> result;
+        result.reserve(learning.size());
+        for (auto &entry : learning)
+            result.push_back(std::move(entry));
+        learning_lookup.clear();
+        learning.clear();
+        learning_bytes = 0;
+        std::stable_sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
+            const auto score = [](const auto &e) { return std::min<uint64_t>(e.decode_ns, 1000000000000ull) * (1 + std::min<uint64_t>(e.uses, 16)); };
+            return score(a) > score(b);
+        });
+        return result;
+    }
+
     explicit DecodedTextureCache(size_t budget, size_t max_entries = 16384)
         : budget(budget)
         , max_entries(max_entries) {}
@@ -77,6 +128,7 @@ public:
             result = entry->result;
             lru.splice(lru.begin(), lru, entry);
             ++entry->uses;
+            learn_unlocked(key, compressed, entry->decode_ns, 0, false);
             ++counts.hits;
             if (reuse) {
                 auto &slot = reuse_slot(key, compressed.size(), output.size());
@@ -105,6 +157,8 @@ public:
 
     bool insert(const Key &key, std::vector<uint8_t> compressed, std::span<const uint8_t> decoded, uint32_t result, uint64_t decode_ns = 0, bool allow_eviction = true) {
         std::lock_guard lock(mutex);
+        if (allow_eviction)
+            learn_unlocked(key, compressed, decode_ns, 0, false);
         if (!max_entries || compressed.capacity() > budget || decoded.size() > budget - compressed.capacity())
             return false;
         const auto [begin, end] = lookup.equal_range(key);
@@ -148,12 +202,6 @@ public:
             reuse_slot(key, lru.front().compressed.size(), decoded.size()).state = allow_eviction ? ReuseState::Resident : ReuseState::Preloaded;
         return true;
     }
-
-    struct ProfileInput {
-        Key key;
-        std::vector<uint8_t> compressed;
-        uint64_t decode_ns, uses;
-    };
 
     // Session stop only: copies compressed bytes, never decoded pixels. The
     // renderer must be joined before taking a learning snapshot or clearing it.
@@ -344,6 +392,75 @@ private:
             return static_cast<size_t>(key.hash ^ (uint64_t(key.width) << 32) ^ key.height ^ (uint64_t(key.format) << 48));
         }
     };
+    void stop_learning_unlocked() {
+        learning_lookup.clear();
+        learning.clear();
+        learning_bytes = 0;
+        learning_counts = {};
+    }
+    void learn_unlocked(const Key &key, std::span<const uint8_t> input, uint64_t ns, uint64_t uses, bool seed) {
+        if (!learning_counts.byte_limit || !learning_counts.entry_limit)
+            return;
+        if (!seed)
+            ++learning_counts.observations;
+        constexpr size_t job_limit = 32 * 1024 * 1024;
+        const uint64_t w = std::max(key.width, key.format & 1 ? 16u : 8u), h = std::max(key.height, 8u);
+        if (!key.width || !key.height || key.format > 3 || (w & (w - 1)) || (h & (h - 1))
+            || input.size() > job_limit || w * h / (key.format & 1 ? 4 : 2) != input.size()
+            || uint64_t(key.width) * key.height > (job_limit - input.size()) / 4
+            || input.size() + 40 > learning_counts.byte_limit) {
+            ++learning_counts.dropped;
+            return;
+        }
+        const auto [begin, end] = learning_lookup.equal_range(key);
+        for (auto it = begin; it != end; ++it) {
+            auto entry = it->second;
+            if (entry->compressed.size() != input.size() || !std::equal(input.begin(), input.end(), entry->compressed.begin()))
+                continue;
+            entry->decode_ns = std::max(entry->decode_ns, ns);
+            entry->uses = seed ? std::max(entry->uses, uses) : std::min<uint64_t>(entry->uses, 1000000) + 1;
+            if (!seed)
+                learning.splice(learning.begin(), learning, entry);
+            return;
+        }
+        try {
+            std::vector<uint8_t> bytes(input.begin(), input.end());
+            const size_t cost = bytes.capacity() + 40;
+            if (cost > learning_counts.byte_limit) {
+                ++learning_counts.dropped;
+                return;
+            }
+            while (!learning.empty() && (learning_bytes > learning_counts.byte_limit - cost || learning.size() >= learning_counts.entry_limit)) {
+                const auto victim = std::prev(learning.end());
+                const auto range = learning_lookup.equal_range(victim->key);
+                for (auto it = range.first; it != range.second; ++it) {
+                    if (it->second == victim) {
+                        learning_lookup.erase(it);
+                        break;
+                    }
+                }
+                learning_bytes -= victim->compressed.capacity() + 40;
+                learning.erase(victim);
+                ++learning_counts.evictions;
+            }
+            const auto entry = learning.insert(seed ? learning.end() : learning.begin(), { key, std::move(bytes), ns, seed ? uses : 1 });
+            try {
+                learning_lookup.emplace(key, entry);
+            } catch (...) {
+                learning.erase(entry);
+                throw;
+            }
+            learning_bytes += cost;
+            if (seed)
+                ++learning_counts.merged;
+        } catch (const std::bad_alloc &) {
+            ++learning_counts.dropped; // Learning must not interrupt normal rendering.
+        }
+    }
+    std::list<ProfileInput> learning;
+    std::unordered_multimap<Key, std::list<ProfileInput>::iterator, Hash> learning_lookup;
+    size_t learning_bytes = 0;
+    LearningStats learning_counts;
     size_t budget;
     const size_t max_entries;
     mutable std::mutex mutex;
