@@ -33,8 +33,6 @@ class GuiSettings;
 class SettingsDialogTooltips;
 class ThemeManager;
 
-
-
 namespace Ui {
 class vita3k_settings_dialog;
 }

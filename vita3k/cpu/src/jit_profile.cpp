@@ -22,9 +22,7 @@ uint64_t counter() noexcept {
     QueryPerformanceCounter(&value);
     return static_cast<uint64_t>(value.QuadPart);
 #else
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch())
-                                     .count());
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 #endif
 }
 uint64_t counter_frequency() noexcept {
