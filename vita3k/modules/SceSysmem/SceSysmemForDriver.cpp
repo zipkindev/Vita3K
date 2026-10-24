@@ -17,8 +17,8 @@
 
 #include "SceSysmemForDriver.h"
 #include "SceSysmem.h"
-#include <modules/sysmem_state.h>
 #include <modules/sysmem_budget.h>
+#include <modules/sysmem_state.h>
 
 #include <kernel/state.h>
 #include <mem/functions.h>
