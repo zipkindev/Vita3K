@@ -208,6 +208,22 @@ TEST(bitmap_allocator, best_fit_multiple_fit) {
     ASSERT_EQ(alloc.words[0], 0b10000111100100010101000100000001);
 }
 
+TEST(bitmap_allocator, best_fit_ignores_slots_past_maximum) {
+    BitmapAllocator alloc(30);
+
+    // Bitmap:              1111 1111 1100 0000 0000 0000 0000 11|11
+    //                                              max_offset ^
+    alloc.words[0] = 0b1111'1111'1100'0000'0000'0000'0000'1111;
+
+    uint32_t to_alloc = 3;
+    ASSERT_EQ(alloc.allocate_from(0, to_alloc, true), 0);
+    ASSERT_EQ(to_alloc, 3);
+
+    to_alloc = 2;
+    ASSERT_EQ(alloc.allocate_from(0, to_alloc, true), 28);
+    ASSERT_EQ(to_alloc, 2);
+}
+
 TEST(bitmap_allocator, count_bit_aligned) {
     BitmapAllocator alloc(32 * 3);
 
@@ -242,4 +258,57 @@ TEST(bitmap_allocator, count_unaligned) {
 
     // 4 valid bits + 12 bits + 5 valid bits = 21
     ASSERT_EQ(alloc.free_slot_count(22, 92), 21);
+}
+
+TEST(bitmap_allocator, fragmented_runs_match_bounded_reference) {
+    uint32_t seed = 0x6D2B79F5;
+    for (uint32_t bits : { 1u, 30u, 32u, 33u, 63u, 95u, 129u }) {
+        for (int pattern = 0; pattern < 80; ++pattern) {
+            BitmapAllocator initial(bits);
+            for (auto &word : initial.words) {
+                seed = seed * 1664525u + 1013904223u;
+                word = seed;
+            }
+            for (uint32_t request : { 1u, 2u, 3u, 7u, 16u, 32u, 64u }) {
+                for (bool best_fit : { false, true }) {
+                    int expected = -1;
+                    uint32_t shortest = bits + 1;
+                    for (uint32_t cursor = 0; cursor < bits;) {
+                        const auto available = [&](uint32_t slot) {
+                            return (initial.words[slot / 32] & (1u << (31 - slot % 32))) != 0;
+                        };
+                        if (!available(cursor)) {
+                            ++cursor;
+                            continue;
+                        }
+                        const uint32_t begin = cursor;
+                        while (cursor < bits && available(cursor))
+                            ++cursor;
+                        const uint32_t length = cursor - begin;
+                        if (length >= request && (expected == -1 || (best_fit && length < shortest))) {
+                            expected = static_cast<int>(begin);
+                            shortest = length;
+                            if (!best_fit)
+                                break;
+                        }
+                    }
+                    BitmapAllocator actual = initial;
+                    uint32_t size = request;
+                    EXPECT_EQ(actual.allocate_from(0, size, best_fit), expected)
+                        << "bits=" << bits << " request=" << request << " best_fit=" << best_fit;
+                    if (expected >= 0) {
+                        EXPECT_EQ(size, request);
+                        for (uint32_t slot = 0; slot < bits; ++slot) {
+                            const bool was_free = (initial.words[slot / 32] & (1u << (31 - slot % 32))) != 0;
+                            const bool is_free = (actual.words[slot / 32] & (1u << (31 - slot % 32))) != 0;
+                            const bool taken = slot >= static_cast<uint32_t>(expected) && slot < static_cast<uint32_t>(expected) + request;
+                            EXPECT_EQ(is_free, was_free && !taken);
+                        }
+                    } else {
+                        EXPECT_EQ(actual.words, initial.words);
+                    }
+                }
+            }
+        }
+    }
 }
