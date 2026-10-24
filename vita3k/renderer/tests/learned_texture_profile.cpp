@@ -136,5 +136,33 @@ int main() {
     const auto before = bounded_cache.stats();
     assert(!bounded_cache.insert(t.key, t.input, t.expected, t.result, 1, false));
     assert(bounded_cache.stats().entries == before.entries && bounded_cache.stats().evictions == before.evictions);
+    // End-to-end: writer rank, on-disk record order and reader insertion must
+    // preserve the best prepared record when a new demand texture needs room.
+    Cache ranked_cache(576, 2); // Two 8x8 RGBA payloads + compressed inputs.
+    Profile ranked_profile(ranked_cache);
+    assert(ranked_profile.begin(root, "RANK01", "1.04|eboot", Profile::Mode::Learn, {}, decode).status == "learn-ready");
+    std::vector<uint8_t> high_input(32, 0x31), low_input(32, 0x72), demand_input(32, 0x19);
+    std::vector<uint8_t> high_pixels(256), low_pixels(256), demand_pixels(256), actual(256);
+    const Cache::Key high{ XXH3_64bits(high_input.data(), high_input.size()), 8, 8, 0 };
+    const Cache::Key low{ XXH3_64bits(low_input.data(), low_input.size()), 8, 8, 0 };
+    const Cache::Key demand{ XXH3_64bits(demand_input.data(), demand_input.size()), 8, 8, 0 };
+    const auto high_result = pvr::PVRTDecompressPVRTCUncached(high_input.data(), 0, 8, 8, 0, high_pixels.data());
+    const auto low_result = pvr::PVRTDecompressPVRTCUncached(low_input.data(), 0, 8, 8, 0, low_pixels.data());
+    const auto demand_result = pvr::PVRTDecompressPVRTCUncached(demand_input.data(), 0, 8, 8, 0, demand_pixels.data());
+    assert(ranked_cache.insert(high, high_input, high_pixels, high_result, 100000000));
+    assert(ranked_cache.insert(low, low_input, low_pixels, low_result, 1000));
+    assert(ranked_profile.finish().saved_entries == 2);
+    const auto ranked_file = root / "decoded-textures/RANK01/learned.pvrp";
+    const auto ranked_bytes = read(ranked_file);
+    assert(Profile::validate(ranked_bytes, "RANK01|1.04|eboot", records));
+    assert(records.size() == 2 && records.front().key == high && records.back().key == low);
+    assert(ranked_profile.begin(root, "RANK01", "1.04|eboot", Profile::Mode::Preload, {}, decode).prepared_entries == 2);
+    assert(ranked_cache.insert(demand, demand_input, demand_pixels, demand_result));
+    uint32_t used = 0;
+    assert(!ranked_cache.copy(low, low_input, actual, used));
+    assert(ranked_cache.copy(high, high_input, actual, used) && actual == high_pixels && used == high_result);
+    assert(ranked_cache.copy(demand, demand_input, actual, used) && actual == demand_pixels && used == demand_result);
+    ranked_profile.finish();
+    assert(read(ranked_file) == ranked_bytes); // Preload-only comparison stays immutable.
     std::cout << tests.size() << " profile reloads byte-identical; bounds, corruption, lifecycle passed\n";
 }
