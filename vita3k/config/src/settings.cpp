@@ -58,6 +58,10 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.spirv_shader = cfg.spirv_shader;
     current.texture_cache = cfg.texture_cache;
     current.decoded_texture_cache_mb = cfg.decoded_texture_cache_mb;
+    current.jit_compile_telemetry = cfg.jit_compile_telemetry;
+    current.sync_wait_telemetry = cfg.sync_wait_telemetry;
+    current.parallel_texture_decode = cfg.parallel_texture_decode;
+    current.decoded_texture_telemetry = cfg.decoded_texture_telemetry;
     current.automatic_texture_preparation = cfg.automatic_texture_preparation;
     current.audio_backend = cfg.audio_backend;
     current.audio_volume = cfg.audio_volume;
@@ -108,6 +112,10 @@ void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.spirv_shader = current.spirv_shader;
     cfg.texture_cache = current.texture_cache;
     cfg.decoded_texture_cache_mb = current.decoded_texture_cache_mb;
+    cfg.jit_compile_telemetry = current.jit_compile_telemetry;
+    cfg.sync_wait_telemetry = current.sync_wait_telemetry;
+    cfg.parallel_texture_decode = current.parallel_texture_decode;
+    cfg.decoded_texture_telemetry = current.decoded_texture_telemetry;
     cfg.automatic_texture_preparation = current.automatic_texture_preparation;
     cfg.audio_backend = current.audio_backend;
     cfg.audio_volume = current.audio_volume;
@@ -155,6 +163,10 @@ std::vector<RestartRequiredSetting> get_restart_required_settings(
     append_if_changed(before.validation_layer != after.validation_layer, RestartRequiredSetting::ValidationLayer);
     append_if_changed(before.accurate_thread_scheduling != after.accurate_thread_scheduling, RestartRequiredSetting::AccurateThreadScheduling);
     append_if_changed(before.guest_cores != after.guest_cores, RestartRequiredSetting::GuestCores);
+    append_if_changed(before.jit_compile_telemetry != after.jit_compile_telemetry, RestartRequiredSetting::JitCompileTelemetry);
+    append_if_changed(before.sync_wait_telemetry != after.sync_wait_telemetry, RestartRequiredSetting::SyncWaitTelemetry);
+    append_if_changed(before.parallel_texture_decode != after.parallel_texture_decode, RestartRequiredSetting::ParallelTextureDecode);
+    append_if_changed(before.decoded_texture_telemetry != after.decoded_texture_telemetry, RestartRequiredSetting::DecodedTextureTelemetry);
     append_if_changed(before.automatic_texture_preparation != after.automatic_texture_preparation, RestartRequiredSetting::AutomaticTexturePreparation);
     append_if_changed(before.decoded_texture_cache_mb != after.decoded_texture_cache_mb, RestartRequiredSetting::DecodedTextureCache);
 
@@ -218,6 +230,10 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
         out.shader_cache = gpu.attribute("shader-cache").as_bool(true);
         out.spirv_shader = gpu.attribute("spirv-shader").as_bool();
         out.texture_cache = gpu.attribute("texture-cache").as_bool(true);
+        out.jit_compile_telemetry = gpu.attribute("jit-compile-telemetry").as_bool(out.jit_compile_telemetry);
+        out.sync_wait_telemetry = gpu.attribute("sync-wait-telemetry").as_bool(out.sync_wait_telemetry);
+        out.parallel_texture_decode = gpu.attribute("parallel-texture-decode").as_bool(out.parallel_texture_decode);
+        out.decoded_texture_telemetry = gpu.attribute("decoded-texture-telemetry").as_bool(out.decoded_texture_telemetry);
         out.automatic_texture_preparation = gpu.attribute("automatic-texture-preparation").as_bool(out.automatic_texture_preparation);
         out.decoded_texture_cache_mb = std::clamp(gpu.attribute("decoded-texture-cache-mb").as_int(out.decoded_texture_cache_mb), 0, 512);
     }
@@ -311,6 +327,10 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
     gpu_child.append_attribute("shader-cache") = cc.shader_cache;
     gpu_child.append_attribute("spirv-shader") = cc.spirv_shader;
     gpu_child.append_attribute("texture-cache") = cc.texture_cache;
+    gpu_child.append_attribute("jit-compile-telemetry") = cc.jit_compile_telemetry;
+    gpu_child.append_attribute("sync-wait-telemetry") = cc.sync_wait_telemetry;
+    gpu_child.append_attribute("parallel-texture-decode") = cc.parallel_texture_decode;
+    gpu_child.append_attribute("decoded-texture-telemetry") = cc.decoded_texture_telemetry;
     gpu_child.append_attribute("automatic-texture-preparation") = cc.automatic_texture_preparation;
     gpu_child.append_attribute("decoded-texture-cache-mb") = std::clamp(cc.decoded_texture_cache_mb, 0, 512);
 

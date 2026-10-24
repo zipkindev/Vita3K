@@ -13,6 +13,8 @@ int main() {
     Config cfg;
     assert(cfg.decoded_texture_cache_mb == 0);
     assert(!cfg.automatic_texture_preparation);
+    assert(!cfg.jit_compile_telemetry && !cfg.sync_wait_telemetry && !cfg.decoded_texture_telemetry);
+    assert(cfg.parallel_texture_decode);
     Config::CurrentConfig settings;
     assert(settings.decoded_texture_cache_mb == 0);
     const auto dir = fs::temp_directory_path() / ("vita3k-cache-settings-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -20,11 +22,19 @@ int main() {
     for (int mib : { 0, 128, 256, 512 }) {
         settings.decoded_texture_cache_mb = mib;
         settings.automatic_texture_preparation = mib != 0;
+        settings.jit_compile_telemetry = mib == 512;
+        settings.sync_wait_telemetry = mib == 256;
+        settings.decoded_texture_telemetry = mib == 128;
+        settings.parallel_texture_decode = mib != 0;
         assert(config::save_custom_config(settings, dir, "TEST"));
         Config::CurrentConfig loaded;
         assert(config::load_custom_config(loaded, dir, "TEST"));
         assert(loaded.decoded_texture_cache_mb == mib);
         assert(loaded.automatic_texture_preparation == (mib != 0));
+        assert(loaded.jit_compile_telemetry == (mib == 512));
+        assert(loaded.sync_wait_telemetry == (mib == 256));
+        assert(loaded.decoded_texture_telemetry == (mib == 128));
+        assert(loaded.parallel_texture_decode == (mib != 0));
     }
     // Legacy profiles omit the new field and should inherit the global setting.
     const auto path = dir / "config/config_TEST.xml";
@@ -54,5 +64,14 @@ int main() {
     changed.automatic_texture_preparation = false;
     const auto auto_restart = config::get_restart_required_settings(inherited, changed);
     assert(auto_restart.size() == 1 && auto_restart[0] == config::RestartRequiredSetting::AutomaticTexturePreparation);
+    for (auto [member, expected] : { std::pair{ &Config::CurrentConfig::jit_compile_telemetry, config::RestartRequiredSetting::JitCompileTelemetry },
+             std::pair{ &Config::CurrentConfig::sync_wait_telemetry, config::RestartRequiredSetting::SyncWaitTelemetry },
+             std::pair{ &Config::CurrentConfig::decoded_texture_telemetry, config::RestartRequiredSetting::DecodedTextureTelemetry },
+             std::pair{ &Config::CurrentConfig::parallel_texture_decode, config::RestartRequiredSetting::ParallelTextureDecode } }) {
+        changed = inherited;
+        changed.*member = !(inherited.*member);
+        const auto pending = config::get_restart_required_settings(inherited, changed);
+        assert(pending.size() == 1 && pending[0] == expected);
+    }
     fs::remove_all(dir);
 }

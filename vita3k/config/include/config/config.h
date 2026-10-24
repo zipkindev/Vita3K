@@ -167,6 +167,10 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(std::string, "screen-filter", "Bilinear", screen_filter)                                       \
     code(bool, "v-sync", true, v_sync)                                                                  \
     code(int, "anisotropic-filtering", 1, anisotropic_filtering)                                        \
+    code(bool, "jit-compile-telemetry", false, jit_compile_telemetry)                             \
+    code(bool, "sync-wait-telemetry", false, sync_wait_telemetry)                                 \
+    code(bool, "parallel-texture-decode", true, parallel_texture_decode) \
+    code(bool, "decoded-texture-telemetry", false, decoded_texture_telemetry) \
     code(bool, "automatic-texture-preparation", false, automatic_texture_preparation)              \
     code(int, "decoded-texture-cache-mb", 0, decoded_texture_cache_mb)                             \
     code(bool, "texture-cache", true, texture_cache)                                                    \

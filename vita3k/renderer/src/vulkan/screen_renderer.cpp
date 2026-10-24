@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include "renderer/vulkan/screen_renderer.h"
+#include <util/sync_wait_profile.h>
 
 #include "renderer/vulkan/state.h"
 #include "util/log.h"
@@ -457,9 +458,12 @@ bool ScreenRenderer::acquire_swapchain_image() {
         return false;
     }
 
-    if (swapchain)
+    if (swapchain) {
+        util::SyncWaitScope span(util::WaitKind::VulkanAcquire, { reinterpret_cast<uintptr_t>(this), current_frame });
         acquire_result = state.device.acquireNextImageKHR(swapchain,
             next_image_timeout, image_acquired_semaphores[current_frame], vk::Fence(), &swapchain_image_idx);
+        span.result(static_cast<int32_t>(acquire_result));
+    }
 
     const bool has_acquired_image = acquire_result == vk::Result::eSuccess || acquire_result == vk::Result::eSuboptimalKHR;
     if (!has_acquired_image) {
@@ -488,7 +492,12 @@ bool ScreenRenderer::acquire_swapchain_image() {
     }
 
     // wait for the previous frame using this image to finish
-    auto result = state.device.waitForFences(fences[swapchain_image_idx], VK_TRUE, next_image_timeout);
+    auto result = [&]() {
+        util::SyncWaitScope span(util::WaitKind::VulkanFence, { reinterpret_cast<uintptr_t>(this), swapchain_image_idx });
+        auto result = state.device.waitForFences(fences[swapchain_image_idx], VK_TRUE, next_image_timeout);
+        span.result(static_cast<int32_t>(result));
+        return result;
+    }();
     if (result != vk::Result::eSuccess) {
         LOG_ERROR("Could not wait for fences.");
         return false;
@@ -596,7 +605,12 @@ void ScreenRenderer::swap_window() {
         .pImageIndices = &swapchain_image_idx,
     };
 
-    auto result = state.general_queue.presentKHR(&present_info);
+    auto result = [&]() {
+        util::SyncWaitScope span(util::WaitKind::VulkanPresent, { reinterpret_cast<uintptr_t>(this), swapchain_image_idx });
+        auto result = state.general_queue.presentKHR(&present_info);
+        span.result(static_cast<int32_t>(result));
+        return result;
+    }();
     if (result == vk::Result::eSuboptimalKHR) {
         if (note_size_mismatch(!surface_matches_window_size())) {
             need_rebuild = true;

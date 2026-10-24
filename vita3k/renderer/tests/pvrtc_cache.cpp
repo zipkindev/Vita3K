@@ -29,6 +29,15 @@ int main(int argc, char **argv) {
 #endif
     if (configured) {
 #ifdef _WIN32
+        _putenv_s("VITA3K_DIAG_PVRTC_THREADS", "");
+#else
+        unsetenv("VITA3K_DIAG_PVRTC_THREADS");
+#endif
+        pvr::PVRTCConfigureDecodeCache(0, false);
+        assert(pvr::PVRTCDecodeParallelism() == 1);
+        pvr::PVRTCConfigureDecodeCache(0, true);
+        assert(pvr::PVRTCDecodeParallelism() == 2);
+#ifdef _WIN32
         _putenv_s("VITA3K_DIAG_PVRTC_CACHE_MB", "");
 #else
         unsetenv("VITA3K_DIAG_PVRTC_CACHE_MB");

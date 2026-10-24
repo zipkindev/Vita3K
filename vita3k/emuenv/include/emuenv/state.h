@@ -28,6 +28,10 @@
 #include <utility>
 #include <vector>
 
+namespace util {
+class SyncWaitProfile;
+}
+
 // forward declare everything used in EmuEnvState
 namespace sfo {
 struct SfoAppInfo;
@@ -141,6 +145,7 @@ public:
     Config &cfg;
     SceUID main_thread_id{};
     std::shared_ptr<cpu::JitCompileProfile> jit_compile_profile;
+    std::shared_ptr<util::SyncWaitProfile> sync_wait_profile;
     size_t frame_count = 0;
     uint32_t fps = 0;
     uint32_t avg_fps = 0;

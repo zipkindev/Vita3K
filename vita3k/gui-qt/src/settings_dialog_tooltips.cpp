@@ -44,6 +44,14 @@ QString restart_required_setting_label(config::RestartRequiredSetting setting) {
         return QCoreApplication::translate("SettingsDialogTooltips", "Vulkan Validation Layer");
     case config::RestartRequiredSetting::AccurateThreadScheduling:
         return QCoreApplication::translate("SettingsDialogTooltips", "Accurate Thread Scheduling");
+    case config::RestartRequiredSetting::JitCompileTelemetry:
+        return QObject::tr("JIT Compilation Telemetry");
+    case config::RestartRequiredSetting::SyncWaitTelemetry:
+        return QObject::tr("Synchronization Wait Telemetry");
+    case config::RestartRequiredSetting::ParallelTextureDecode:
+        return QObject::tr("Parallel Texture Decoding");
+    case config::RestartRequiredSetting::DecodedTextureTelemetry:
+        return QObject::tr("Texture Cache Telemetry");
     case config::RestartRequiredSetting::AutomaticTexturePreparation:
         return QCoreApplication::translate("SettingsDialogTooltips", "Automatic Texture Preparation");
     case config::RestartRequiredSetting::DecodedTextureCache:

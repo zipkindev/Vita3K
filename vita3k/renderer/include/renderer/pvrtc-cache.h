@@ -8,7 +8,8 @@
 namespace pvr {
 renderer::DecodedTextureCache::Stats PVRTCDecodeCacheStats();
 // Apply the per-game setting; an explicit diagnostic environment override wins.
-void PVRTCConfigureDecodeCache(int configured_mib);
+void PVRTCConfigureDecodeCache(int configured_mib, bool parallel = true);
+void PVRTCConfigureDecodeTelemetry(const char *path);
 int PVRTCDecodeParallelism();
 // Serialized app lifecycle only: before guest start / after guest+renderer join.
 std::string PVRTCStartTextureProfile(const std::string &cache_root_utf8, const std::string &title, const std::string &identity, bool automatic = false);

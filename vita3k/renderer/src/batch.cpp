@@ -22,6 +22,7 @@
 #include <renderer/functions.h>
 #include <renderer/state.h>
 #include <renderer/types.h>
+#include <util/sync_wait_profile.h>
 
 #include <renderer/vulkan/types.h>
 
@@ -187,7 +188,12 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
             return;
 
         // Try to wait for a batch (about 2 or 3ms, game should be fast for this)
-        auto cmd_list = state.command_buffer_queue.top(3000);
+        auto cmd_list = [&]() {
+            util::SyncWaitScope span(util::WaitKind::RendererQueue, { reinterpret_cast<uintptr_t>(&state.command_buffer_queue), 0, 3000 });
+            auto list = state.command_buffer_queue.top(3000);
+            span.result(list ? 1 : 0);
+            return list;
+        }();
 
         if (!cmd_list || !is_cmd_ready(mem, *cmd_list)) {
             // beginning of the game or homebrew not using gxm

@@ -10,6 +10,7 @@ add_library(
 	src/logging.cpp
 	src/mem_snapshot.cpp
 	src/net_utils.cpp
+	src/sync_wait_profile.cpp
 	src/string_utils.cpp
 	src/tracy.cpp
 	src/vita_theme_utils.cpp
@@ -25,3 +26,9 @@ if(ANDROID)
 	target_link_libraries(util PRIVATE adrenotools)
 endif()
 target_compile_definitions(util PRIVATE $<$<CONFIG:Debug,RelWithDebInfo>:TRACY_ENABLE>)
+
+find_package(Threads REQUIRED)
+add_executable(sync-wait-profile-tests tests/sync_wait_profile.cpp src/sync_wait_profile.cpp)
+target_include_directories(sync-wait-profile-tests PRIVATE include)
+target_link_libraries(sync-wait-profile-tests PRIVATE Threads::Threads)
+add_test(NAME sync-wait-profile COMMAND sync-wait-profile-tests)

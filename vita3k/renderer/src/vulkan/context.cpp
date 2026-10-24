@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <renderer/vulkan/types.h>
+#include <util/sync_wait_profile.h>
 
 #include <renderer/vulkan/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -73,7 +74,12 @@ void VKState::wait_thread_function(const MemState &mem) {
             // timeout so we can check for shutdown
             vk::Result result;
             try {
-                result = state.device.waitForFences(fences, VK_TRUE, 100'000'000ULL);
+                result = [&]() {
+                    util::SyncWaitScope span(util::WaitKind::VulkanFence, { reinterpret_cast<uintptr_t>(&state), 0, 100000 });
+                    auto result = state.device.waitForFences(fences, VK_TRUE, 100'000'000ULL);
+                    span.result(static_cast<int32_t>(result));
+                    return result;
+                }();
             } catch (const vk::SystemError &error) {
                 LOG_CRITICAL("Vulkan device lost while waiting for GPU work: {}", error.what());
                 device_lost = true;
@@ -1026,11 +1032,19 @@ void new_frame(VKContext &context) {
 
             // the wait is done by the wait thread
             std::unique_lock<std::mutex> lock(context.new_frame_mutex);
+            util::SyncWaitScope span(util::WaitKind::VulkanFrameReady,
+                { reinterpret_cast<uintptr_t>(&context), previous_frame_timestamp });
             context.new_frame_condv.wait(lock, [&]() {
                 return context.last_frame_waited >= previous_frame_timestamp;
             });
+            span.result(0);
         } else {
-            auto result = device.waitForFences(frame.rendered_fences, VK_TRUE, std::numeric_limits<uint64_t>::max());
+            auto result = [&]() {
+                util::SyncWaitScope span(util::WaitKind::VulkanFence, { reinterpret_cast<uintptr_t>(&context), context.frame_timestamp });
+                auto result = device.waitForFences(frame.rendered_fences, VK_TRUE, std::numeric_limits<uint64_t>::max());
+                span.result(static_cast<int32_t>(result));
+                return result;
+            }();
             if (result != vk::Result::eSuccess) {
                 LOG_ERROR("Could not wait for fences.");
                 assert(false);

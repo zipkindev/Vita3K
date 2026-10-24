@@ -22,6 +22,7 @@
 #include <renderer/driver_functions.h>
 #include <renderer/state.h>
 #include <renderer/types.h>
+#include <util/sync_wait_profile.h>
 
 #include <display/state.h>
 #include <renderer/gl/functions.h>
@@ -160,6 +161,8 @@ int wait_for_status(State &state, int *status, int signal, bool wake_on_equal) {
         return *status;
     }
 
+    util::SyncWaitScope measured_wait(util::WaitKind::RendererStatus,
+        { reinterpret_cast<uintptr_t>(status), static_cast<uint32_t>(signal) });
     // unblock threads if shutting down
     const auto ready = [&]() {
         return state.render_abort.load(std::memory_order_relaxed)
@@ -176,11 +179,13 @@ int wait_for_status(State &state, int *status, int signal, bool wake_on_equal) {
             LOG_ERROR("[CMDLOST] a command list was abandoned while waiting for its completion status; releasing the waiter (#{})", n);
         break;
     }
-    return *status;
+    return measured_wait.finish(*status);
 }
 
 SyncWaitResult wishlist(SceGxmSyncObject *sync_object, const uint32_t timestamp, const int32_t timeout_micros) {
     std::unique_lock<std::mutex> lock(sync_object->lock);
+    util::SyncWaitScope measured_wait(util::WaitKind::RendererSync,
+        { reinterpret_cast<uintptr_t>(sync_object), timestamp, timeout_micros });
     if (sync_object->timestamp_current < timestamp) {
         const auto &pred = [&]() {
             return sync_object->being_deleted || sync_object->timestamp_current >= timestamp;
@@ -189,11 +194,15 @@ SyncWaitResult wishlist(SceGxmSyncObject *sync_object, const uint32_t timestamp,
         if (timeout_micros == -1) {
             sync_object->cond.wait(lock, pred);
         } else if (!sync_object->cond.wait_for(lock, std::chrono::microseconds(timeout_micros), pred)) {
+            measured_wait.result(static_cast<int32_t>(SyncWaitResult::TimedOut));
             return SyncWaitResult::TimedOut;
         }
     }
-    if (sync_object->being_deleted)
+    if (sync_object->being_deleted) {
+        measured_wait.result(static_cast<int32_t>(SyncWaitResult::Shutdown));
         return SyncWaitResult::Shutdown;
+    }
+    measured_wait.result(static_cast<int32_t>(SyncWaitResult::Ready));
     return SyncWaitResult::Ready;
 }
 

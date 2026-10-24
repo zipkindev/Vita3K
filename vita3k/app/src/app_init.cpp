@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <app/functions.h>
+#include <util/sync_wait_profile.h>
 
 #include <exception>
 
@@ -239,6 +240,18 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
         case config::RestartRequiredSetting::GuestCores:
             runtime_current.guest_cores = previous_current.guest_cores;
             break;
+        case config::RestartRequiredSetting::ParallelTextureDecode:
+            runtime_current.parallel_texture_decode = previous_current.parallel_texture_decode;
+            break;
+        case config::RestartRequiredSetting::DecodedTextureTelemetry:
+            runtime_current.decoded_texture_telemetry = previous_current.decoded_texture_telemetry;
+            break;
+        case config::RestartRequiredSetting::JitCompileTelemetry:
+            runtime_current.jit_compile_telemetry = previous_current.jit_compile_telemetry;
+            break;
+        case config::RestartRequiredSetting::SyncWaitTelemetry:
+            runtime_current.sync_wait_telemetry = previous_current.sync_wait_telemetry;
+            break;
         case config::RestartRequiredSetting::AutomaticTexturePreparation:
             runtime_current.automatic_texture_preparation = previous_current.automatic_texture_preparation;
             break;
@@ -253,7 +266,18 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
 
 void set_current_config(EmuEnvState &emuenv, const std::string &app_path) {
     config::set_current_config(emuenv.cfg, emuenv.config_path, app_path);
-    pvr::PVRTCConfigureDecodeCache(emuenv.cfg.current_config.decoded_texture_cache_mb);
+    pvr::PVRTCConfigureDecodeCache(emuenv.cfg.current_config.decoded_texture_cache_mb, emuenv.cfg.current_config.parallel_texture_decode);
+    if (!app_path.empty() && emuenv.cfg.current_config.decoded_texture_telemetry) {
+        try {
+            const auto path = util::fresh_diagnostic_path(emuenv.cache_path.native(), "texture-cache");
+            const auto text = fs_utils::path_to_utf8(fs::path(path.native())) + ".csv";
+            pvr::PVRTCConfigureDecodeTelemetry(text.c_str());
+        } catch (const std::exception &e) {
+            LOG_WARN("[TEXTURE-TELEMETRY] Disabled: {}", e.what());
+        }
+    } else {
+        pvr::PVRTCConfigureDecodeTelemetry(nullptr);
+    }
     set_backend_renderer(emuenv, emuenv.cfg.current_config.backend_renderer);
     emuenv.audio.set_global_volume(emuenv.cfg.current_config.audio_volume / 100.f);
     lang::set_locale(emuenv.cfg.current_config.sys_lang);
@@ -565,6 +589,12 @@ void shutdown_app_runtime(EmuEnvState &state) {
     unprotect_external_mappings(state.mem);
     state.renderer->cleanup();
     state.renderer.reset();
+    pvr::PVRTCConfigureDecodeTelemetry(nullptr);
+    if (state.sync_wait_profile) {
+        util::publish_sync_wait_profile({});
+        LOG_INFO("[SYNC-PROFILE] {}", state.sync_wait_profile->finish() ? "saved" : "report write failed");
+        state.sync_wait_profile.reset();
+    }
 
     deinit_mem(state.mem);
 }

@@ -21,6 +21,7 @@
 #include <kernel/sync_primitives.h>
 #include <kernel/thread/thread_state.h>
 #include <mem/functions.h>
+#include <util/sync_wait_profile.h>
 
 #include <algorithm>
 #include <array>
@@ -272,6 +273,17 @@ inline static int handle_timeout(KernelState &kernel, const ThreadStatePtr &thre
     std::unique_lock<std::mutex> &primitive_lock, WaitingThreadQueuePtr &queue,
     const ThreadDataQueueInterator<WaitingThreadData> &data_it, const char *export_name,
     SceUInt *const timeout) {
+    util::WaitContext wait_context;
+    if (util::sync_wait_profile_enabled()) {
+        wait_context.object = static_cast<uint32_t>(thread->wait_prim_uid);
+        wait_context.related = thread->wait_extra;
+        wait_context.timeout_us = timeout ? *timeout : -1LL;
+        wait_context.guest_tid = thread->id;
+        wait_context.guest_pc = thread->cpu ? read_pc(*thread->cpu) : 0;
+        wait_context.import_nid = thread->last_import_nid;
+        wait_context.import_lr = thread->last_import_lr;
+    }
+    util::SyncWaitScope measured_wait(util::WaitKind::GuestPrimitive, wait_context);
     guest_sched_release_for_block();
 
     // the kernel runs a callback on a blocked thread and then resumes its wait
@@ -313,7 +325,7 @@ inline static int handle_timeout(KernelState &kernel, const ThreadStatePtr &thre
         if (!status) {
             unwind();
 
-            return interrupted ? VITA3K_WAIT_INTERRUPTED_BY_CB : RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+            return measured_wait.finish(interrupted ? VITA3K_WAIT_INTERRUPTED_BY_CB : RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT));
         }
     } else {
         const auto recheck = std::chrono::microseconds(cb_wait ? CALLBACK_POLL_US : WAKE_RECHECK_US);
@@ -323,7 +335,7 @@ inline static int handle_timeout(KernelState &kernel, const ThreadStatePtr &thre
             if (cb_wait && thread->status != ThreadStatus::run && callback_pending(callbacks)) {
                 unwind();
 
-                return VITA3K_WAIT_INTERRUPTED_BY_CB;
+                return measured_wait.finish(VITA3K_WAIT_INTERRUPTED_BY_CB);
             }
         }
     }
@@ -334,7 +346,7 @@ inline static int handle_timeout(KernelState &kernel, const ThreadStatePtr &thre
             queue->erase(queued);
     }
 
-    return SCE_KERNEL_OK;
+    return measured_wait.finish(SCE_KERNEL_OK);
 }
 
 static constexpr SceUInt64 HLE_PROCESS_ID = 1;

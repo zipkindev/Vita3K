@@ -1001,28 +1001,6 @@ QGroupBox[flat=&quot;true&quot;]::title {
                   </layout>
                  </widget>
                 </item>
-                <item row="2" column="0" colspan="2">
-                 <layout class="QHBoxLayout" name="decoded_texture_cache_layout">
-                  <item>
-                   <widget class="QLabel" name="label_decoded_texture_cache">
-                    <property name="text"><string>Decoded Texture Cache (Experimental)</string></property>
-                   </widget>
-                  </item>
-                  <item><widget class="QComboBox" name="decoded_texture_cache_mb"/></item>
-                 </layout>
-                </item>
-                <item row="3" column="0" colspan="2">
-                 <widget class="QCheckBox" name="automatic_texture_preparation">
-                  <property name="text"><string>Automatic Texture Preparation (Experimental)</string></property>
-                  <property name="toolTip"><string>Prepare learned PVRTC textures when launching this game and update its profile when the game closes normally. Requires a nonzero Decoded Texture Cache budget. Saved profiles use up to 64 MiB per game and 1 GiB total; older profiles are removed automatically. May add loading time. Takes effect on the next game launch.</string></property>
-                 </widget>
-                </item>
-                <item row="4" column="0" colspan="2">
-                 <layout class="QHBoxLayout" name="saved_texture_profiles_layout">
-                  <item><widget class="QPushButton" name="clear_game_texture_profile"><property name="text"><string>Clear This Game's Texture Profile</string></property></widget></item>
-                  <item><widget class="QPushButton" name="clear_all_texture_profiles"><property name="text"><string>Clear All Saved Texture Profiles</string></property></widget></item>
-                 </layout>
-                </item>
                 <item row="1" column="0" colspan="2">
                  <widget class="QGroupBox" name="gb_shaders">
                   <property name="title">
@@ -1114,6 +1092,188 @@ QGroupBox[flat=&quot;true&quot;]::title {
                 <size>
                  <width>20</width>
                  <height>40</height>
+                </size>
+               </property>
+              </spacer>
+             </item>
+            </layout>
+           </widget>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+       <widget class="QWidget" name="performance_tab">
+        <attribute name="title">
+         <string>Performance</string>
+        </attribute>
+        <layout class="QVBoxLayout" name="performance_tab_layout">
+         <item>
+          <widget class="QScrollArea" name="performance_scroll">
+           <property name="widgetResizable">
+            <bool>true</bool>
+           </property>
+           <widget class="QWidget" name="performance_content">
+            <layout class="QVBoxLayout" name="performance_content_layout">
+             <item>
+              <widget class="QLabel" name="performance_intro">
+               <property name="text">
+                <string>Vita3K-Go Performance and Diagnostics. Settings apply on the next game launch; benefits depend on the game and workload.</string>
+               </property>
+               <property name="wordWrap">
+                <bool>true</bool>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QGroupBox" name="gb_texture_performance">
+               <property name="title">
+                <string>Texture Performance (Experimental)</string>
+               </property>
+               <layout class="QVBoxLayout" name="texture_performance_layout">
+                <item>
+                 <layout class="QHBoxLayout" name="decoded_texture_cache_layout">
+                  <item>
+                   <widget class="QLabel" name="label_decoded_texture_cache">
+                    <property name="text">
+                     <string>Decoded Texture Cache (Experimental)</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QComboBox" name="decoded_texture_cache_mb" />
+                  </item>
+                 </layout>
+                </item>
+                <item>
+                 <widget class="QLabel" name="decoded_texture_cache_description">
+                  <property name="text">
+                   <string>Keeps decoded PVRTC textures in RAM to avoid repeating CPU decoding. The selected budget is a maximum; memory is released when the game closes. Up to 16,384 entries.</string>
+                  </property>
+                  <property name="wordWrap">
+                   <bool>true</bool>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QCheckBox" name="parallel_texture_decode">
+                  <property name="text">
+                   <string>Parallel Texture Decoding</string>
+                  </property>
+                  <property name="toolTip">
+                   <string>Uses the caller and one helper for eligible PVRTC textures. Small textures keep the serial path. Can shorten decode bursts; uses additional CPU work in parallel.</string>
+                  </property>
+                 </widget>
+                </item>
+                <item><widget class="QLabel" name="parallel_texture_decode_description"><property name="text"><string>Uses one helper alongside the calling thread for eligible textures. Can shorten CPU decode bursts; small textures use the serial path.</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+                <item>
+                 <widget class="QCheckBox" name="automatic_texture_preparation">
+                  <property name="text">
+                   <string>Automatic Texture Preparation (Experimental)</string>
+                  </property>
+                  <property name="toolTip">
+                   <string>Prepare learned PVRTC textures when launching this game and update its profile when the game closes normally. Requires a nonzero Decoded Texture Cache budget. Saved profiles use up to 64 MiB per game and 1 GiB total; older profiles are removed automatically. May add loading time. Takes effect on the next game launch.</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QLabel" name="automatic_texture_preparation_description">
+                  <property name="text">
+                   <string>Learns textures per game and prepares saved textures at the next game launch. May reduce repeated first-use decoding stalls, with extra launch time. New textures still decode when first needed.</string>
+                  </property>
+                  <property name="wordWrap">
+                   <bool>true</bool>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QLabel" name="texture_profile_storage_description">
+                  <property name="text">
+                   <string>Saved texture profiles: up to 64 MiB per game and 1 GiB total on disk, separate from the RAM budget. Least recently used profiles are removed at the storage limit. Closing normally saves learning.</string>
+                  </property>
+                  <property name="wordWrap">
+                   <bool>true</bool>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <layout class="QVBoxLayout" name="saved_texture_profiles_layout">
+                  <item>
+                   <widget class="QPushButton" name="clear_game_texture_profile">
+                    <property name="text">
+                     <string>Clear This Game's Texture Profile</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QPushButton" name="clear_all_texture_profiles">
+                    <property name="text">
+                     <string>Clear All Saved Texture Profiles</string>
+                    </property>
+                   </widget>
+                  </item>
+                 </layout>
+                </item>
+               </layout>
+              </widget>
+             </item>
+             <item>
+              <widget class="QGroupBox" name="gb_performance_diagnostics">
+               <property name="title">
+                <string>Diagnostics (Optional)</string>
+               </property>
+               <layout class="QVBoxLayout" name="performance_diagnostics_layout">
+                <item>
+                 <widget class="QLabel" name="diagnostics_description">
+                  <property name="text">
+                   <string>Measure remaining hitches. These options collect data and do not warm the JIT or improve frame rate. Leave off for routine play. Close normally to save reports under cache/diagnostics; delete old reports when no longer needed.</string>
+                  </property>
+                  <property name="wordWrap">
+                   <bool>true</bool>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QCheckBox" name="decoded_texture_telemetry">
+                  <property name="text">
+                   <string>Texture Cache Telemetry</string>
+                  </property>
+                  <property name="toolTip">
+                   <string>Writes bounded counters once per second (up to four hours). Includes hits, misses, decode time and evictions; no texture contents.</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QCheckBox" name="jit_compile_telemetry">
+                  <property name="text">
+                   <string>JIT Compilation Telemetry</string>
+                  </property>
+                  <property name="toolTip">
+                   <string>Records main-thread compile misses, rolling detail and bounded session summaries on x64. Diagnostic only; does not precompile or execute guest code. Close normally to save reports.</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QCheckBox" name="sync_wait_telemetry">
+                  <property name="text">
+                   <string>Synchronization Wait Telemetry</string>
+                  </property>
+                  <property name="toolTip">
+                   <string>Records selected guest and renderer API spans, with bounded summaries and rolling detail for spans of at least 2 ms. Nested spans overlap; these are not measurements of pure OS sleep. Close normally to save reports.</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
+             <item>
+              <spacer name="performance_spacer">
+               <property name="orientation">
+                <enum>Qt::Orientation::Vertical</enum>
+               </property>
+               <property name="sizeHint" stdset="0">
+                <size>
+                 <width>20</width>
+                 <height>20</height>
                 </size>
                </property>
               </spacer>

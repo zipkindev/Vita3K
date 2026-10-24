@@ -17,6 +17,7 @@
 
 #include "interface.h"
 #include "archive.h"
+#include <util/sync_wait_profile.h>
 
 #include "module/load_module.h"
 
@@ -808,12 +809,28 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
             start_module(emuenv, module->info);
     }
 
+    try {
+        const char *output = std::getenv("VITA3K_DIAG_SYNC_PROFILE");
+        if ((output && *output) || emuenv.cfg.current_config.sync_wait_telemetry) {
+            const auto directory = output && *output ? std::filesystem::path(fs_utils::utf8_to_path(output).native())
+                                                     : util::fresh_diagnostic_path(emuenv.cache_path.native(), "sync-waits");
+            emuenv.sync_wait_profile = std::make_shared<util::SyncWaitProfile>(directory, emuenv.io.title_id);
+            util::publish_sync_wait_profile(emuenv.sync_wait_profile);
+            LOG_INFO("[SYNC-PROFILE] Armed selected synchronization API spans: {}", directory.string());
+        }
+    } catch (const std::exception &e) {
+        LOG_WARN("[SYNC-PROFILE] Diagnostic disabled: {}", e.what());
+    }
+
     // Diagnostic-only main-thread learning. No code is precompiled or executed here.
 #if defined(_M_X64) || defined(__x86_64__)
-    if (const char *output = std::getenv("VITA3K_DIAG_JIT_PROFILE"); output && *output) {
+    const char *jit_output = std::getenv("VITA3K_DIAG_JIT_PROFILE");
+    if ((jit_output && *jit_output) || emuenv.cfg.current_config.jit_compile_telemetry) {
         try {
             cpu::JitProfileConfig profile;
-            profile.directory = fs_utils::utf8_to_path(output).native();
+            profile.directory = (jit_output && *jit_output ? std::filesystem::path(fs_utils::utf8_to_path(jit_output).native())
+                                                           : util::fresh_diagnostic_path(emuenv.cache_path.native(), "jit-profile"))
+                                    .native();
             profile.title = emuenv.io.title_id;
             profile.version = emuenv.app_info.app_version;
             profile.executable = emuenv.self_name;

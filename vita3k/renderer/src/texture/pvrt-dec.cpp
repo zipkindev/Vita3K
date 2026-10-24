@@ -34,10 +34,12 @@
 //!\cond NO_DOXYGEN
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #include <renderer/decoded_texture_telemetry.h>
@@ -828,13 +830,15 @@ uint32_t PVRTDecompressPVRTCUncached(const void *pCompressedData, uint32_t Do2bi
     return retval;
 }
 
+static std::atomic<bool> parallel_decode_enabled{ true };
+
 int PVRTCDecodeParallelism() {
     // Diagnostic A/B control, read once per process. 1 disables; default is 2.
     static const int threads = [] {
         const char *text = std::getenv("VITA3K_DIAG_PVRTC_THREADS");
-        return text && std::strcmp(text, "1") == 0 ? 1 : 2;
+        return text && std::strcmp(text, "1") == 0 ? 1 : (text && std::strcmp(text, "2") == 0 ? 2 : 0);
     }();
-    return threads;
+    return threads ? threads : (parallel_decode_enabled.load(std::memory_order_relaxed) ? 2 : 1);
 }
 
 static int pvrtcDecompressParallel(uint8_t *pCompressedData, Pixel32 *pDecompressedData, uint32_t ui32Width, uint32_t ui32Height, uint8_t ui8Bpp, uint32_t uiII) {
@@ -964,7 +968,8 @@ static renderer::DecodedTextureCache &decoded_cache() {
     return cache;
 }
 
-void PVRTCConfigureDecodeCache(int configured_mib) {
+void PVRTCConfigureDecodeCache(int configured_mib, bool parallel) {
+    parallel_decode_enabled.store(parallel, std::memory_order_relaxed);
     size_t mib = std::clamp(configured_mib, 0, 512);
     if (const char *text = std::getenv("VITA3K_DIAG_PVRTC_CACHE_MB")) {
         char *end = nullptr;
@@ -972,6 +977,15 @@ void PVRTCConfigureDecodeCache(int configured_mib) {
         mib = *text >= '0' && *text <= '9' && *end == '\0' && override_mib <= 512 ? override_mib : 0;
     }
     decoded_cache().set_budget(mib * 1024 * 1024);
+}
+
+void PVRTCConfigureDecodeTelemetry(const char *path) {
+    // Called only at game startup/shutdown, after render workers quiesce on exit.
+    static std::unique_ptr<renderer::DecodedTextureTelemetry> ui_telemetry;
+    ui_telemetry.reset();
+    const char *override_path = std::getenv("VITA3K_DIAG_PVRTC_TELEMETRY");
+    if (path && *path && !(override_path && *override_path))
+        ui_telemetry = std::make_unique<renderer::DecodedTextureTelemetry>(decoded_cache(), path);
 }
 
 renderer::DecodedTextureCache::Stats PVRTCDecodeCacheStats() {

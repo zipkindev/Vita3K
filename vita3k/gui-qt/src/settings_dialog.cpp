@@ -334,6 +334,10 @@ void SettingsDialog::load_config() {
     m_ui->async_pipeline_compilation->setChecked(m_config.async_pipeline_compilation);
     m_ui->clear_game_texture_profile->setEnabled(!m_app_path.empty() && emuenv.io.app_path.empty());
     m_ui->clear_all_texture_profiles->setEnabled(emuenv.io.app_path.empty());
+    m_ui->jit_compile_telemetry->setChecked(m_config.jit_compile_telemetry);
+    m_ui->sync_wait_telemetry->setChecked(m_config.sync_wait_telemetry);
+    m_ui->parallel_texture_decode->setChecked(m_config.parallel_texture_decode);
+    m_ui->decoded_texture_telemetry->setChecked(m_config.decoded_texture_telemetry);
     m_ui->automatic_texture_preparation->setChecked(m_config.automatic_texture_preparation);
     m_ui->decoded_texture_cache_mb->clear();
     m_ui->decoded_texture_cache_mb->addItem(tr("Off"), 0);
@@ -638,6 +642,10 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     current.v_sync = m_ui->vsync->isChecked();
     current.disable_surface_sync = m_ui->disable_surface_sync->isChecked();
     current.async_pipeline_compilation = m_ui->async_pipeline_compilation->isChecked();
+    current.jit_compile_telemetry = m_ui->jit_compile_telemetry->isChecked();
+    current.sync_wait_telemetry = m_ui->sync_wait_telemetry->isChecked();
+    current.parallel_texture_decode = m_ui->parallel_texture_decode->isChecked();
+    current.decoded_texture_telemetry = m_ui->decoded_texture_telemetry->isChecked();
     current.automatic_texture_preparation = m_ui->automatic_texture_preparation->isChecked();
     current.decoded_texture_cache_mb = m_ui->decoded_texture_cache_mb->currentData().toInt();
     current.accurate_thread_scheduling = m_ui->accurate_thread_scheduling->isChecked();
