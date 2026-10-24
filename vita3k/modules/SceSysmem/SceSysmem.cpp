@@ -20,8 +20,8 @@
 
 #include <kernel/state.h>
 #include <kernel/types.h>
-#include <modules/sysmem_state.h>
 #include <modules/sysmem_budget.h>
+#include <modules/sysmem_state.h>
 #include <renderer/commands.h>
 #include <renderer/functions.h>
 
