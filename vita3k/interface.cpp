@@ -49,6 +49,7 @@
 #include <util/vita_theme_utils.h>
 
 #include <cpu/functions.h>
+#include <cpu/impl/interface.h>
 #include <cpu/jit_preparation.h>
 #include <cpu/jit_profile.h>
 #include <cpu/state.h>
