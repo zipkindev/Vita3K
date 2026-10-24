@@ -134,4 +134,14 @@ set_target_properties(performance-layout-tests PROPERTIES AUTOUIC ON AUTOUIC_SEA
 target_link_libraries(performance-layout-tests PRIVATE Qt6::Widgets)
 target_include_directories(performance-layout-tests PRIVATE include)
 add_test(NAME performance-layout COMMAND performance-layout-tests)
-set_tests_properties(performance-layout PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# A relocated Qt DLL can infer the build tree as its install prefix. Query the
+# SDK plugin path so the headless platform is found in a server/service session.
+execute_process(COMMAND "${_qt6_qmake_executable}" -query QT_INSTALL_PLUGINS
+    OUTPUT_VARIABLE _performance_qt_plugins OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _performance_qt_query_result)
+if(NOT _performance_qt_query_result EQUAL 0)
+    message(FATAL_ERROR "Could not query the Qt plugin directory for the layout test")
+endif()
+set_tests_properties(performance-layout PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_performance_qt_plugins}"
+    TIMEOUT 30)
