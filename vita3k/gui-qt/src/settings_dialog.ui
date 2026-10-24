@@ -1104,7 +1104,7 @@ QGroupBox[flat=&quot;true&quot;]::title {
        </widget>
        <widget class="QWidget" name="performance_tab">
         <attribute name="title">
-         <string>Texture Decoding (Perf. Tweak)</string>
+         <string>Texture Decoding (Perf. Tweaks)</string>
         </attribute>
         <layout class="QVBoxLayout" name="performance_tab_layout">
          <item>
