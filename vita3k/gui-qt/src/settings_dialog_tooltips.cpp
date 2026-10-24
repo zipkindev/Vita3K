@@ -97,7 +97,7 @@ QString SettingsDialogTooltips::category_summary(SettingsTab tab) const {
     case SettingsTab::Graphics:
         return tr("Tune renderer behavior, textures, and shader behavior.");
     case SettingsTab::Performance:
-        return tr("Reduce repeated texture decoding with bounded RAM caching, parallel decoding and automatic per-game preparation. Optional telemetry measures remaining hitches; changes apply on the next game launch.");
+        return tr("Control decoded texture caching, parallel decoding and learned texture preparation. Optional telemetry records texture reuse, JIT compilation and synchronization waits; changes apply on the next game launch.");
     case SettingsTab::Audio:
         return tr("Adjust audio.");
     case SettingsTab::Camera:

@@ -269,7 +269,7 @@
    </property>
   </action>
   <action name="settings_performance_action">
-   <property name="text"><string>Performance</string></property>
+   <property name="text"><string>Caching and Diagnostics</string></property>
   </action>
   <action name="settings_audio_action">
    <property name="text">

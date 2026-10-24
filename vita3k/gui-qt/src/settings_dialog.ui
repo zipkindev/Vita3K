@@ -939,7 +939,7 @@ QGroupBox[flat=&quot;true&quot;]::title {
                 <item row="0" column="0">
                  <widget class="QGroupBox" name="gb_texture_replacement">
                   <property name="title">
-                   <string>Textures</string>
+                   <string>Texture Import and Export</string>
                   </property>
                   <property name="flat">
                    <bool>true</bool>
@@ -1104,7 +1104,7 @@ QGroupBox[flat=&quot;true&quot;]::title {
        </widget>
        <widget class="QWidget" name="performance_tab">
         <attribute name="title">
-         <string>Performance</string>
+         <string>Caching and Diagnostics</string>
         </attribute>
         <layout class="QVBoxLayout" name="performance_tab_layout">
          <item>
@@ -1117,7 +1117,7 @@ QGroupBox[flat=&quot;true&quot;]::title {
              <item>
               <widget class="QLabel" name="performance_intro">
                <property name="text">
-                <string>Vita3K-Go Performance and Diagnostics. Settings apply on the next game launch; benefits depend on the game and workload.</string>
+                <string>Control texture decoding, RAM caching and learned texture preparation. Optional diagnostics record decoding, JIT compilation and synchronization waits. Settings apply on the next game launch.</string>
                </property>
                <property name="wordWrap">
                 <bool>true</bool>
@@ -1127,7 +1127,7 @@ QGroupBox[flat=&quot;true&quot;]::title {
              <item>
               <widget class="QGroupBox" name="gb_texture_performance">
                <property name="title">
-                <string>Texture Performance (Experimental)</string>
+                <string>Texture Decoding and Preparation (Experimental)</string>
                </property>
                <layout class="QVBoxLayout" name="texture_performance_layout">
                 <item>
