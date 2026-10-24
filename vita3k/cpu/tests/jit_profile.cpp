@@ -6,8 +6,8 @@
 #include "testenv.h"
 #include <cassert>
 #include <chrono>
-#include <cpu/jit_profile.h>
 #include <cpu/invalid_code.h>
+#include <cpu/jit_profile.h>
 #include <fstream>
 #include <memory>
 #include <string>

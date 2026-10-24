@@ -17,8 +17,8 @@
 
 #include "cpu/common.h"
 #include <cpu/impl/dynarmic_cpu.h>
-#include <cpu/jit_profile.h>
 #include <cpu/invalid_code.h>
+#include <cpu/jit_profile.h>
 #include <cpu/state.h>
 #include <util/log.h>
 
