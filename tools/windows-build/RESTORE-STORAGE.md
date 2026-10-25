@@ -59,7 +59,11 @@ another destination. It stops the idle runner service while updating its hook,
 merges the supplied protection ledger with surviving local rules, restores the
 archive mapping, and requires a successful retention dry run before registering
 cleanup. It restarts the runner if it was previously running. A validation
-failure may leave staged files; inspect the error before retrying. It never
+failure may leave staged files and existing storage tasks disabled; inspect the
+error and rerun the installer to validate and re-enable them. Existing triggers
+are suspended and active task instances rejected before files or state change.
+The installer removes unrelated explicit ACL grants from surviving directories
+and files, and refuses installation through junctions. It never
 silently replaces the archive with a different share or clears release rules.
 
 Installed components:
@@ -101,9 +105,14 @@ contains the new boot time. The runner uses delayed automatic service startup.
 The installed setup passed a reboot test, service-account SMB read/write and
 EXE/PDB hash checks, disposable compiler-output cleanup, readiness workflow
 `40166748225`, native scheduled retention and an exclusive-lock contention test.
-The restore installer itself has been syntax-checked; it has not been replayed
-over the healthy runner. Run the retention regression tests from this directory
-with `python -m unittest test_archive_retention.py`.
+The restore installer has not been replayed over the healthy runner. Its seed
+validation, junction guards and ACL reset passed native Windows fixture tests;
+task suspension and stale SMB reconnect have isolated mocked regression tests.
+Run `Test-StorageSafety.ps1` as administrator for these Windows tests. They load
+function definitions without executing the installer or changing live tasks or
+SMB mappings. Run Python regressions from this directory with
+`python -m unittest test_archive_retention.py`; GitHub also runs the Python
+regressions for changes to these tools.
 
 ## Retention and recovery controls
 

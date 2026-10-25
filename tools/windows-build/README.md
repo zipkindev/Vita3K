@@ -58,7 +58,8 @@ file in an archive pins it indefinitely. Experimental tags alone do not prevent
 expiry. New unpublished drafts without a preservation rule should be pinned
 with `KEEP` if they must outlive the ordinary unreleased-build policy.
 
-An unavailable/incomplete GitHub inventory aborts cleanup. Unknown or invalid
+An unavailable/incomplete GitHub inventory or invalid protection ledger aborts
+cleanup. Unknown, unreadable or invalid
 archives are retained; eligible archives must have consistent provenance,
 matching recorded EXE/PDB identities and valid hashes for every packaged file.
 Only complete expired build directories are removed; symbol files are never

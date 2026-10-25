@@ -16,6 +16,18 @@ ALIASES = ('Vita3K', 'Vita3K-ZipZ', 'Vita3K-Go')
 UTC = dt.timezone.utc
 
 
+def validate_protection(value):
+    if not isinstance(value, dict):
+        raise ValueError('Protection ledger must be an object')
+    for key in ('labels', 'sources', 'assets'):
+        entries = value.get(key)
+        if not isinstance(entries, list) or any(not isinstance(item, str) or not item for item in entries):
+            raise ValueError(f'Protection ledger requires a string array: {key}')
+    if any(not re.fullmatch('[0-9a-f]{40}', source) for source in value['sources']):
+        raise ValueError('Protection ledger contains an invalid source commit')
+    return value
+
+
 def listing(resource):
     """Read every page; any incomplete/error response aborts retention."""
     result = []
@@ -36,6 +48,7 @@ def listing(resource):
 
 
 def refresh_protection(previous, releases, tags):
+    validate_protection(previous)
     labels = set(previous.get('labels', []))
     sources = set(previous.get('sources', []))
     assets = set(previous.get('assets', []))
@@ -89,7 +102,10 @@ def archive_lock(root):
 
 def plain_tree(root):
     """Never follow SMB/NTFS links, junctions, or other reparse points."""
-    for directory, dirs, files in os.walk(root, followlinks=False):
+    def unreadable(error):
+        raise error
+
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=unreadable):
         for path in [Path(directory), *(Path(directory) / name for name in dirs + files)]:
             info = path.lstat()
             if path.is_symlink() or getattr(info, 'st_file_attributes', 0) & 0x400:
@@ -131,8 +147,10 @@ def inspect_archive(folder):
 
 
 def protected(archive, protection):
+    # Asset suffixes are hyphen-separated; do not confuse .1 with .14 or .1.1.
+    label_pattern = r'(?<![A-Za-z0-9._])' + re.escape(archive['label']) + r'(?![A-Za-z0-9._])'
     return (archive['label'] in protection['labels'] or archive['source'] in protection['sources']
-            or any(archive['label'] in asset for asset in protection['assets'])
+            or any(re.search(label_pattern, asset) for asset in protection['assets'])
             or (archive['folder'] / 'KEEP').exists())
 
 
@@ -177,7 +195,7 @@ def retention_plan(archives, protection, now, days, keep):
 def run(args):
     # Protection is sticky: removed releases never silently unprotect builds.
     state_file = args.state / 'protected-builds.json'
-    previous = json.loads(state_file.read_text(encoding='utf-8-sig'))
+    previous = validate_protection(json.loads(state_file.read_text(encoding='utf-8-sig')))
     releases, tags = listing('releases'), listing('tags')
     if not tags:
         raise ValueError('Empty tag inventory; refusing cleanup')

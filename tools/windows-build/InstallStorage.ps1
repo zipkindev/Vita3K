@@ -12,6 +12,58 @@ $storage='C:\ProgramData\Vita3KRunnerStorage'
 $retention='C:\ProgramData\Vita3KArchiveRetention'
 $python='C:\Vita3K-Build\tools\Python313\python.exe'
 $hook='ACTIONS_RUNNER_HOOK_JOB_COMPLETED='+$maintenance+'\MaintainStorage.ps1'
+function Assert-ProtectionSeed($Seed){
+ foreach($key in @('labels','sources','assets')){
+  if($key -notin $Seed.PSObject.Properties.Name -or $Seed.$key -isnot [array]){throw "Protection seed requires an array: $key"}
+  foreach($value in $Seed.$key){if($value -isnot [string] -or !$value){throw "Protection seed contains an invalid $key entry"}}
+ }
+ foreach($source in $Seed.sources){if($source -cnotmatch '^[0-9a-f]{40}$'){throw 'Protection seed contains an invalid source commit'}}
+}
+function Set-StorageDirectory([string]$Path,[bool]$RunnerRead){
+ $current=[IO.Path]::GetFullPath($Path)
+ while($current){
+  if(Test-Path -LiteralPath $current){
+   if((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw "Refusing installation through a reparse point: $current"}
+  }
+  $current=[IO.Path]::GetDirectoryName($current)
+ }
+ New-Item -ItemType Directory -Path $Path -Force | Out-Null
+ if(Get-ChildItem -LiteralPath $Path -Recurse -Force | Where-Object {$_.Attributes -band [IO.FileAttributes]::ReparsePoint}){throw "Refusing installation tree with reparse points: $Path"}
+ # Replace the DACL, rather than preserving unrelated explicit grants on a
+ # surviving directory. Existing children must inherit this restricted DACL.
+ $acl=New-Object Security.AccessControl.DirectorySecurity
+ $acl.SetAccessRuleProtection($true,$false)
+ $admin=New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+ $acl.SetOwner($admin)
+ foreach($sid in @('S-1-5-18','S-1-5-32-544')){
+  $identity=New-Object Security.Principal.SecurityIdentifier($sid)
+  $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($identity,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+ }
+ if($RunnerRead){
+  $identity=New-Object Security.Principal.SecurityIdentifier('S-1-5-20')
+  $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($identity,'ReadAndExecute','ContainerInherit,ObjectInherit','None','Allow')))
+ }
+ Set-Acl -LiteralPath $Path -AclObject $acl
+ foreach($child in Get-ChildItem -LiteralPath $Path -Force){
+  & icacls.exe $child.FullName /setowner '*S-1-5-32-544' /T /Q | Out-Null
+  if($LASTEXITCODE){throw "Owner setup failed: $($child.FullName)"}
+  & icacls.exe $child.FullName /reset /T /Q | Out-Null
+  if($LASTEXITCODE){throw "Child ACL reset failed: $($child.FullName)"}
+ }
+}
+function Suspend-StorageTasks {
+ $existingTasks=@(foreach($taskName in @('Vita3K-Restore-TrueNAS-Archive','Vita3K-Archive-Retention')){
+  Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+ })
+ foreach($task in $existingTasks){Disable-ScheduledTask -TaskName $task.TaskName | Out-Null}
+ if($existingTasks.Count){
+  $scheduler=New-Object -ComObject 'Schedule.Service'
+  $scheduler.Connect()
+  foreach($task in $existingTasks){
+   if($scheduler.GetFolder('\').GetTask($task.TaskName).GetInstances(0).Count){throw "Task still has a running instance: $($task.TaskName)"}
+  }
+ }
+}
 if($ArchivePath -notmatch '^\\\\[^\\]+\\[^\\]+'){throw 'ArchivePath must be an SMB UNC path'}
 foreach($path in @($python,"$runner\.runner",$ProtectionSeedPath)){
  if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Required recovery input missing: $path"}
@@ -20,7 +72,11 @@ foreach($name in @('MaintainStorage.ps1','RestoreArchive.ps1','RetainArchives.py
  if(!(Test-Path -LiteralPath "$PSScriptRoot\$name")){throw "Missing companion script: $name"}
 }
 $seed=Get-Content -LiteralPath $ProtectionSeedPath -Raw | ConvertFrom-Json
-foreach($key in @('labels','sources','assets')){if($key -notin $seed.PSObject.Properties.Name){throw "Protection seed lacks $key"}}
+Assert-ProtectionSeed $seed
+# Validate surviving state before touching services, credentials or scripts.
+$statePath="$retention\protected-builds.json"
+$previous=if(Test-Path $statePath){Get-Content $statePath -Raw | ConvertFrom-Json}else{$null}
+if($null -ne $previous){Assert-ProtectionSeed $previous}
 $services=@(Get-CimInstance Win32_Service | Where-Object {$_.Name -like 'actions.runner*' -and $_.PathName -like "*$runner\bin\RunnerService.exe*"})
 if($services.Count -ne 1 -or $services[0].StartName -ne 'NT AUTHORITY\NETWORK SERVICE'){throw 'Expected one registered runner service using Network Service'}
 if(Get-Process Runner.Worker,cl,link,ninja,cmake -ErrorAction SilentlyContinue){throw 'Runner busy; installation deferred'}
@@ -35,12 +91,11 @@ $wasRunning=$services[0].State -eq 'Running'
 Stop-Service -Name $services[0].Name
 try {
  if(Get-Process Runner.Worker,cl,link,ninja,cmake -ErrorAction SilentlyContinue){throw 'Build activity appeared; installation deferred'}
+ # Disable existing triggers before replacing files/state. On failure, leave them
+ # disabled until validation succeeds on a later installation attempt.
+ Suspend-StorageTasks
  foreach($dir in @($maintenance,$storage,$retention)){
-  New-Item -ItemType Directory -Path $dir -Force | Out-Null
-  $grants=@('*S-1-5-18:(OI)(CI)F','*S-1-5-32-544:(OI)(CI)F')
-  if($dir -eq $maintenance){$grants+='*S-1-5-20:(OI)(CI)RX'}
-  & icacls.exe $dir /inheritance:r /grant:r $grants | Out-Null
-  if($LASTEXITCODE){throw "ACL setup failed: $dir"}
+  Set-StorageDirectory $dir ($dir -eq $maintenance)
  }
  Copy-Item "$PSScriptRoot\MaintainStorage.ps1" "$maintenance\MaintainStorage.ps1" -Force
  Copy-Item "$PSScriptRoot\RestoreArchive.ps1" "$storage\RestoreArchive.ps1" -Force
@@ -49,14 +104,12 @@ try {
  $bytes=[Text.Encoding]::UTF8.GetBytes($SmbCredential.GetNetworkCredential().Password)
  try {
   $protected=[Security.Cryptography.ProtectedData]::Protect($bytes,[Text.Encoding]::UTF8.GetBytes('Vita3KRunnerStorage-v1'),[Security.Cryptography.DataProtectionScope]::LocalMachine)
-  [ordered]@{Username=$SmbCredential.UserName;ProtectedPassword=[Convert]::ToBase64String($protected);RemotePath=$ArchivePath;LocalPath='Y:'} | ConvertTo-Json | Set-Content "$storage\credential.json"
+  [ordered]@{Username=$SmbCredential.UserName;ProtectedPassword=[Convert]::ToBase64String($protected);RemotePath=$ArchivePath;LocalPath='Y:'} | ConvertTo-Json | Set-Content "$storage\credential.json" -Encoding UTF8
  } finally {[Array]::Clear($bytes,0,$bytes.Length)}
  # Merge with surviving state; never discard earlier release/draft preservation rules.
- $statePath="$retention\protected-builds.json"
- $previous=if(Test-Path $statePath){Get-Content $statePath -Raw | ConvertFrom-Json}else{$null}
  $merged=[ordered]@{}
  foreach($key in @('labels','sources','assets')){$merged[$key]=@(@($seed.$key)+@($previous.$key) | Where-Object {$_} | Sort-Object -Unique)}
- $merged | ConvertTo-Json | Set-Content $statePath
+ $merged | ConvertTo-Json | Set-Content $statePath -Encoding UTF8
  & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$storage\RestoreArchive.ps1"
  if($LASTEXITCODE){throw 'Archive restore validation failed'}
  & $python "$retention\RetainArchives.py" --state $retention

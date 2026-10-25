@@ -6,7 +6,17 @@ param(
 # Run as ACTIONS_RUNNER_HOOK_JOB_COMPLETED, after artifact upload.
 # Archive finished packages, then discard only reproducible compiler output.
 $ErrorActionPreference='Stop'
+function Assert-PlainParents([string]$Path){
+ $current=[IO.Path]::GetFullPath($Path)
+ while($current){
+  if(Test-Path -LiteralPath $current){
+   if((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw "Refusing reparse point: $current"}
+  }
+  $current=[IO.Path]::GetDirectoryName($current)
+ }
+}
 function Assert-PlainTree([string]$Path){
+ Assert-PlainParents $Path
  if((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw "Refusing reparse point: $Path"}
  if(Get-ChildItem -LiteralPath $Path -Recurse -Force | Where-Object {$_.Attributes -band [IO.FileAttributes]::ReparsePoint}){throw "Refusing tree with reparse points: $Path"}
 }
@@ -57,7 +67,9 @@ try {
   exit 0
  }
  if(!(Test-Path -LiteralPath $ArchiveRoot -PathType Container)){throw 'Archive unavailable; retaining all local files'}
+ Assert-PlainParents (Join-Path $ArchiveRoot '.maintenance.lock')
  $archiveLock=[IO.File]::Open((Join-Path $ArchiveRoot '.maintenance.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+ Assert-PlainParents $destination
  New-Item -ItemType Directory -Path $destination -Force | Out-Null
  Assert-PlainTree $destination
  $archivedManifest=Join-Path $destination 'windows-package\provenance.json'

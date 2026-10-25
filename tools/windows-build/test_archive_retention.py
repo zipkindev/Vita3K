@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -98,6 +99,38 @@ class ArchiveRetentionTests(unittest.TestCase):
                 retention.run(self.args)
         self.assertTrue(old.exists())
 
+    def test_incomplete_or_malformed_protection_aborts_before_github_or_deletion(self):
+        old = self.archive('expired', 60)
+        invalid = [{}, {'labels': [], 'sources': []},
+                   {'labels': 'released', 'sources': [], 'assets': []},
+                   {'labels': [], 'sources': ['bad-source'], 'assets': []},
+                   {'labels': [], 'sources': [], 'assets': [None]}]
+        for ledger in invalid:
+            with self.subTest(ledger=ledger):
+                (self.state / 'protected-builds.json').write_text(json.dumps(ledger))
+                with patch.object(retention, 'listing') as listing:
+                    with self.assertRaises(ValueError):
+                        retention.run(self.args)
+                    listing.assert_not_called()
+                self.assertTrue((old / 'windows-package/Vita3K.pdb').exists())
+
+    def test_unreadable_subdirectory_retains_whole_archive(self):
+        old = self.archive('expired', 60)
+        self.archive('newest', 1)
+        unreadable = old / 'unreadable'
+        unreadable.mkdir()
+        original = os.scandir
+
+        def scandir(path):
+            if Path(path) == unreadable:
+                raise PermissionError('Unreadable archive directory')
+            return original(path)
+
+        with patch.object(retention.os, 'scandir', side_effect=scandir):
+            self.apply()
+        self.assertTrue((old / 'windows-package/Vita3K.exe').exists())
+        self.assertTrue((old / 'windows-package/Vita3K.pdb').exists())
+
     def test_draft_asset_alias_and_removed_release_protection_are_sticky(self):
         protection = retention.refresh_protection(
             self.protection,
@@ -116,6 +149,15 @@ class ArchiveRetentionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'missing from tag'):
             retention.refresh_protection(self.protection,
                 [{'tag_name': 'published', 'draft': False, 'assets': []}], [])
+
+    def test_asset_release_labels_do_not_pin_unrelated_version_prefixes(self):
+        protection = {'labels': [], 'sources': [],
+                      'assets': ['Vita3K-v1.3.3-win11merge.14-diagnostics.zip']}
+        for label, expected in [('v1.3.3-win11merge.1', False),
+                                ('v1.3.3-win11merge.14', True)]:
+            with self.subTest(label=label):
+                archive = retention.inspect_archive(self.archive(label, 100))
+                self.assertEqual(retention.protected(archive, protection), expected)
 
 
 if __name__ == '__main__':
