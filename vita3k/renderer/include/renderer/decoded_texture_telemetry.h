@@ -34,6 +34,12 @@ public:
         try {
             cache.acquire_reuse_tracking();
             tracked_cache = &cache;
+            coverage_path = std::filesystem::path(std::u8string(path, path + std::strlen(path)));
+            coverage_path += ".coverage";
+            try {
+                cache.enable_coverage();
+            } catch (...) {
+            }
             worker = std::jthread([this, &cache, path = std::string(path), period](std::stop_token stop) {
                 try {
                     const auto output = std::filesystem::path(std::u8string(path.begin(), path.end()));
@@ -43,6 +49,14 @@ public:
                     if (!file)
                         return;
                     file << "Schema,UnixNs,SteadyNs,Qpc,QpcFrequency,Requests,Hits,Misses,Bypasses,Evictions,ByteEvictions,EntryEvictions,BothEvictions,ClearEvictions,Decodes,DecodeNs,DecodeGE2ms,DecodeGE10ms,DecodeGE50ms,MaxDecodeNs,IntervalMaxDecodeNs,IntervalMaxWidth,IntervalMaxHeight,ResidentBytes,Entries,BudgetBytes,ReuseEnabled,ReuseEpochs,ReuseHistoryEntries,ReuseHistoryCapacity,ReuseHistoryReplacements,MissFirstObserved,MissAfterCapacityEviction,MissAfterClear,MissSeenOther,DecodeFirstObserved,DecodeAfterCapacityEviction,DecodeAfterClear,DecodeSeenOther,DecodeNsFirstObserved,DecodeNsAfterCapacityEviction,DecodeNsAfterClear,DecodeNsSeenOther,PreloadedHits,DemandHits,UntrackedDecodes\n";
+                    auto armed_path = output;
+                    armed_path += ".coverage-armed.json";
+                    if (!std::filesystem::exists(armed_path)) {
+                        std::ofstream armed(armed_path);
+                        armed << "{\"schema\":1,\"active\":" << (cache.coverage_active() ? "true" : "false")
+                              << ",\"identityLimit\":" << TextureCoverage::identity_limit << ",\"detailLimit\":" << TextureCoverage::detail_limit
+                              << ",\"detailThresholdNs\":2000000,\"status\":\"final reports require normal close\"}\n";
+                    }
                     // 14401 rows including the initial/final sample; <16MiB with
                     // fixed-width numeric fields. Failure/cap disables output.
                     for (unsigned row = 0; row < 14401; ++row) {
@@ -92,12 +106,21 @@ public:
         wake.notify_all();
         if (worker.joinable())
             worker.join();
-        if (tracked_cache)
+        if (tracked_cache) {
+            try {
+                auto coverage = tracked_cache->take_coverage();
+                if (coverage)
+                    coverage->write(coverage_path);
+            } catch (...) {
+                // A failed optional report never interrupts normal shutdown.
+            }
             tracked_cache->release_reuse_tracking();
+        }
     }
 
 private:
     DecodedTextureCache *tracked_cache = nullptr;
+    std::filesystem::path coverage_path;
     std::mutex wait_mutex;
     std::condition_variable wake;
     std::jthread worker;

@@ -111,6 +111,7 @@ public:
         identity = title + "|" + id;
         if (requested == Mode::Off) {
             write_report();
+            write_report(true);
             return report;
         }
         // App lifecycle calls are serialized; all work is synchronous and each
@@ -119,6 +120,7 @@ public:
         if (title.empty() || title.size() > 32 || identity.size() > 256 || title.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") != std::string::npos) {
             report.status = "invalid-identity";
             write_report();
+            write_report(true);
             return report;
         }
         mode = requested;
@@ -148,6 +150,8 @@ public:
                     if (input.read(reinterpret_cast<char *>(bytes.data()), bytes.size()) && validate(bytes, identity, records)) {
                         if (mode == Mode::Automatic || mode == Mode::Learn)
                             std::filesystem::last_write_time(profile, std::filesystem::file_time_type::clock::now());
+                        for (const auto &record : records)
+                            cache.coverage_profile(record.key);
                         report.profile_entries = records.size();
                         report.profile_hash = XXH3_64bits(bytes.data(), bytes.size());
                         // Merge every validated prior record, including records that
@@ -169,6 +173,7 @@ public:
                             if (pixels + record.size > stats.budget_bytes - stats.resident_bytes || stats.entries >= 16384) {
                                 report.status = "partial-budget";
                                 ++report.preload_budget_skips;
+                                cache.coverage_budget_skip(record.key);
                                 continue;
                             }
                             // At most 64 MiB input container plus one <=32 MiB
@@ -178,7 +183,9 @@ public:
                             // Copy first to preserve the decoder's input alignment.
                             std::vector<uint8_t> compressed(bytes.begin() + record.offset, bytes.begin() + record.offset + record.size);
                             const auto result = decode(compressed.data(), record.key.format & 1, record.key.width, record.key.height, record.key.format >> 1, decoded.data());
-                            if (cache.insert(record.key, std::move(compressed), decoded, result, record.decode_ns, false))
+                            const bool inserted = cache.insert(record.key, std::move(compressed), decoded, result, record.decode_ns, false);
+                            cache.coverage_prepared(record.key, inserted);
+                            if (inserted)
                                 ++report.prepared_entries;
                         }
                         report.prepared_bytes = cache.stats().resident_bytes;
@@ -187,8 +194,10 @@ public:
             }
             report.prepare_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count();
         }
+        cache.coverage_finish_preparation(report.status == "partial-deadline");
         report.learning = cache.learning_stats();
         write_report();
+        write_report(true);
         return report;
     }
 
@@ -271,6 +280,8 @@ public:
 #else
                 std::filesystem::rename(temporary, profile);
 #endif
+                for (const auto &entry : entries)
+                    cache.coverage_saved(entry.key);
                 report.saved_entries = entries.size();
                 report.profile_entries = entries.size();
                 report.profile_hash = XXH3_64bits_digest(hash);
@@ -300,10 +311,15 @@ public:
     }
 
 private:
-    void write_report() const {
+    void write_report(bool startup = false) const {
         if (output.empty())
             return;
-        std::ofstream stream(output, std::ios::trunc);
+        auto path = output;
+        if (startup)
+            path += ".startup.json";
+        if (startup && std::filesystem::exists(path))
+            return;
+        std::ofstream stream(path, std::ios::trunc);
         stream << "{\"mode\":\"" << report.mode << "\",\"status\":\"" << report.status << "\",\"profileEntries\":" << report.profile_entries
                << ",\"preparedEntries\":" << report.prepared_entries << ",\"preparedResidentBytes\":" << report.prepared_bytes
                << ",\"prepareNs\":" << report.prepare_ns << ",\"savedEntries\":" << report.saved_entries

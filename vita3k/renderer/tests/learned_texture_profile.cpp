@@ -136,5 +136,21 @@ int main() {
     const auto before = bounded_cache.stats();
     assert(!bounded_cache.insert(t.key, t.input, t.expected, t.result, 1, false));
     assert(bounded_cache.stats().entries == before.entries && bounded_cache.stats().evictions == before.evictions);
+    // Startup preparation status survives successful normal-close report updates.
+    write(file, valid);
+    Cache instrumented(64);
+    instrumented.enable_coverage();
+    instrumented.acquire_reuse_tracking();
+    Profile tracked(instrumented);
+    const auto status = root / "preparation.json";
+    const auto startup = root / "preparation.json.startup.json";
+    auto tracked_begin = tracked.begin(root, "TEST01", "1.04|eboot", Profile::Mode::Automatic, status, decode);
+    assert(tracked_begin.preload_budget_skips > 0);
+    const auto startup_bytes = read(startup);
+    assert(!startup_bytes.empty());
+    assert(tracked.finish().saved_entries == tests.size());
+    assert(read(startup) == startup_bytes && read(status) != startup_bytes);
+    auto coverage = instrumented.take_coverage();
+    assert(coverage && coverage->write(root / "coverage"));
     std::cout << tests.size() << " profile reloads byte-identical; bounds, corruption, lifecycle passed\n";
 }

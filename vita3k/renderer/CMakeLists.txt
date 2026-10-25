@@ -119,3 +119,8 @@ add_executable(texture-learning-history-tests tests/texture_learning_history.cpp
 target_include_directories(texture-learning-history-tests PRIVATE include)
 target_link_libraries(texture-learning-history-tests PRIVATE xxHash::xxhash Threads::Threads)
 add_test(NAME texture-learning-history COMMAND texture-learning-history-tests)
+
+add_executable(texture-coverage-tests tests/texture_coverage.cpp)
+target_include_directories(texture-coverage-tests PRIVATE include)
+target_link_libraries(texture-coverage-tests PRIVATE Threads::Threads)
+add_test(NAME texture-coverage COMMAND texture-coverage-tests)

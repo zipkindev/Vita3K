@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <renderer/texture_coverage.h>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -33,6 +34,7 @@ public:
         Untracked };
     struct Observation {
         MissClass classification;
+        TextureCoverage::Ticket coverage;
         Observation(MissClass value = MissClass::Untracked)
             : classification(value) {}
     };
@@ -53,6 +55,44 @@ public:
         size_t resident_bytes = 0, entries = 0, budget_bytes = 0;
         ReuseStats reuse;
     };
+
+    bool coverage_active() const {
+        std::lock_guard lock(mutex);
+        return bool(coverage);
+    }
+    void enable_coverage() {
+        std::lock_guard lock(mutex);
+        coverage = std::make_unique<TextureCoverage>();
+    }
+    std::unique_ptr<TextureCoverage> take_coverage() {
+        std::lock_guard lock(mutex);
+        return std::move(coverage);
+    }
+    void coverage_profile(const Key &key) {
+        std::lock_guard lock(mutex);
+        if (coverage)
+            coverage->register_profile(key);
+    }
+    void coverage_prepared(const Key &key, bool inserted) {
+        std::lock_guard lock(mutex);
+        if (coverage)
+            coverage->prepare(key, inserted);
+    }
+    void coverage_budget_skip(const Key &key) {
+        std::lock_guard lock(mutex);
+        if (coverage)
+            coverage->budget_skip(key);
+    }
+    void coverage_finish_preparation(bool deadline) {
+        std::lock_guard lock(mutex);
+        if (coverage)
+            coverage->finish_preparation(deadline);
+    }
+    void coverage_saved(const Key &key) {
+        std::lock_guard lock(mutex);
+        if (coverage)
+            coverage->saved(key);
+    }
 
     struct ProfileInput {
         Key key;
@@ -130,6 +170,8 @@ public:
             ++entry->uses;
             learn_unlocked(key, compressed, entry->decode_ns, 0, false);
             ++counts.hits;
+            if (coverage)
+                coverage->request(key, true, 0);
             if (reuse) {
                 auto &slot = reuse_slot(key, compressed.size(), output.size());
                 if (slot.state == ReuseState::Preloaded)
@@ -152,6 +194,8 @@ public:
             if (observation)
                 observation->classification = classification;
         }
+        if (coverage && observation)
+            observation->coverage = coverage->request(key, false, static_cast<unsigned>(observation->classification));
         return false;
     }
 
@@ -249,6 +293,8 @@ public:
     void decoded(uint64_t nanoseconds, uint32_t width = 0, uint32_t height = 0, Observation observation = {}) {
         std::lock_guard lock(mutex);
         ++counts.decodes;
+        if (coverage)
+            coverage->decoded(observation.coverage, nanoseconds, width, height);
         if (reuse) {
             const auto index = static_cast<size_t>(observation.classification);
             if (index < counts.reuse.decodes.size()) {
@@ -439,6 +485,8 @@ private:
                         break;
                     }
                 }
+                if (coverage)
+                    coverage->learning_evicted(victim->key);
                 learning_bytes -= victim->compressed.capacity() + 40;
                 learning.erase(victim);
                 ++learning_counts.evictions;
@@ -457,6 +505,7 @@ private:
             ++learning_counts.dropped; // Learning must not interrupt normal rendering.
         }
     }
+    std::unique_ptr<TextureCoverage> coverage;
     std::list<ProfileInput> learning;
     std::unordered_multimap<Key, std::list<ProfileInput>::iterator, Hash> learning_lookup;
     size_t learning_bytes = 0;
