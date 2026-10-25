@@ -3,6 +3,6 @@
   "dynarmic": {
     "baseCommit": "86458a0bd369d63ba4c2ef812cacbb6c9080c065",
     "file": "dynarmic-jit-observer.patch",
-    "sha256": "c516d00eaef7bcb6e3d4a48f7a55fcc206a625d5c3cc6ea6b6a69571a9eff3d6"
+    "sha256": "679851633c0e882074fdab67565abbfab1b2ca467b345d88ebe4902305b089b8"
   }
 }

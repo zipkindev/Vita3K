@@ -26,6 +26,7 @@
 #include <mem/functions.h>
 #include <mem/ptr.h>
 #include <string>
+#include <util/jit_startup_profile.h>
 #include <util/types.h>
 #include <vector>
 
@@ -45,6 +46,7 @@ SceUID get_thread_id(CPUState &state) {
 }
 
 CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, MemState &mem) {
+    util::JitStartupScope startup(util::JitStartupKind::CpuInit, { static_cast<uint64_t>(thread_id), 0 });
     CPUStatePtr state(new CPUState(), delete_cpu_state);
     state->mem = &mem;
     state->thread_id = thread_id;
@@ -55,6 +57,7 @@ CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, M
 
     state->cpu = std::make_unique<DynarmicCPU>(state.get(), processor_id, cpu_opt);
 
+    startup.result(0);
     return state;
 }
 

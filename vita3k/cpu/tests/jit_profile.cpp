@@ -158,7 +158,55 @@ static void rolling_session_test(Temp &temp) {
     assert(json.find("\"retainedCompileNs\":35000000") != std::string::npos);
 }
 
+// Exercise actual A32 fastmem emission with observation on/off and unchanged results.
+class StartupObserved : public ArmTestEnv {
+public:
+    bool observe = false;
+    unsigned starts = 0, stops = 0, inserts = 0, growths = 0;
+    uint64_t clock = 0;
+    Dynarmic::A32::Jit *jit = nullptr;
+    bool IsJitStartupProfilingEnabled() const noexcept override { return observe; }
+    uint64_t JitStartupCounter() const noexcept override { return ++const_cast<StartupObserved *>(this)->clock; }
+    void JitDispatchClearBegin() noexcept override { ++starts; }
+    void JitDispatchClearEnd() noexcept override { ++stops; }
+    void JitFastmemInserted(uint64_t start, uint64_t end, size_t before, size_t after, size_t old_buckets, size_t new_buckets) noexcept override {
+        assert(end >= start && after >= before && after <= before + 1);
+        ++inserts;
+        growths += old_buckets != new_buckets;
+    }
+    void CallSVC(uint32_t) override { jit->HaltExecution(); }
+};
+void startup_hooks_test() {
+    for (bool enabled : { false, true }) {
+        StartupObserved env;
+        env.observe = enabled;
+        env.code_mem = { 0xe3a00007, 0xe5810000, 0xef000001, 0xeafffffe };
+        alignas(16) std::array<uint8_t, 8192> memory{};
+        Dynarmic::A32::UserConfig config{ &env };
+        config.fastmem_pointer = reinterpret_cast<uintptr_t>(memory.data());
+        config.optimizations = Dynarmic::all_safe_optimizations;
+        Dynarmic::A32::Jit jit(config);
+        env.jit = &jit;
+        assert(env.starts == unsigned(enabled) && env.stops == env.starts);
+        jit.Regs()[1] = 4096;
+        jit.SetCpsr(0x10);
+        env.ticks_left = 20;
+        jit.Run();
+        uint32_t result;
+        std::memcpy(&result, memory.data() + 4096, sizeof(result));
+        assert(jit.Regs()[0] == 7 && result == 7);
+        assert(enabled ? (env.inserts > 0 && env.growths > 0) : env.inserts == 0);
+        jit.ClearCache();
+        jit.ClearHalt();
+        jit.Regs()[15] = 0;
+        env.ticks_left = 20;
+        jit.Run();
+        assert(env.starts == unsigned(enabled) * 2 && env.stops == env.starts);
+    }
+}
+
 int main() {
+    startup_hooks_test();
     Temp temp;
     rolling_session_test(temp);
     execution_test<ArmTestEnv>(temp, "arm", false);

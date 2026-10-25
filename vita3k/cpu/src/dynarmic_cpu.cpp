@@ -20,6 +20,7 @@
 #include <cpu/jit_preparation.h>
 #include <cpu/jit_profile.h>
 #include <cpu/state.h>
+#include <util/jit_startup_profile.h>
 #include <util/log.h>
 
 #include <cpu/functions.h>
@@ -230,6 +231,32 @@ public:
         return parent->jit_preparation->replay_read(address, value, hook);
     }
 
+    bool IsJitStartupProfilingEnabled() const noexcept override {
+        return util::jit_startup_profile_enabled();
+    }
+    std::uint64_t JitStartupCounter() const noexcept override { return util::JitStartupProfile::counter(); }
+    void JitFastmemInserted(std::uint64_t start, std::uint64_t end, std::size_t before, std::size_t after,
+        std::size_t old_buckets, std::size_t new_buckets) noexcept override {
+        // Keep every capacity transition; slow non-growth inserts are separately labelled.
+        if (old_buckets == new_buckets && end - start < fastmem_slow_ticks)
+            return;
+        util::record_jit_fastmem({ static_cast<uint64_t>(parent->thread_id), cpu->diagnostic_id,
+                                     before, after, old_buckets, new_buckets },
+            start, end);
+    }
+    void JitDispatchClearBegin() noexcept override {
+        dispatch_scope.emplace(util::JitStartupKind::DispatchClear,
+            util::JitStartupContext{ static_cast<uint64_t>(parent->thread_id), cpu->diagnostic_id, 0, 0, 0, 0, 1048576 });
+    }
+    void JitDispatchClearEnd() noexcept override {
+        dispatch_scope->result(0);
+        dispatch_scope.reset();
+    }
+    std::optional<util::JitStartupScope> dispatch_scope;
+    uint64_t fastmem_slow_ticks = [] {
+        // Frequency is platform QPC on Windows, steady nanoseconds elsewhere.
+        return util::JitStartupProfile::counter_frequency() / 500;
+    }();
     bool IsJitCompileProfilingEnabled() const noexcept override {
         return (parent->jit_profile && parent->jit_profile->enabled()) || bool(parent->jit_preparation);
     }
@@ -736,6 +763,8 @@ public:
 Dynarmic::ExclusiveMonitor DynarmicCPU::shared_monitor(MAX_CORE_COUNT);
 
 std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
+    util::JitStartupScope startup(util::JitStartupKind::JitCreate,
+        { static_cast<uint64_t>(parent->thread_id), diagnostic_id, 0, 0, 0, 0, diagnostic_rebuild ? 1u : 0u });
     Dynarmic::A32::UserConfig config{};
     config.arch_version = Dynarmic::A32::ArchVersion::v7;
     config.callbacks = cb.get();
@@ -760,7 +789,9 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
     config.optimizations = cpu_opt ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
     config.enable_cycle_counting = false;
 
-    return std::make_unique<Dynarmic::A32::Jit>(config);
+    auto result = std::make_unique<Dynarmic::A32::Jit>(config);
+    startup.result(0);
+    return result;
 }
 
 DynarmicCPU::DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt)
@@ -769,6 +800,8 @@ DynarmicCPU::DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt
     , cp15(std::make_shared<ArmDynarmicCP15>())
     , core_id(processor_id)
     , cpu_opt(cpu_opt) {
+    static std::atomic<uint64_t> next_id{ 0 };
+    diagnostic_id = next_id.fetch_add(1, std::memory_order_relaxed) + 1;
     jit = make_jit();
 }
 
@@ -872,6 +905,7 @@ void DynarmicCPU::rebuild_jit() {
     if (parent->jit_profile)
         parent->jit_profile->invalidated();
     const CPUContext ctx = save_context();
+    diagnostic_rebuild = true;
     jit = make_jit();
     load_context(ctx);
 }

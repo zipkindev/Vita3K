@@ -17,6 +17,7 @@
 
 #include "interface.h"
 #include "archive.h"
+#include <util/jit_startup_profile.h>
 #include <util/pipeline_profile.h>
 #include <util/sync_wait_profile.h>
 
@@ -799,6 +800,17 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
         auto affinity_ptr = Ptr<SceInt32>(process_param->main_thread_cpu_affinity_mask);
         if (affinity_ptr) {
             affinity = *affinity_ptr.get(emuenv.mem);
+        }
+    }
+    // The existing JIT diagnostic switch also observes all subsequent CPU startups.
+    if (emuenv.cfg.current_config.jit_compile_telemetry || std::getenv("VITA3K_DIAG_JIT_PROFILE")) {
+        try {
+            const auto directory = util::fresh_diagnostic_path(emuenv.cache_path.native(), "jit-startup");
+            emuenv.jit_startup_profile = std::make_shared<util::JitStartupProfile>(directory, emuenv.io.title_id);
+            util::publish_jit_startup_profile(emuenv.jit_startup_profile);
+            LOG_INFO("[JIT-STARTUP] All-thread startup and fast-memory observer armed: {}", directory.string());
+        } catch (const std::exception &e) {
+            LOG_WARN("[JIT-STARTUP] Diagnostic disabled: {}", e.what());
         }
     }
     const ThreadStatePtr main_thread = emuenv.kernel.create_thread(emuenv.mem, emuenv.io.title_id.c_str(), entry_point, priority, affinity, stack_size, nullptr);

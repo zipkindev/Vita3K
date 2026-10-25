@@ -10,6 +10,7 @@ add_library(
 	src/logging.cpp
 	src/mem_snapshot.cpp
 	src/net_utils.cpp
+	src/jit_startup_profile.cpp
 	src/pipeline_profile.cpp
 	src/sync_wait_profile.cpp
 	src/string_utils.cpp
@@ -38,3 +39,8 @@ add_executable(pipeline-profile-tests tests/pipeline_profile.cpp src/pipeline_pr
 target_include_directories(pipeline-profile-tests PRIVATE include)
 target_link_libraries(pipeline-profile-tests PRIVATE Threads::Threads)
 add_test(NAME pipeline-profile COMMAND pipeline-profile-tests)
+
+add_executable(jit-startup-profile-tests tests/jit_startup_profile.cpp src/jit_startup_profile.cpp)
+target_include_directories(jit-startup-profile-tests PRIVATE include)
+target_link_libraries(jit-startup-profile-tests PRIVATE Threads::Threads)
+add_test(NAME jit-startup-profile COMMAND jit-startup-profile-tests)

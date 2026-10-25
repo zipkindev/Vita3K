@@ -37,6 +37,8 @@ class DynarmicCPU : public CPUInterface {
     std::shared_ptr<ArmDynarmicCP15> cp15;
 
     std::size_t core_id = 0;
+    uint64_t diagnostic_id = 0;
+    bool diagnostic_rebuild = false;
 
     bool halted = false;
     bool break_ = false;

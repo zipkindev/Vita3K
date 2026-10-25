@@ -17,3 +17,10 @@ runs generated code, requires a quiescent JIT, preserves pending invalidations,
 and skips preparation rather than flushing for low code-cache headroom.
 Normal compilation and profiling keep their existing paths. See the .20 release
 notes for exact read validation and the experimental preparation limits.
+
+The .23 candidate additionally observes x64 A32 explicit fast dispatch clearing
+and fast-memory patch insertion. Default-off callbacks do not change map contents,
+capacity policy or generated instructions. Enabled insertions take two observer
+clock readings; Vita3K records bucket growth and >=2 ms non-growth insertions in
+its bounded startup observer. This includes the complete insertion, not isolated
+rehash time. A64 and ARM64 paths retain their original insertion behavior.

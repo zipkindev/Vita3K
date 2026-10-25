@@ -1275,10 +1275,10 @@ QGroupBox[flat=&quot;true&quot;]::title {
                 <item>
                  <widget class="QCheckBox" name="jit_compile_telemetry">
                   <property name="text">
-                   <string>JIT Compilation Telemetry</string>
+                   <string>JIT Compilation and Startup Telemetry</string>
                   </property>
                   <property name="toolTip">
-                   <string>Records main-thread compile misses, rolling detail and bounded session summaries on x64. Diagnostic only; does not precompile or execute guest code. Close normally to save reports.</string>
+                   <string>Records main-thread compile misses plus all-thread CPU/JIT startup, fast dispatch clears and fast-memory table growth on x64. Bounded rolling detail and session summaries; timings include observer overhead. Diagnostic only; does not warm or execute guest code. Close normally to save reports.</string>
                   </property>
                  </widget>
                 </item>

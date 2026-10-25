@@ -31,6 +31,7 @@
 namespace util {
 class SyncWaitProfile;
 class PipelineProfile;
+class JitStartupProfile;
 } // namespace util
 
 // forward declare everything used in EmuEnvState
@@ -150,6 +151,7 @@ public:
     std::shared_ptr<cpu::JitPreparation> jit_preparation;
     std::shared_ptr<util::SyncWaitProfile> sync_wait_profile;
     std::shared_ptr<util::PipelineProfile> pipeline_profile;
+    std::shared_ptr<util::JitStartupProfile> jit_startup_profile;
     size_t frame_count = 0;
     uint32_t fps = 0;
     uint32_t avg_fps = 0;

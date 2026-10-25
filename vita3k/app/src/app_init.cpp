@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <app/functions.h>
+#include <util/jit_startup_profile.h>
 #include <util/pipeline_profile.h>
 #include <util/sync_wait_profile.h>
 
@@ -602,6 +603,11 @@ void shutdown_app_runtime(EmuEnvState &state) {
     state.renderer->cleanup();
     state.renderer.reset();
     pvr::PVRTCConfigureDecodeTelemetry(nullptr);
+    if (state.jit_startup_profile) {
+        util::publish_jit_startup_profile({});
+        LOG_INFO("[JIT-STARTUP] {}", state.jit_startup_profile->finish() ? "saved" : "report write failed");
+        state.jit_startup_profile.reset();
+    }
     if (state.pipeline_profile) {
         util::publish_pipeline_profile({});
         LOG_INFO("[PIPELINE-PROFILE] {}", state.pipeline_profile->finish() ? "saved" : "report write failed");
