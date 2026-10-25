@@ -337,7 +337,7 @@ private:
                << ",\"learningByteLimit\":" << report.learning.byte_limit << ",\"learningEntryLimit\":" << report.learning.entry_limit
                << ",\"learningObservations\":" << report.learning.observations << ",\"mergedEntries\":" << report.learning.merged
                << ",\"learningEvictions\":" << report.learning.evictions << ",\"learningDrops\":" << report.learning.dropped
-               << ",\"preparationPolicy\":1,\"preparationBudgetBytes\":" << report.preparation_budget_bytes
+               << ",\"preparationPolicy\":2,\"preparationBudgetBytes\":" << report.preparation_budget_bytes
                << ",\"preloadBudgetSkips\":" << report.preload_budget_skips << ",\"savedDecodedBytes\":" << report.saved_decoded_bytes << "}\n";
     }
     DecodedTextureCache &cache;

@@ -74,7 +74,10 @@ int main() {
     uint32_t result = 0;
     Cache::Observation observed;
     assert(cache.copy(key(1), compressed, output, result, &observed) && output == pixels && result == 42);
-    assert(cache.insert(key(2), compressed, pixels, 42, 3000000));
+    assert(!cache.insert(key(2), compressed, pixels, 42, 3000000));
+    assert(cache.stats().evictions == 0);
+    if (!cache.insert(key(2), compressed, pixels, 42, 3000000))
+        assert(cache.insert(key(2), compressed, pixels, 42, 3000000));
     assert(!cache.copy(key(1), compressed, output, result, &observed));
     assert(observed.coverage.reason == Coverage::Reason::PreparedEvicted);
     cache.decoded(3000000, 8, 8, observed);

@@ -60,11 +60,12 @@ int main() {
     for (int i = 0; i < 8; ++i)
         assert(aged.copy(key(100), input, small, result));
     assert(aged.stats().retention_demotions == 0); // Historical warm-up still useful.
-    for (int i = 0; i < 5000; ++i)
+    for (int i = 0; i < 140000; ++i)
         assert(aged.copy(key(99), input, small, result));
-    assert(aged.stats().retention_demotions == 0); // Cheap menu reuse does not flush it.
+    const auto aged_demotions = aged.stats().retention_demotions;
+    assert(aged_demotions <= 1); // One actually hot small entry can earn protection.
     assert(aged.copy(key(100), input, small, result));
-    assert(aged.stats().retention_demotions > 0); // Old unused preparation ages out.
+    assert(aged.stats().retention_demotions > aged_demotions); // Old unused preparation ages out.
     assert(aged.stats().retained_bytes <= 48 && aged.stats().resident_bytes <= 64);
     aged.set_budget(0);
     assert(aged.stats().entries == 0 && !aged.preparation_fits(1, 1));
@@ -75,4 +76,39 @@ int main() {
     assert(!entries.preparation_fits(4, 4));
     assert(!entries.insert(key(3), input, pixels, 42, 1, false));
     assert(entries.stats().retained_entries == 3 && entries.stats().evictions == 0);
+    // Admission runs before *any* eviction: a one-use large upload must not
+    // destroy the prepared working set just to discover promotion was declined.
+    Cache admission(64, 8);
+    for (uint64_t i = 0; i < 6; ++i)
+        assert(admission.insert(key(i), input, pixels, 42, 30000000, false, 8));
+    const std::vector<uint8_t> large(52, 7);
+    const auto before = admission.stats();
+    for (int i = 0; i < 2; ++i) {
+        assert(!admission.insert(key(900), input, large, 73, 1000000));
+        assert(admission.stats().evictions == before.evictions);
+        for (uint64_t k = 0; k < 6; ++k)
+            assert(admission.copy(key(k), input, small, result) && result == 42);
+    }
+    // Repeated misses let a different scene replace old preparation. Declining
+    // caching never changes returned decode pixels; the third attempt admits.
+    assert(admission.insert(key(900), input, large, 73, 1000000));
+    std::vector<uint8_t> large_out(52);
+    assert(admission.copy(key(900), input, large_out, result) && result == 73 && large_out == large);
+    assert(!admission.copy(key(900), std::vector<uint8_t>(4, 9), large_out, result));
+    assert(admission.stats().resident_bytes <= 64);
+    // Bounded victim inspection declines before removing even a cheap entry.
+    Cache scan(1024, 128);
+    for (uint64_t i = 0; i < 128; ++i)
+        assert(scan.insert(key(i), input, pixels, 42, 0));
+    const std::vector<uint8_t> huge(800, 8);
+    assert(!scan.insert(key(999), input, huge, 81, 100000000));
+    assert(scan.stats().evictions == 0 && scan.stats().entries == 128);
+    assert(!scan.insert(key(999), input, huge, 81, 100000000));
+    assert(scan.insert(key(999), input, huge, 81, 100000000));
+    assert(scan.stats().resident_bytes <= 1024);
+    scan.clear();
+    // Clearing must discard stale admission attempts, too.
+    for (uint64_t i = 0; i < 128; ++i)
+        assert(scan.insert(key(i), input, pixels, 42, 0));
+    assert(!scan.insert(key(999), input, huge, 81, 100000000));
 }

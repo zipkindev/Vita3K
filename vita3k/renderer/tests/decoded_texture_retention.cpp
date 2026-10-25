@@ -45,7 +45,10 @@ int main() {
     // Map transition: expensive new demand content takes priority, bounded by
     // the same byte/entry caps. Old-map content eventually yields space.
     for (uint64_t id = 200; id < 220; ++id) {
-        assert(cache.insert(key(id), input, pixels, 64, 12000000));
+        bool admitted = false;
+        for (unsigned attempt = 0; attempt < 3 && !admitted; ++attempt)
+            admitted = cache.insert(key(id), input, pixels, 64, 12000000);
+        assert(admitted);
         assert(cache.copy(key(id), input, output, result));
         assert(cache.copy(key(id), input, output, result));
         bound(cache);
@@ -56,7 +59,10 @@ int main() {
         assert(cache.copy(key(id), input, output, result) && result == 64);
     // A texture larger than the retained segment can still be admitted using
     // normal total bounds; it cannot occupy the retained group indefinitely.
-    assert(cache.insert(key(300), std::vector<uint8_t>(4), std::vector<uint8_t>(52), 1, 50000000));
+    bool oversized_admitted = false;
+    for (unsigned attempt = 0; attempt < 3 && !oversized_admitted; ++attempt)
+        oversized_admitted = cache.insert(key(300), std::vector<uint8_t>(4), std::vector<uint8_t>(52), 1, 50000000);
+    assert(oversized_admitted);
     bound(cache);
     assert(cache.stats().resident_bytes <= 64);
     cache.clear();

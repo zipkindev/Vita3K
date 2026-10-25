@@ -274,6 +274,8 @@ public:
     bool insert(const Key &key, std::vector<uint8_t> compressed, std::span<const uint8_t> decoded, uint32_t result, uint64_t decode_ns = 0, bool allow_eviction = true, uint64_t historical_uses = 0) {
         std::lock_guard lock(mutex);
         Entry pending{ key, {}, {}, result, decode_ns, 0 };
+        pending.trace_preloaded = !allow_eviction; // Policy must not depend on an observer.
+        pending.last_demand = counts.requests;
         if (coverage) {
             pending.trace_id = coverage->identify(key);
             pending.trace_serial = coverage->retention.next_serial();
@@ -300,6 +302,9 @@ public:
             return reject(TextureRetentionProfile::Cause::Ineligible);
         if (!allow_eviction && (resident > budget - cost || lru.size() >= max_entries || cost > budget - budget / 4 - retained_bytes || retained.size >= max_entries - max_entries / 4))
             return reject(TextureRetentionProfile::Cause::PreparationFull);
+        if (allow_eviction && (resident > budget - cost || lru.size() >= max_entries)
+            && !admit(pending, cost, compressed.size(), decoded.size()))
+            return false; // Decoded pixels still go to the renderer; only caching is declined.
         while (!lru.empty() && (resident > budget - cost || lru.size() >= max_entries)) {
             const bool bytes_full = resident > budget - cost;
             const bool entries_full = lru.size() >= max_entries;
@@ -393,6 +398,7 @@ public:
         if (coverage)
             for (const auto &entry : lru)
                 retention_event(TextureRetentionProfile::Kind::Clear, entry, nullptr, TextureRetentionProfile::Cause::Clear);
+        admissions.reset();
         lookup.clear();
         lru.clear();
         probation = {};
@@ -445,6 +451,7 @@ public:
         if (coverage)
             for (const auto &entry : lru)
                 retention_event(TextureRetentionProfile::Kind::Clear, entry, nullptr, TextureRetentionProfile::Cause::BudgetChange);
+        admissions.reset();
         lookup.clear();
         lru.clear();
         probation = {};
@@ -638,6 +645,71 @@ private:
             probation.erase(entry);
         }
     }
+    uint64_t retention_value(const Entry &entry) const {
+        const uint64_t age = counts.requests - entry.last_demand;
+        const uint64_t divisor = entry.trace_preloaded
+            ? std::min<uint64_t>(8, 1 + age / 65536)
+            : 1 + age / 4096;
+        const uint64_t hints = std::min<uint64_t>(8, entry.uses + entry.historical_uses);
+        return std::min<uint64_t>(entry.decode_ns, 250000000) * (1 + hints) / divisor;
+    }
+    struct AdmissionSlot {
+        Key key{};
+        size_t compressed = 0, decoded = 0;
+        uint64_t request = 0;
+        uint8_t attempts = 0;
+    };
+    bool admit(const Entry &incoming, size_t cost, size_t compressed, size_t decoded) {
+        // Fixed, lazy metadata only; fingerprint collisions affect admission hints,
+        // never pixel reuse. Three repeated pressure misses permit scene turnover.
+        if (!admissions) {
+            try {
+                admissions = std::make_unique<std::array<AdmissionSlot, 1024>>();
+            } catch (const std::bad_alloc &) {
+                return false;
+            }
+        }
+        auto &hint = (*admissions)[Hash{}(incoming.key) % admissions->size()];
+        if (!hint.attempts || hint.key != incoming.key || hint.compressed != compressed
+            || hint.decoded != decoded || counts.requests - hint.request > 65536) {
+            hint = { incoming.key, compressed, decoded, counts.requests, 0 };
+        }
+        hint.request = counts.requests;
+        hint.attempts = std::min<unsigned>(3, hint.attempts + 1);
+        if (hint.attempts >= 3)
+            return true;
+        size_t freed = 0, removed = 0, inspected = 0;
+        uint64_t lost = 0;
+        auto enough = [&] { return resident - freed <= budget - cost && lru.size() - removed < max_entries; };
+        auto inspect = [&](const Entry &victim) {
+            freed += payload(victim);
+            ++removed;
+            ++inspected;
+            // Preserve expensive or actually reused content; cheap cold probation
+            // still cycles normally within the loading headroom.
+            if (victim.retained || victim.uses)
+                lost += retention_value(victim);
+        };
+        for (auto *v = probation.tail; v && !enough() && inspected < 64; v = v->previous)
+            inspect(*v);
+        if (!enough()) {
+            for (auto v = lru.rbegin(); v != lru.rend() && !enough() && inspected < 64; ++v) {
+                if (v->retained)
+                    inspect(*v);
+                else
+                    ++inspected; // Bound skipped nodes too.
+            }
+        }
+        const auto cause = !enough() ? TextureRetentionProfile::Cause::AdmissionScanLimit
+            : std::min<uint64_t>(incoming.decode_ns, 250000000) * hint.attempts < lost
+            ? TextureRetentionProfile::Cause::AdmissionCapacity
+            : TextureRetentionProfile::Cause::None;
+        if (cause != TextureRetentionProfile::Cause::None) {
+            retention_event(TextureRetentionProfile::Kind::Reject, incoming, nullptr, cause);
+            return false;
+        }
+        return true;
+    }
     void retain(Entry &entry, bool preparation) {
         // Oversized probationary entries must not demote the entire retained
         // group merely by being accessed or admitted.
@@ -652,12 +724,23 @@ private:
         // admission bar uses the LRU tail, not an expensive full-cache scan.
         if (!entry.retained && retained.tail
             && (payload(entry) > budget - budget / 4 - retained_bytes || retained.size >= max_entries - max_entries / 4)) {
-            const auto value = [&](const Entry &candidate) {
-                const uint64_t age = counts.requests - candidate.last_demand;
-                const uint64_t hints = std::min<uint64_t>(candidate.uses, 8) + candidate.historical_uses;
-                return preparation_priority(candidate.decode_ns, hints, payload(candidate)) / (1 + age / 4096);
-            };
-            if (value(entry) < value(*retained.tail)) {
+            // Compare the absolute avoided work of the bounded victim set,
+            // rather than allowing one tiny high-density texture to displace a
+            // much slower large preparation. Startup selection remains density ranked.
+            uint64_t lost = 0;
+            size_t freed = 0, members = 0;
+            auto *victim = retained.tail;
+            while (victim && members < 64
+                && (payload(entry) > budget - budget / 4 - retained_bytes + freed
+                    || retained.size - members >= max_entries - max_entries / 4)) {
+                lost += retention_value(*victim);
+                freed += payload(*victim);
+                ++members;
+                victim = victim->previous;
+            }
+            const bool incomplete = payload(entry) > budget - budget / 4 - retained_bytes + freed
+                || retained.size - members >= max_entries - max_entries / 4;
+            if ((incomplete || retention_value(entry) < lost) && entry.uses < 32) {
                 retention_event(TextureRetentionProfile::Kind::Reject, entry, retained.tail, TextureRetentionProfile::Cause::AdmissionValue);
                 probation.erase(entry);
                 probation.push_front(entry);
@@ -766,6 +849,7 @@ private:
             ++learning_counts.dropped; // Learning must not interrupt normal rendering.
         }
     }
+    std::unique_ptr<std::array<AdmissionSlot, 1024>> admissions;
     std::unique_ptr<TextureCoverage> coverage;
     std::list<ProfileInput> learning;
     std::unordered_multimap<Key, std::list<ProfileInput>::iterator, Hash> learning_lookup;

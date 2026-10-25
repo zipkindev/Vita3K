@@ -48,3 +48,6 @@ identity, expensive preload survival through cheap loading churn, request-based
 aging, new-map reuse, independent entry/byte caps, clear/budget changes, disabled
 and observed operation, and real-decoder byte identity. Gameplay validation on
 the target device is required; no particular game or speedup is guaranteed.
+
+The `.27` candidate adds [admission-aware retention](admission-aware-retention.md)
+before total-capacity eviction while keeping this startup selection unchanged.
