@@ -212,6 +212,7 @@ jobs:
       - name: Upload desktop artifact
         uses: actions/upload-artifact@v7
         with:
+          retention-days: 7
           name: ${{ env.ARTIFACT_NAME }}
           path: ${{ env.ARTIFACT_DIR }}
 
@@ -305,6 +306,7 @@ jobs:
       - name: Upload Android artifact
         uses: actions/upload-artifact@v7
         with:
+          retention-days: 7
           name: ${{ env.ARTIFACT_NAME }}
           path: ${{ env.ARTIFACT_DIR }}
 

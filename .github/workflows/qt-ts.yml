@@ -33,6 +33,7 @@ jobs:
       - name: Upload the template
         uses: actions/upload-artifact@v7
         with:
+          retention-days: 7
           name: vita3k-qt-template
           path: template/vita3k_template.ts
           compression-level: 0
