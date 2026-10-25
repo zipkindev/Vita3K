@@ -55,6 +55,8 @@ public:
                         std::ofstream armed(armed_path);
                         armed << "{\"schema\":1,\"active\":" << (cache.coverage_active() ? "true" : "false")
                               << ",\"identityLimit\":" << TextureCoverage::identity_limit << ",\"detailLimit\":" << TextureCoverage::detail_limit
+                              << ",\"retentionSchema\":1,\"retentionRecordLimit\":" << TextureRetentionProfile::record_limit << ",\"retentionRecordBytes\":" << sizeof(TextureRetentionProfile::Record)
+                              << ",\"retentionIdentityBytes\":" << sizeof(TextureRetentionProfile::Identity)
                               << ",\"detailThresholdNs\":2000000,\"status\":\"final reports require normal close\"}\n";
                     }
                     // 14401 rows including the initial/final sample; <16MiB with

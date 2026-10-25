@@ -1268,7 +1268,7 @@ QGroupBox[flat=&quot;true&quot;]::title {
                    <string>Texture Cache and Upload Telemetry</string>
                   </property>
                   <property name="toolTip">
-                   <string>Records cache coverage plus CPU copying, validation, decoding, Vulkan staging and fence waits. Adds up to 4 MiB reuse history, less than 4 MiB coverage and about 10 MiB bounded work telemetry. CPU elapsed times include observer overhead; these are not GPU execution timings. Diagnostic only; close normally to save reports. No texture content, hashes or pointers are written.</string>
+                   <string>Records cache coverage plus CPU copying, validation, decoding, Vulkan staging and fence waits. Adds up to 4 MiB reuse history, less than 4 MiB coverage, about 13 MiB retention history and about 10 MiB bounded work telemetry. Retention events link preload demotions and evictions to competing admissions or hits; this does not change cache policy. CPU elapsed times include observer overhead; these are not GPU execution timings. Diagnostic only; close normally to save reports. No texture content, hashes or pointers are written.</string>
                   </property>
                  </widget>
                 </item>

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <renderer/texture_retention_profile.h>
 #include <vector>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -24,6 +25,7 @@ namespace renderer {
 // guest addresses, hashes or handles are written. Allocations occur at enable.
 class TextureCoverage {
 public:
+    TextureRetentionProfile retention;
     static constexpr size_t identity_limit = 32768, table_size = 65536, probe_limit = 64, detail_limit = 8192;
     enum class Disposition : uint8_t { Absent,
         Pending,
@@ -193,7 +195,8 @@ public:
 #else
     __attribute__((noinline))
 #endif
-    bool write(const std::filesystem::path &prefix) const {
+    bool
+    write(const std::filesystem::path &prefix) const {
         auto path = [&](const char *suffix) { auto p = prefix; p += suffix; return p; };
         if (std::filesystem::exists(path("-summary.json")) || std::filesystem::exists(path("-index.csv")) || std::filesystem::exists(path("-decodes.csv")))
             return false;
@@ -225,10 +228,11 @@ public:
         summary << "],\"reasons\":[\"absent-fingerprint\",\"budget-skipped\",\"deadline-skipped\",\"not-prepared\",\"prepared-evicted\",\"prepared-cleared\",\"prepared-other-miss\",\"ambiguous\",\"untracked\"],"
                    "\"dispositions\":[\"absent\",\"pending\",\"prepared\",\"budget\",\"deadline\",\"ambiguous\"],"
                    "\"limits\":\"Fingerprint candidates only, not byte identity; IDs session-local. All decodes counted; detail >=2ms rolling. Miss/end QPC bound decode plus lock/observer overhead; decodeNs times decoder separately. No texture content, hashes, pointers or asset names. Saved flags require successful normal-close profile replacement.\"}\n";
+        const bool retention_saved = retention.write(prefix, frequency);
         index.flush();
         detail.flush();
         summary.flush();
-        return bool(index) && bool(detail) && bool(summary);
+        return bool(index) && bool(detail) && bool(summary) && retention_saved;
     }
 
 private:

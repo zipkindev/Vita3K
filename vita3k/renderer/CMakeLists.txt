@@ -135,3 +135,8 @@ add_executable(texture-work-profile-tests tests/texture_work_profile.cpp src/tex
 target_include_directories(texture-work-profile-tests PRIVATE include)
 target_link_libraries(texture-work-profile-tests PRIVATE Threads::Threads)
 add_test(NAME texture-work-profile COMMAND texture-work-profile-tests)
+
+add_executable(texture-retention-profile-tests tests/texture_retention_profile.cpp)
+target_include_directories(texture-retention-profile-tests PRIVATE include)
+target_link_libraries(texture-retention-profile-tests PRIVATE Threads::Threads)
+add_test(NAME texture-retention-profile COMMAND texture-retention-profile-tests)

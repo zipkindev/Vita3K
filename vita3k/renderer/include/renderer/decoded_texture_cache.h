@@ -69,6 +69,13 @@ public:
     void enable_coverage() {
         std::lock_guard lock(mutex);
         coverage = std::make_unique<TextureCoverage>();
+        for (auto &entry : lru) {
+            entry.trace_id = coverage->identify(entry.key);
+            entry.trace_serial = coverage->retention.next_serial();
+            entry.trace_bytes = payload(entry);
+            entry.trace_preloaded = false; // Existing content has no preparation provenance in this observer epoch.
+            retention_event(TextureRetentionProfile::Kind::Attach, entry);
+        }
     }
     std::unique_ptr<TextureCoverage> take_coverage() {
         std::lock_guard lock(mutex);
@@ -171,12 +178,22 @@ public:
         ++counts.requests;
         if (observation)
             *observation = {};
+        uint64_t rejected_candidates = 0;
+        uint32_t rejected_flags = 0;
+        const Entry *first_rejected = nullptr;
         const auto [begin, end] = lookup.equal_range(key);
         for (auto it = begin; it != end; ++it) {
             auto entry = it->second;
             if (entry->decoded.size() != output.size() || entry->compressed.size() != compressed.size()
-                || !std::equal(compressed.begin(), compressed.end(), entry->compressed.begin()))
+                || !std::equal(compressed.begin(), compressed.end(), entry->compressed.begin())) {
+                if (coverage) {
+                    ++rejected_candidates;
+                    if (!first_rejected)
+                        first_rejected = &*entry;
+                    rejected_flags |= entry->decoded.size() != output.size() || entry->compressed.size() != compressed.size() ? 16u : 8u;
+                }
                 continue;
+            }
             if (timing)
                 timing->validated = timing->counter();
             std::memcpy(output.data(), entry->decoded.data(), output.size());
@@ -185,6 +202,11 @@ public:
             result = entry->result;
             lru.splice(lru.begin(), lru, entry);
             ++entry->uses;
+            if (coverage) {
+                coverage->retention.hit(entry->trace_id, TextureCoverage::now());
+                if (entry->uses == 1)
+                    retention_event(TextureRetentionProfile::Kind::FirstHit, *entry);
+            }
             retain(*entry, false);
             learn_unlocked(key, compressed, entry->decode_ns, 0, false);
             ++counts.hits;
@@ -218,6 +240,12 @@ public:
         }
         if (coverage && observation)
             observation->coverage = coverage->request(key, false, static_cast<unsigned>(observation->classification));
+        if (coverage) {
+            Entry missed{ key, {}, {}, 0, 0, 0 };
+            missed.trace_id = observation ? observation->coverage.id : coverage->identify(key);
+            missed.trace_bytes = compressed.size() + output.size();
+            retention_event(TextureRetentionProfile::Kind::Miss, missed, first_rejected, TextureRetentionProfile::Cause::None, rejected_candidates, rejected_flags);
+        }
         if (timing)
             timing->done = timing->counter();
         return false;
@@ -225,21 +253,33 @@ public:
 
     bool insert(const Key &key, std::vector<uint8_t> compressed, std::span<const uint8_t> decoded, uint32_t result, uint64_t decode_ns = 0, bool allow_eviction = true) {
         std::lock_guard lock(mutex);
+        Entry pending{ key, {}, {}, result, decode_ns, 0 };
+        if (coverage) {
+            pending.trace_id = coverage->identify(key);
+            pending.trace_serial = coverage->retention.next_serial();
+            pending.trace_preloaded = !allow_eviction;
+            pending.trace_bytes = compressed.capacity() + decoded.size();
+        }
+        const auto reject = [&](TextureRetentionProfile::Cause cause) {
+            retention_event(TextureRetentionProfile::Kind::Reject, pending, nullptr, cause);
+            return false;
+        };
         if (allow_eviction)
             learn_unlocked(key, compressed, decode_ns, 0, false);
         if (!max_entries || compressed.capacity() > budget || decoded.size() > budget - compressed.capacity())
-            return false;
+            return reject(TextureRetentionProfile::Cause::Ineligible);
         const auto [begin, end] = lookup.equal_range(key);
         for (auto it = begin; it != end; ++it) {
             if (it->second->compressed == compressed && it->second->decoded.size() == decoded.size())
-                return false; // Another decoder inserted this immutable content concurrently.
+                return reject(TextureRetentionProfile::Cause::Duplicate); // Another decoder inserted this immutable content concurrently.
         }
         std::vector<uint8_t> pixels(decoded.begin(), decoded.end());
         const size_t cost = compressed.capacity() + pixels.capacity();
+        pending.trace_bytes = cost;
         if (cost > budget)
-            return false;
+            return reject(TextureRetentionProfile::Cause::Ineligible);
         if (!allow_eviction && (resident > budget - cost || lru.size() >= max_entries))
-            return false;
+            return reject(TextureRetentionProfile::Cause::PreparationFull);
         while (!lru.empty() && (resident > budget - cost || lru.size() >= max_entries)) {
             const bool bytes_full = resident > budget - cost;
             const bool entries_full = lru.size() >= max_entries;
@@ -260,6 +300,9 @@ public:
                         break;
                     }
             }
+            retention_event(TextureRetentionProfile::Kind::Evict, *victim, &pending,
+                bytes_full && entries_full ? TextureRetentionProfile::Cause::Both : bytes_full ? TextureRetentionProfile::Cause::Bytes
+                                                                                               : TextureRetentionProfile::Cause::Entries);
             remove_retention(*victim);
             const auto candidates = lookup.equal_range(victim->key);
             for (auto it = candidates.first; it != candidates.second; ++it) {
@@ -278,7 +321,12 @@ public:
         lookup.emplace(key, lru.begin());
         resident += cost;
         auto &entry = lru.front();
+        entry.trace_id = pending.trace_id;
+        entry.trace_serial = pending.trace_serial;
+        entry.trace_preloaded = pending.trace_preloaded;
+        entry.trace_bytes = cost;
         probation.push_front(entry);
+        retention_event(allow_eviction ? TextureRetentionProfile::Kind::Demand : TextureRetentionProfile::Kind::Preload, entry);
         // Historical preparation cost and measured demand cost are hints only;
         // neither changes byte validation or imposes permanent residency.
         if (decode_ns >= 2000000)
@@ -320,6 +368,9 @@ public:
         if (reuse)
             for (const auto &entry : lru)
                 reuse_slot(entry.key, entry.compressed.size(), entry.decoded.size()).state = ReuseState::Cleared;
+        if (coverage)
+            for (const auto &entry : lru)
+                retention_event(TextureRetentionProfile::Kind::Clear, entry, nullptr, TextureRetentionProfile::Cause::Clear);
         lookup.clear();
         lru.clear();
         probation = {};
@@ -369,6 +420,9 @@ public:
         if (reuse)
             for (const auto &entry : lru)
                 reuse_slot(entry.key, entry.compressed.size(), entry.decoded.size()).state = ReuseState::Cleared;
+        if (coverage)
+            for (const auto &entry : lru)
+                retention_event(TextureRetentionProfile::Kind::Clear, entry, nullptr, TextureRetentionProfile::Cause::BudgetChange);
         lookup.clear();
         lru.clear();
         probation = {};
@@ -483,6 +537,9 @@ private:
         uint64_t decode_ns, uses;
         Entry *previous = nullptr, *next = nullptr;
         bool retained = false;
+        uint32_t trace_id = 0;
+        uint64_t trace_serial = 0, trace_bytes = 0;
+        bool trace_preloaded = false;
     };
     // Intrusive queues add no allocations on cache hits. List nodes remain
     // stable until eviction; all operations run under the existing cache mutex.
@@ -523,6 +580,33 @@ private:
     static size_t payload(const Entry &entry) {
         return entry.compressed.capacity() + entry.decoded.capacity();
     }
+    void retention_event(TextureRetentionProfile::Kind kind, const Entry &entry, const Entry *trigger = nullptr,
+        TextureRetentionProfile::Cause cause = TextureRetentionProfile::Cause::None, uint64_t candidates = 0, uint32_t flags = 0) {
+        if (!coverage)
+            return;
+        TextureRetentionProfile::Record r;
+        r.qpc = TextureCoverage::now();
+        r.serial = entry.trace_serial;
+        r.trigger_serial = trigger ? trigger->trace_serial : 0;
+        r.bytes = entry.trace_bytes;
+        r.trigger_bytes = trigger ? trigger->trace_bytes : 0;
+        r.decode_ns = entry.decode_ns;
+        r.uses = entry.uses;
+        r.resident = resident;
+        r.retained = retained_bytes;
+        r.candidates = candidates;
+        r.id = entry.trace_id;
+        r.trigger_id = trigger ? trigger->trace_id : 0;
+        r.kind = static_cast<uint32_t>(kind);
+        r.cause = static_cast<uint32_t>(cause);
+        r.flags = flags | (entry.trace_preloaded ? 1u : 0u) | (entry.retained ? 2u : 0u) | (entry.uses ? 4u : 0u);
+        r.entries = static_cast<uint32_t>(lru.size());
+        r.retained_entries = static_cast<uint32_t>(retained.size);
+        r.width = entry.key.width;
+        r.height = entry.key.height;
+        r.format = entry.key.format;
+        coverage->retention.append(r);
+    }
     void remove_retention(Entry &entry) {
         if (entry.retained) {
             retained_bytes -= payload(entry);
@@ -535,13 +619,16 @@ private:
         // Oversized probationary entries must not demote the entire retained
         // group merely by being accessed or admitted.
         if (payload(entry) > budget - budget / 4) {
+            retention_event(TextureRetentionProfile::Kind::Reject, entry, nullptr, TextureRetentionProfile::Cause::Oversized);
             probation.erase(entry);
             probation.push_front(entry);
             return;
         }
         remove_retention(entry);
-        if (!entry.retained)
+        if (!entry.retained) {
+            retention_event(TextureRetentionProfile::Kind::Promote, entry, &entry);
             ++counts.retention_promotions;
+        }
         entry.retained = true;
         retained_bytes += payload(entry);
         // Preparation is already ranked highest-cost first. Append those
@@ -554,6 +641,11 @@ private:
         // Demotion preserves pixels and leaves the entry eligible for reuse.
         while (retained.tail && (retained_bytes > budget - budget / 4 || retained.size > max_entries - max_entries / 4)) {
             auto &demoted = *retained.tail;
+            const bool bytes_full = retained_bytes > budget - budget / 4;
+            const bool entries_full = retained.size > max_entries - max_entries / 4;
+            retention_event(TextureRetentionProfile::Kind::Demote, demoted, &entry,
+                bytes_full && entries_full ? TextureRetentionProfile::Cause::RetainedBoth : bytes_full ? TextureRetentionProfile::Cause::RetainedBytes
+                                                                                                       : TextureRetentionProfile::Cause::RetainedEntries);
             retained_bytes -= payload(demoted);
             retained.erase(demoted);
             demoted.retained = false;
