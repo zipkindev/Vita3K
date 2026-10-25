@@ -4,6 +4,8 @@ Performance and diagnostic development focused on **Windows on the Lenovo Legion
 
 [Windows .27 release candidate](https://github.com/zipkindev/Vita3K-Go/releases/tag/v1.3.3-win11merge.27) · [All downloads](https://github.com/zipkindev/Vita3K-Go/releases) · [Community findings and measurements](docs/performance-findings.md) · [Setup and dependencies](docs/windows-setup.md) · [Using matching symbols](docs/windows-symbols.md)
 
+**Windows x64 binary:** [Runtime ZIP](https://github.com/zipkindev/Vita3K-Go/releases/download/v1.3.3-win11merge.27/Vita3K-v1.3.3-win11merge.27-runtime.zip) · [Matching symbols ZIP](https://github.com/zipkindev/Vita3K-Go/releases/download/v1.3.3-win11merge.27/Vita3K-v1.3.3-win11merge.27-diagnostics.zip) · [Checksums](https://github.com/zipkindev/Vita3K-Go/releases/download/v1.3.3-win11merge.27/SHA256SUMS). The binary is published as a prerelease candidate; older source tags do not imply a published binary release.
+
 ## Credits and source origins
 
 This project builds on the work of these communities:
