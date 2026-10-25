@@ -102,17 +102,59 @@ Finally, reboot only while idle and check that `Y:` returns without manually
 mapping it, the runner returns online automatically, and the startup receipt
 contains the new boot time. The runner uses delayed automatic service startup.
 
-The installed setup passed a reboot test, service-account SMB read/write and
-EXE/PDB hash checks, disposable compiler-output cleanup, readiness workflow
-`40166748225`, native scheduled retention and an exclusive-lock contention test.
-The restore installer has not been replayed over the healthy runner. Its seed
-validation, junction guards and ACL reset passed native Windows fixture tests;
-task suspension and stale SMB reconnect have isolated mocked regression tests.
+The merged installer has been replayed successfully on the existing runner;
+the deployment and reboot results are recorded below. Its seed validation,
+junction guards and ACL reset also passed native Windows fixture tests; task
+suspension and stale SMB reconnect have isolated mocked regression tests.
 Run `Test-StorageSafety.ps1` as administrator for these Windows tests. They load
 function definitions without executing the installer or changing live tasks or
 SMB mappings. Run Python regressions from this directory with
 `python -m unittest test_archive_retention.py`; GitHub also runs the Python
 regressions for changes to these tools.
+
+### Deployment verification: 2026-10-25
+
+Deployed merged commit
+[`71a5eb44daa966733f7ce0a86eeeb05046cfd996`](https://github.com/zipkindev/Vita3K-Go/commit/71a5eb44daa966733f7ce0a86eeeb05046cfd996)
+through `InstallStorage.ps1` on the idle runner. The installed archiving,
+startup-reconnect and retention scripts matched the merged source by SHA-256,
+including after reboot. The existing SMB credential, archive destination and
+every prior release-protection rule were preserved.
+
+| Check | Verified result |
+| --- | --- |
+| Installer | Completed successfully; both production storage tasks remained enabled as SYSTEM. |
+| Automatic startup reconnect | Rebooted at 03:20:27 Eastern (07:20:27 UTC). The startup receipt matched the new boot and restored `Y:` on its first attempt without manual remapping. |
+| Service-account SMB access | Network Service created, read and removed a disposable probe after reboot. |
+| Archiving and local cleanup | Network Service archived and hash-verified a retained package with 133 manifest entries, produced a fresh verification receipt, and removed disposable compiler-output copies. |
+| Production retention | A non-deleting SYSTEM dry run retained all four real archives. The production deletion task was not manually run during this deployment verification. |
+| Expiry and preservation | The installed retention script ran as SYSTEM against an isolated NAS fixture root. It deleted one expired unreleased fixture, retained the newest five, preserved the protected executable/symbol pair, and recorded deletion-started/deleted journal entries. Disposable fixtures were then removed. |
+| GitHub readiness | [Run 40172546737](https://github.com/zipkindev/Vita3K-Go/actions/runs/40172546737) passed after reboot and invoked the deployed hook in `Complete runner`. |
+| Final health | Runner service and listener running, GitHub runner online and idle, both storage tasks enabled/ready, and approximately 44.4 GiB free on `C:`. |
+
+Retention remains scheduled daily at 03:30 Pacific / 06:30 Eastern with the
+30-day/newest-five policy. The archive write/delete exclusion lock had already
+passed a contention test. All 17 Python regressions, native Windows fixture tests,
+formatting checks and CodeQL passed before the deployment commit was merged.
+The mocked edge-case tests do not establish that a stale-credential outage was
+injected into the live SMB mapping.
+
+Installed script hashes:
+
+```text
+MaintainStorage.ps1  1aef706e3e52730f459885a8d76f59f593d72391bcee0369dbc6b510a4d6ad36
+RestoreArchive.ps1   a00075e2311a7b6231c5d2fc1a9d763a201c977ceacfc320913bc1f83604d3f0
+RetainArchives.py    711bbb797ed8593c9d2fdf5b464d18650b1b5f80832b9d38f4366e08064cd533
+```
+
+A private rollback snapshot was saved under
+`C:\ProgramData\Vita3KStorageDeployments\merged-<timestamp>-<id>\before`,
+alongside the staged merged source and `deployment.json`. It contains the prior
+scripts, task definitions, protection ledger and encrypted credential config;
+the deployment directory is restricted to SYSTEM and administrators. Credentials,
+protection-ledger contents and raw machine evidence remain outside this public
+repository. The encrypted credential backup remains tied to the original
+Windows machine; replacement-host recovery still requires SMB credentials.
 
 ## Retention and recovery controls
 
