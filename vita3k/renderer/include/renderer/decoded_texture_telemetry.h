@@ -48,7 +48,7 @@ public:
                     std::ofstream file(output);
                     if (!file)
                         return;
-                    file << "Schema,UnixNs,SteadyNs,Qpc,QpcFrequency,Requests,Hits,Misses,Bypasses,Evictions,ByteEvictions,EntryEvictions,BothEvictions,ClearEvictions,Decodes,DecodeNs,DecodeGE2ms,DecodeGE10ms,DecodeGE50ms,MaxDecodeNs,IntervalMaxDecodeNs,IntervalMaxWidth,IntervalMaxHeight,ResidentBytes,Entries,BudgetBytes,ReuseEnabled,ReuseEpochs,ReuseHistoryEntries,ReuseHistoryCapacity,ReuseHistoryReplacements,MissFirstObserved,MissAfterCapacityEviction,MissAfterClear,MissSeenOther,DecodeFirstObserved,DecodeAfterCapacityEviction,DecodeAfterClear,DecodeSeenOther,DecodeNsFirstObserved,DecodeNsAfterCapacityEviction,DecodeNsAfterClear,DecodeNsSeenOther,PreloadedHits,DemandHits,UntrackedDecodes\n";
+                    file << "Schema,UnixNs,SteadyNs,Qpc,QpcFrequency,Requests,Hits,Misses,Bypasses,Evictions,ByteEvictions,EntryEvictions,BothEvictions,ClearEvictions,Decodes,DecodeNs,DecodeGE2ms,DecodeGE10ms,DecodeGE50ms,MaxDecodeNs,IntervalMaxDecodeNs,IntervalMaxWidth,IntervalMaxHeight,ResidentBytes,Entries,BudgetBytes,ReuseEnabled,ReuseEpochs,ReuseHistoryEntries,ReuseHistoryCapacity,ReuseHistoryReplacements,MissFirstObserved,MissAfterCapacityEviction,MissAfterClear,MissSeenOther,DecodeFirstObserved,DecodeAfterCapacityEviction,DecodeAfterClear,DecodeSeenOther,DecodeNsFirstObserved,DecodeNsAfterCapacityEviction,DecodeNsAfterClear,DecodeNsSeenOther,PreloadedHits,DemandHits,UntrackedDecodes,RetainedBytes,RetainedEntries,RetentionPromotions,RetentionDemotions\n";
                     auto armed_path = output;
                     armed_path += ".coverage-armed.json";
                     if (!std::filesystem::exists(armed_path)) {
@@ -85,7 +85,8 @@ public:
                             file << ',' << value;
                         for (const auto value : s.reuse.decode_ns)
                             file << ',' << value;
-                        file << ',' << s.reuse.preloaded_hits << ',' << s.reuse.demand_hits << ',' << s.reuse.untracked_decodes << '\n';
+                        file << ',' << s.reuse.preloaded_hits << ',' << s.reuse.demand_hits << ',' << s.reuse.untracked_decodes
+                             << ',' << s.retained_bytes << ',' << s.retained_entries << ',' << s.retention_promotions << ',' << s.retention_demotions << '\n';
                         file.flush();
                         if (!file || final_sample)
                             break;

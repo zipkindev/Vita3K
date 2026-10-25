@@ -19,6 +19,7 @@ We review selected imports instead of automatically merging entire fork historie
 ## Enhancements
 
 - **Decoded texture cache:** reuse decoded PVRTC textures in a configurable RAM budget, reducing repeated CPU decompression.
+- **Bounded retention candidate:** protect a capped group of expensive or reused decoded textures while allowing new scenes to displace old content. The total RAM setting stays unchanged. [Policy and validation limits](docs/decoded-retention.md).
 - **Parallel texture decoding:** the caller and one helper share eligible decode work; small textures keep the serial path.
 - **Automatic texture preparation:** learn compressed inputs per game, merge previous compatible learning and prepare selected textures at the next game launch. The bounded history survives eviction of decoded copies.
 - **Optional diagnostics:** texture reuse counters, JIT compilation profiling and synchronization-wait summaries help distinguish remaining causes of hitches. These measure behavior; they do not warm the JIT.

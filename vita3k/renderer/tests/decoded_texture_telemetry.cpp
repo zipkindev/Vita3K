@@ -44,7 +44,7 @@ int main() {
     std::vector<std::string> values;
     while (std::getline(fields, row, ','))
         values.push_back(row);
-    assert(values.size() == 46);
+    assert(values.size() == 50);
     assert(values[0] == "2" && std::stoull(values[1]) > 0 && std::stoull(values[2]) > 0);
 #ifdef _WIN32
     assert(std::stoull(values[3]) > 0 && std::stoull(values[4]) > 0);
@@ -52,6 +52,8 @@ int main() {
     assert(values[14] == "200" && values[15] == "600000000" && values[16] == "200");
     assert(values[26] == "1" && values[29] == "65536");
     assert(values[45] == "200");
+    assert(std::stoull(values[46]) <= cache.stats().budget_bytes - cache.stats().budget_bytes / 4);
+    assert(std::stoull(values[47]) <= cache.stats().entries);
     assert(!cache.stats().reuse.enabled);
     assert(values[17] == "0" && values[18] == "0" && values[19] == "3000000");
     file.close();

@@ -53,6 +53,8 @@ public:
         uint64_t max_decode_ns = 0, interval_max_decode_ns = 0;
         uint32_t interval_max_width = 0, interval_max_height = 0;
         size_t resident_bytes = 0, entries = 0, budget_bytes = 0;
+        size_t retained_bytes = 0, retained_entries = 0;
+        uint64_t retention_promotions = 0, retention_demotions = 0;
         ReuseStats reuse;
     };
 
@@ -99,7 +101,6 @@ public:
         std::vector<uint8_t> compressed;
         uint64_t decode_ns, uses;
     };
-
     struct LearningStats {
         uint64_t observations = 0, merged = 0, evictions = 0, dropped = 0;
         size_t entries = 0, bytes = 0, byte_limit = 0, entry_limit = 0;
@@ -168,6 +169,7 @@ public:
             result = entry->result;
             lru.splice(lru.begin(), lru, entry);
             ++entry->uses;
+            retain(*entry, false);
             learn_unlocked(key, compressed, entry->decode_ns, 0, false);
             ++counts.hits;
             if (coverage)
@@ -225,7 +227,18 @@ public:
                 ++counts.byte_evictions;
             else
                 ++counts.entry_evictions;
-            const auto victim = std::prev(lru.end());
+            auto victim = std::prev(lru.end());
+            // Prefer probationary content. The retained group is capped, so
+            // expensive startup content cannot reserve the entire cache.
+            if (probation.tail) {
+                const auto range = lookup.equal_range(probation.tail->key);
+                for (auto it = range.first; it != range.second; ++it)
+                    if (&*it->second == probation.tail) {
+                        victim = it->second;
+                        break;
+                    }
+            }
+            remove_retention(*victim);
             const auto candidates = lookup.equal_range(victim->key);
             for (auto it = candidates.first; it != candidates.second; ++it) {
                 if (it->second == victim) {
@@ -242,6 +255,12 @@ public:
         lru.push_front({ key, std::move(compressed), std::move(pixels), result, decode_ns, 0 });
         lookup.emplace(key, lru.begin());
         resident += cost;
+        auto &entry = lru.front();
+        probation.push_front(entry);
+        // Historical preparation cost and measured demand cost are hints only;
+        // neither changes byte validation or imposes permanent residency.
+        if (decode_ns >= 2000000)
+            retain(entry, !allow_eviction);
         if (reuse)
             reuse_slot(key, lru.front().compressed.size(), decoded.size()).state = allow_eviction ? ReuseState::Resident : ReuseState::Preloaded;
         return true;
@@ -281,6 +300,9 @@ public:
                 reuse_slot(entry.key, entry.compressed.size(), entry.decoded.size()).state = ReuseState::Cleared;
         lookup.clear();
         lru.clear();
+        probation = {};
+        retained = {};
+        retained_bytes = 0;
         resident = 0;
     }
 
@@ -327,6 +349,9 @@ public:
                 reuse_slot(entry.key, entry.compressed.size(), entry.decoded.size()).state = ReuseState::Cleared;
         lookup.clear();
         lru.clear();
+        probation = {};
+        retained = {};
+        retained_bytes = 0;
         resident = 0;
         budget = bytes;
     }
@@ -424,6 +449,8 @@ private:
         value.resident_bytes = resident;
         value.entries = lru.size();
         value.budget_bytes = budget;
+        value.retained_bytes = retained_bytes;
+        value.retained_entries = retained.size;
         return value;
     }
 
@@ -432,7 +459,87 @@ private:
         std::vector<uint8_t> compressed, decoded;
         uint32_t result;
         uint64_t decode_ns, uses;
+        Entry *previous = nullptr, *next = nullptr;
+        bool retained = false;
     };
+    // Intrusive queues add no allocations on cache hits. List nodes remain
+    // stable until eviction; all operations run under the existing cache mutex.
+    struct Queue {
+        Entry *head = nullptr, *tail = nullptr;
+        size_t size = 0;
+        void erase(Entry &entry) {
+            if (entry.previous)
+                entry.previous->next = entry.next;
+            else
+                head = entry.next;
+            if (entry.next)
+                entry.next->previous = entry.previous;
+            else
+                tail = entry.previous;
+            entry.previous = entry.next = nullptr;
+            --size;
+        }
+        void push_front(Entry &entry) {
+            entry.next = head;
+            if (head)
+                head->previous = &entry;
+            else
+                tail = &entry;
+            head = &entry;
+            ++size;
+        }
+        void push_back(Entry &entry) {
+            entry.previous = tail;
+            if (tail)
+                tail->next = &entry;
+            else
+                head = &entry;
+            tail = &entry;
+            ++size;
+        }
+    };
+    static size_t payload(const Entry &entry) {
+        return entry.compressed.capacity() + entry.decoded.capacity();
+    }
+    void remove_retention(Entry &entry) {
+        if (entry.retained) {
+            retained_bytes -= payload(entry);
+            retained.erase(entry);
+        } else {
+            probation.erase(entry);
+        }
+    }
+    void retain(Entry &entry, bool preparation) {
+        // Oversized probationary entries must not demote the entire retained
+        // group merely by being accessed or admitted.
+        if (payload(entry) > budget - budget / 4) {
+            probation.erase(entry);
+            probation.push_front(entry);
+            return;
+        }
+        remove_retention(entry);
+        if (!entry.retained)
+            ++counts.retention_promotions;
+        entry.retained = true;
+        retained_bytes += payload(entry);
+        // Preparation is already ranked highest-cost first. Append those
+        // entries; normal demand admissions/hits become most recent.
+        if (preparation)
+            retained.push_back(entry);
+        else
+            retained.push_front(entry);
+        // Cap BOTH dimensions, leaving at least one quarter for probation.
+        // Demotion preserves pixels and leaves the entry eligible for reuse.
+        while (retained.tail && (retained_bytes > budget - budget / 4 || retained.size > max_entries - max_entries / 4)) {
+            auto &demoted = *retained.tail;
+            retained_bytes -= payload(demoted);
+            retained.erase(demoted);
+            demoted.retained = false;
+            probation.push_front(demoted);
+            ++counts.retention_demotions;
+        }
+    }
+
     struct Hash {
         size_t operator()(const Key &key) const {
             return static_cast<size_t>(key.hash ^ (uint64_t(key.width) << 32) ^ key.height ^ (uint64_t(key.format) << 48));
@@ -515,7 +622,8 @@ private:
     mutable std::mutex mutex;
     std::list<Entry> lru;
     std::unordered_multimap<Key, std::list<Entry>::iterator, Hash> lookup;
-    size_t resident = 0;
+    size_t resident = 0, retained_bytes = 0;
+    Queue probation, retained;
     Stats counts;
     std::unique_ptr<std::array<ReuseSlot, reuse_capacity>> reuse;
     uint64_t reuse_sequence = 0;
