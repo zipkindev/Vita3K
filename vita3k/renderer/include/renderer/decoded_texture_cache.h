@@ -160,6 +160,25 @@ public:
         : budget(budget)
         , max_entries(max_entries) {}
 
+    // Expected avoided decode work per payload byte. A small denominator floor
+    // and bounded historical hints prevent tiny or old samples dominating.
+    static uint64_t preparation_priority(uint64_t decode_ns, uint64_t uses, size_t bytes) {
+        return std::min<uint64_t>(decode_ns, 250000000) * (1 + std::min<uint64_t>(uses, 8)) * 1024
+            / std::max<size_t>(bytes, 4096);
+    }
+    bool preparation_fits(size_t compressed, size_t decoded) const {
+        std::lock_guard lock(mutex);
+        const size_t cap = budget - budget / 4;
+        return max_entries && compressed <= cap && decoded <= cap - compressed
+            && compressed + decoded <= cap - retained_bytes
+            && retained.size < max_entries - max_entries / 4
+            && compressed + decoded <= budget - resident && lru.size() < max_entries;
+    }
+    size_t preparation_budget() const {
+        std::lock_guard lock(mutex);
+        return budget - budget / 4;
+    }
+
     bool eligible(size_t compressed, size_t decoded) const {
         std::lock_guard lock(mutex);
         return max_entries && compressed <= budget && decoded <= budget - compressed;
@@ -202,6 +221,7 @@ public:
             result = entry->result;
             lru.splice(lru.begin(), lru, entry);
             ++entry->uses;
+            entry->last_demand = counts.requests;
             if (coverage) {
                 coverage->retention.hit(entry->trace_id, TextureCoverage::now());
                 if (entry->uses == 1)
@@ -251,7 +271,7 @@ public:
         return false;
     }
 
-    bool insert(const Key &key, std::vector<uint8_t> compressed, std::span<const uint8_t> decoded, uint32_t result, uint64_t decode_ns = 0, bool allow_eviction = true) {
+    bool insert(const Key &key, std::vector<uint8_t> compressed, std::span<const uint8_t> decoded, uint32_t result, uint64_t decode_ns = 0, bool allow_eviction = true, uint64_t historical_uses = 0) {
         std::lock_guard lock(mutex);
         Entry pending{ key, {}, {}, result, decode_ns, 0 };
         if (coverage) {
@@ -278,7 +298,7 @@ public:
         pending.trace_bytes = cost;
         if (cost > budget)
             return reject(TextureRetentionProfile::Cause::Ineligible);
-        if (!allow_eviction && (resident > budget - cost || lru.size() >= max_entries))
+        if (!allow_eviction && (resident > budget - cost || lru.size() >= max_entries || cost > budget - budget / 4 - retained_bytes || retained.size >= max_entries - max_entries / 4))
             return reject(TextureRetentionProfile::Cause::PreparationFull);
         while (!lru.empty() && (resident > budget - cost || lru.size() >= max_entries)) {
             const bool bytes_full = resident > budget - cost;
@@ -325,11 +345,13 @@ public:
         entry.trace_serial = pending.trace_serial;
         entry.trace_preloaded = pending.trace_preloaded;
         entry.trace_bytes = cost;
+        entry.historical_uses = allow_eviction ? 0 : std::min<uint64_t>(historical_uses, 8);
+        entry.last_demand = counts.requests;
         probation.push_front(entry);
         retention_event(allow_eviction ? TextureRetentionProfile::Kind::Demand : TextureRetentionProfile::Kind::Preload, entry);
         // Historical preparation cost and measured demand cost are hints only;
         // neither changes byte validation or imposes permanent residency.
-        if (decode_ns >= 2000000)
+        if (!allow_eviction || decode_ns >= 2000000)
             retain(entry, !allow_eviction);
         if (reuse)
             reuse_slot(key, lru.front().compressed.size(), decoded.size()).state = allow_eviction ? ReuseState::Resident : ReuseState::Preloaded;
@@ -540,6 +562,7 @@ private:
         uint32_t trace_id = 0;
         uint64_t trace_serial = 0, trace_bytes = 0;
         bool trace_preloaded = false;
+        uint64_t historical_uses = 0, last_demand = 0;
     };
     // Intrusive queues add no allocations on cache hits. List nodes remain
     // stable until eviction; all operations run under the existing cache mutex.
@@ -623,6 +646,23 @@ private:
             probation.erase(entry);
             probation.push_front(entry);
             return;
+        }
+        // Only compare when a new member would displace retained content.
+        // Demand hits still refresh existing members in constant time. The
+        // admission bar uses the LRU tail, not an expensive full-cache scan.
+        if (!entry.retained && retained.tail
+            && (payload(entry) > budget - budget / 4 - retained_bytes || retained.size >= max_entries - max_entries / 4)) {
+            const auto value = [&](const Entry &candidate) {
+                const uint64_t age = counts.requests - candidate.last_demand;
+                const uint64_t hints = std::min<uint64_t>(candidate.uses, 8) + candidate.historical_uses;
+                return preparation_priority(candidate.decode_ns, hints, payload(candidate)) / (1 + age / 4096);
+            };
+            if (value(entry) < value(*retained.tail)) {
+                retention_event(TextureRetentionProfile::Kind::Reject, entry, retained.tail, TextureRetentionProfile::Cause::AdmissionValue);
+                probation.erase(entry);
+                probation.push_front(entry);
+                return;
+            }
         }
         remove_retention(entry);
         if (!entry.retained) {

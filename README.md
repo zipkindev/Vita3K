@@ -19,7 +19,7 @@ We review selected imports instead of automatically merging entire fork historie
 ## Enhancements
 
 - **Decoded texture cache:** reuse decoded PVRTC textures in a configurable RAM budget, reducing repeated CPU decompression.
-- **Bounded retention candidate:** protect a capped group of expensive or reused decoded textures while allowing new scenes to displace old content. The total RAM setting stays unchanged. [Policy and validation limits](docs/decoded-retention.md).
+- **Retention-aware preparation candidate:** prepare a cost/reuse-ranked set that fits the retained RAM budget, leave loading headroom, and age unused content as texture requests advance. [Policy and validation limits](docs/retention-aware-preparation.md).
 - **Texture copy/upload diagnostics:** optional CPU timing separates cache validation and pixel copying from Vulkan staging, fence waits and command recording, with bounded per-kind summaries. [Scope and overhead](docs/texture-work-telemetry.md).
 - [Bounded retention diagnostics](docs/texture-retention-telemetry.md) link preload demotions and evictions to competing admissions or demand hits, without changing cache policy.
 - **JIT startup diagnostics:** optional bounded timing of guest CPU/JIT creation, fast dispatch clearing and fast-memory patch-map growth, alongside the existing main-thread compile observer. [Report scope and overhead](docs/jit-startup-telemetry.md).

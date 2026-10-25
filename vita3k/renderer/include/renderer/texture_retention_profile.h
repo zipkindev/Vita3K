@@ -38,7 +38,8 @@ public:
         BudgetChange,
         Duplicate,
         Ineligible,
-        PreparationFull };
+        PreparationFull,
+        AdmissionValue };
     struct Record {
         uint64_t sequence = 0, qpc = 0, serial = 0, trigger_serial = 0, bytes = 0, trigger_bytes = 0;
         uint64_t decode_ns = 0, uses = 0, resident = 0, retained = 0, candidates = 0;
@@ -143,7 +144,7 @@ public:
         for (size_t i = 0; i < kinds.size(); ++i)
             summary << (i ? "," : "") << kinds[i];
         summary << "],\"kinds\":[\"preload\",\"demand\",\"first-hit\",\"promote\",\"demote\",\"evict\",\"miss\",\"reject\",\"clear\",\"attach\"],"
-                   "\"causes\":[\"none\",\"total-bytes\",\"total-entries\",\"total-both\",\"retained-bytes\",\"retained-entries\",\"retained-both\",\"oversized\",\"clear\",\"budget-change\",\"duplicate\",\"ineligible\",\"preparation-full\"],"
+                   "\"causes\":[\"none\",\"total-bytes\",\"total-entries\",\"total-both\",\"retained-bytes\",\"retained-entries\",\"retained-both\",\"oversized\",\"clear\",\"budget-change\",\"duplicate\",\"ineligible\",\"preparation-full\",\"admission-value\"],"
                    "\"flags\":\"1 preloaded,2 retained,4 used by demand,8 rejected source bytes,16 rejected output/source size\","
                    "\"limits\":\"Cache mutex serialized, no extra lock or allocation per event. State sampled before transition; hit/promotion after uses increment. Admission event follows room-making and precedes retention. IDs share coverage fingerprint namespace and its drops/collisions. Serials identify admissions, not content; trigger links connect demotion/eviction to admission or hit. First hit only in detail; all hits update bounded identity totals. Latest demotion/eviction summaries survive ring overwrite. No texture bytes, hashes, pointers or guest addresses.\"}\n";
         events.flush();

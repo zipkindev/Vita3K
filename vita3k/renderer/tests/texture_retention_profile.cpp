@@ -51,11 +51,12 @@ int main() {
     for (auto *c : { &plain, &observed }) {
         for (uint64_t i = 0; i < 8; ++i) {
             c->coverage_profile(key(i));
-            assert(c->insert(key(i), source, pixels, 42, 10000000 - i, false));
-            c->coverage_prepared(key(i), true);
+            const bool inserted = c->insert(key(i), source, pixels, 42, 10000000 - i, false);
+            assert(inserted == (i < 6));
+            c->coverage_prepared(key(i), inserted);
         }
         c->coverage_finish_preparation(false);
-        assert(c->insert(key(8), source, pixels, 42, 1000));
+        assert(c->insert(key(8), source, pixels, 42, 20000000));
         auto output = pixels;
         uint32_t result = 0;
         assert(c->copy(key(8), source, output, result) && output == pixels && result == 42);

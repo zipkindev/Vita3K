@@ -23,12 +23,12 @@ int main() {
     cache.acquire_reuse_tracking();
     // Ranked preload retains only a bounded group. No-eviction preparation
     // still fills remaining space, and must reject rather than evict when full.
-    for (uint64_t id = 0; id < 8; ++id) {
+    for (uint64_t id = 0; id < 6; ++id) {
         assert(cache.insert(key(id), input, pixels, 32, 10000000 - id, false));
         bound(cache);
     }
     assert(cache.stats().retained_bytes == 48 && cache.stats().retained_entries == 6);
-    assert(!cache.insert(key(8), input, pixels, 32, 20000000, false));
+    assert(!cache.insert(key(6), input, pixels, 32, 20000000, false));
     assert(cache.stats().evictions == 0);
     // One-pass cheap loading textures churn in probation instead of flushing
     // every expensive startup texture. Byte-identical content/result retained.
@@ -38,14 +38,16 @@ int main() {
     }
     for (uint64_t id = 0; id < 6; ++id)
         assert(cache.copy(key(id), input, output, result) && result == 32 && std::equal(output.begin(), output.end(), pixels.begin()));
-    // A hit promotes cheap but reused content. It can displace an old prepared
-    // entry: preparation is not a permanent pin, even under a long stream.
+    // A cheap one-pass hit cannot displace a more valuable prepared tail.
+    const auto demotions = cache.stats().retention_demotions;
     assert(cache.copy(key(199), input, output, result));
-    assert(cache.stats().retention_demotions > 0);
+    assert(cache.stats().retention_demotions == demotions);
     // Map transition: expensive new demand content takes priority, bounded by
     // the same byte/entry caps. Old-map content eventually yields space.
     for (uint64_t id = 200; id < 220; ++id) {
         assert(cache.insert(key(id), input, pixels, 64, 12000000));
+        assert(cache.copy(key(id), input, output, result));
+        assert(cache.copy(key(id), input, output, result));
         bound(cache);
     }
     for (uint64_t id = 0; id < 6; ++id)

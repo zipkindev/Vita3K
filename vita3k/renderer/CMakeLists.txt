@@ -140,3 +140,8 @@ add_executable(texture-retention-profile-tests tests/texture_retention_profile.c
 target_include_directories(texture-retention-profile-tests PRIVATE include)
 target_link_libraries(texture-retention-profile-tests PRIVATE Threads::Threads)
 add_test(NAME texture-retention-profile COMMAND texture-retention-profile-tests)
+
+add_executable(retention-aware-preparation-tests tests/retention_aware_preparation.cpp)
+target_include_directories(retention-aware-preparation-tests PRIVATE include)
+target_link_libraries(retention-aware-preparation-tests PRIVATE xxHash::xxhash Threads::Threads)
+add_test(NAME retention-aware-preparation COMMAND retention-aware-preparation-tests)

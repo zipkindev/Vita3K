@@ -40,7 +40,7 @@ public:
         std::string status = "off";
         std::string mode = "off";
         uint64_t profile_entries = 0, prepared_entries = 0, prepared_bytes = 0, prepare_ns = 0, saved_entries = 0, profile_hash = 0;
-        uint64_t preload_budget_skips = 0, saved_decoded_bytes = 0;
+        uint64_t preload_budget_skips = 0, saved_decoded_bytes = 0, preparation_budget_bytes = 0;
         DecodedTextureCache::LearningStats learning;
     };
 
@@ -159,6 +159,16 @@ public:
                         if (mode == Mode::Automatic || mode == Mode::Learn)
                             for (const auto &record : records)
                                 cache.merge_learning(record.key, std::span(bytes.data() + record.offset, record.size), record.decode_ns, record.uses);
+                        report.preparation_budget_bytes = cache.preparation_budget();
+                        // Registration and history merge preserve file order and
+                        // fingerprint IDs. Only startup scheduling is re-ranked.
+                        std::stable_sort(records.begin(), records.end(), [](const Record &a, const Record &b) {
+                            const auto score = [](const Record &e) {
+                                const size_t payload = e.size + size_t(e.key.width) * e.key.height * 4;
+                                return DecodedTextureCache::preparation_priority(e.decode_ns, e.uses, payload);
+                            };
+                            return score(a) > score(b);
+                        });
                         report.status = mode == Mode::Learn ? "learn-ready" : "preload-ready";
                         for (const auto &record : records) {
                             if (mode == Mode::Learn)
@@ -169,8 +179,7 @@ public:
                             }
                             size_t pixels;
                             layout(record.key, record.size, pixels);
-                            auto stats = cache.stats();
-                            if (pixels + record.size > stats.budget_bytes - stats.resident_bytes || stats.entries >= 16384) {
+                            if (!cache.preparation_fits(record.size, pixels)) {
                                 report.status = "partial-budget";
                                 ++report.preload_budget_skips;
                                 cache.coverage_budget_skip(record.key);
@@ -183,7 +192,7 @@ public:
                             // Copy first to preserve the decoder's input alignment.
                             std::vector<uint8_t> compressed(bytes.begin() + record.offset, bytes.begin() + record.offset + record.size);
                             const auto result = decode(compressed.data(), record.key.format & 1, record.key.width, record.key.height, record.key.format >> 1, decoded.data());
-                            const bool inserted = cache.insert(record.key, std::move(compressed), decoded, result, record.decode_ns, false);
+                            const bool inserted = cache.insert(record.key, std::move(compressed), decoded, result, record.decode_ns, false, record.uses);
                             cache.coverage_prepared(record.key, inserted);
                             if (inserted)
                                 ++report.prepared_entries;
@@ -328,6 +337,7 @@ private:
                << ",\"learningByteLimit\":" << report.learning.byte_limit << ",\"learningEntryLimit\":" << report.learning.entry_limit
                << ",\"learningObservations\":" << report.learning.observations << ",\"mergedEntries\":" << report.learning.merged
                << ",\"learningEvictions\":" << report.learning.evictions << ",\"learningDrops\":" << report.learning.dropped
+               << ",\"preparationPolicy\":1,\"preparationBudgetBytes\":" << report.preparation_budget_bytes
                << ",\"preloadBudgetSkips\":" << report.preload_budget_skips << ",\"savedDecodedBytes\":" << report.saved_decoded_bytes << "}\n";
     }
     DecodedTextureCache &cache;

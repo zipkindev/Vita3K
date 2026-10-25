@@ -62,7 +62,7 @@ int main() {
     auto bounded = coverage.request(key(99999999), false, 0);
     assert(bounded.id == 0 && bounded.reason == Coverage::Reason::Untracked);
 
-    Cache cache(288);
+    Cache cache(384);
     cache.enable_coverage();
     cache.acquire_reuse_tracking();
     cache.coverage_profile(key(1));

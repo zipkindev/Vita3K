@@ -39,8 +39,8 @@ int main() {
     assert(cache.stats().entries == 2); // A already evicted from decoded RAM.
     assert(profile.finish().saved_entries == 3 && contains(records(), a));
     auto report = profile.begin(root, "TEST01", "1.00|eboot", Profile::Mode::Automatic, {}, decode);
-    assert(report.profile_entries == 3 && report.prepared_entries == 2 && report.status == "partial-budget");
-    assert(report.preload_budget_skips == 1 && report.learning.merged == 3);
+    assert(report.profile_entries == 3 && report.prepared_entries == 1 && report.status == "partial-budget");
+    assert(report.preload_budget_skips == 2 && report.learning.merged == 3);
     // A hit preserves actual decoded output and result while tracking usage.
     std::vector<uint8_t> input(32, 1), pixels(256, 0xff);
     uint32_t result = 0;
@@ -94,7 +94,7 @@ int main() {
     cache.stop_learning();
     assert(cache.learning_stats().bytes == 0);
     // A large selected input must not prevent smaller later records fitting.
-    Cache limited_cache(300, 16384);
+    Cache limited_cache(384, 16384);
     Profile limited(limited_cache);
     auto partial = limited.begin(root, "TEST01", "1.00|eboot", Profile::Mode::Preload, {}, decode);
     assert(partial.prepared_entries == 1 && partial.preload_budget_skips == 3);
