@@ -20,6 +20,7 @@
 #include <bit>
 #include <chrono>
 #include <cpu/functions.h>
+#include <renderer/texture_work_profile.h>
 #include <renderer/vulkan/functions.h>
 
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -316,6 +317,8 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
 }
 
 void VKTextureCache::prepare_staging_buffer(bool is_configure) {
+    renderer::TextureWorkScope preparation(renderer::TextureWorkKind::StagingPrepare,
+        { 0, current_texture->memory_needed, 0, 0, 0, 0, 0, is_configure ? 1u : 0u });
     assert(!is_texture_transfer_ready);
     VKContext *context = reinterpret_cast<VKContext *>(state.context);
 
@@ -350,7 +353,12 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
             state.general_queue.submit(submit_info, current_fence);
             context->cmdbuffers_to_submit.clear();
 
-            auto result = state.device.waitForFences(current_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+            const auto result = [&] {
+                renderer::TextureWorkScope wait(renderer::TextureWorkKind::StagingFenceWait, { 0, 0, 0, 0, 0, 0, 0, 1 });
+                const auto result = state.device.waitForFences(current_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+                wait.result(static_cast<int32_t>(result));
+                return result;
+            }();
             if (result != vk::Result::eSuccess) {
                 LOG_ERROR("Could not wait for fences.");
                 assert(false);
@@ -371,7 +379,12 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
             }
         } else {
             // wait for the fence, but don't reset it
-            auto result = state.device.waitForFences(staging_buffer->waiting_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+            const auto result = [&] {
+                renderer::TextureWorkScope wait(renderer::TextureWorkKind::StagingFenceWait, { 0, 0, 0, 0, 0, 0, 0, 2 });
+                const auto result = state.device.waitForFences(staging_buffer->waiting_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+                wait.result(static_cast<int32_t>(result));
+                return result;
+            }();
             if (result != vk::Result::eSuccess) {
                 LOG_ERROR("Could not wait for fences.");
                 assert(false);
@@ -392,10 +405,13 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
         if (staging_buffer->buffer.size < current_texture->memory_needed) {
             // we need to create a bigger buffer
             // destroy the previous one if there is, no need to defer destroy it as we know it is no longer being used
+            renderer::TextureWorkScope allocation(renderer::TextureWorkKind::StagingAllocate,
+                { staging_buffer->buffer.size, current_texture->memory_needed });
             staging_buffer->buffer.destroy();
 
             staging_buffer->buffer.size = current_texture->memory_needed;
             staging_buffer->buffer.init_buffer(vk::BufferUsageFlagBits::eTransferSrc, vkutil::vma_mapped_alloc);
+            allocation.result(0);
         }
     }
 
@@ -415,6 +431,7 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
         vkutil::transition_image_layout_discard(cmd_buffer, current_texture->texture.image, vkutil::ImageLayout::SampledImage, vkutil::ImageLayout::TransferDst, range);
 
     is_texture_transfer_ready = true;
+    preparation.result(0);
 }
 
 bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &texture_folder, const std::string_view game_id) {
@@ -667,6 +684,8 @@ static void *add_alpha_channel(const void *pixels, const uint32_t width, const u
 
 void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height,
     uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride) {
+    const renderer::TextureWorkContext work_context{ 0, 0, width, height, static_cast<uint32_t>(base_format), mip_index, static_cast<uint32_t>(face) };
+    renderer::TextureWorkScope backend_upload(renderer::TextureWorkKind::BackendUpload, work_context);
     if (!is_texture_transfer_ready)
         prepare_staging_buffer();
 
@@ -708,7 +727,15 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
         return;
     }
 
-    memcpy(static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + staging_buffer.used_so_far, text_data, upload_size);
+    backend_upload.bytes(0, upload_size);
+    {
+        renderer::TextureWorkScope copy(renderer::TextureWorkKind::StagingCopy, work_context);
+        copy.bytes(0, upload_size);
+        memcpy(static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + staging_buffer.used_so_far, text_data, upload_size);
+        copy.result(0);
+    }
+    renderer::TextureWorkScope commands(renderer::TextureWorkKind::UploadCommands, work_context);
+    commands.bytes(0, upload_size);
 
     vk::ImageSubresourceLayers layer{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -726,6 +753,8 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
     };
     cmd_buffer.copyBufferToImage(staging_buffer.buffer.buffer, image.image, vk::ImageLayout::eTransferDstOptimal, region);
     staging_buffer.used_so_far += upload_size;
+    commands.result(0);
+    backend_upload.result(0);
 }
 
 void VKTextureCache::upload_done() {

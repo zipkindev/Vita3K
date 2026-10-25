@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <app/functions.h>
+#include <renderer/texture_work_profile.h>
 #include <util/jit_startup_profile.h>
 #include <util/pipeline_profile.h>
 #include <util/sync_wait_profile.h>
@@ -276,6 +277,17 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
 void set_current_config(EmuEnvState &emuenv, const std::string &app_path) {
     config::set_current_config(emuenv.cfg, emuenv.config_path, app_path);
     pvr::PVRTCConfigureDecodeCache(emuenv.cfg.current_config.decoded_texture_cache_mb, emuenv.cfg.current_config.parallel_texture_decode);
+    // Runtime switches apply on launch; shutdown retires the previous game observer.
+    if (!app_path.empty() && emuenv.cfg.current_config.decoded_texture_telemetry && !emuenv.texture_work_profile) {
+        try {
+            const auto directory = util::fresh_diagnostic_path(emuenv.cache_path.native(), "texture-work");
+            emuenv.texture_work_profile = std::make_shared<renderer::TextureWorkProfile>(directory, app_path);
+            renderer::publish_texture_work_profile(emuenv.texture_work_profile);
+            LOG_INFO("[TEXTURE-WORK] Bounded cache copy/upload observer armed: {}", directory.string());
+        } catch (const std::exception &e) {
+            LOG_WARN("[TEXTURE-WORK] Disabled: {}", e.what());
+        }
+    }
     if (!app_path.empty() && emuenv.cfg.current_config.decoded_texture_telemetry) {
         try {
             const auto path = util::fresh_diagnostic_path(emuenv.cache_path.native(), "texture-cache");
@@ -603,6 +615,11 @@ void shutdown_app_runtime(EmuEnvState &state) {
     state.renderer->cleanup();
     state.renderer.reset();
     pvr::PVRTCConfigureDecodeTelemetry(nullptr);
+    if (state.texture_work_profile) {
+        renderer::publish_texture_work_profile({});
+        LOG_INFO("[TEXTURE-WORK] {}", state.texture_work_profile->finish() ? "saved" : "report write failed");
+        state.texture_work_profile.reset();
+    }
     if (state.jit_startup_profile) {
         util::publish_jit_startup_profile({});
         LOG_INFO("[JIT-STARTUP] {}", state.jit_startup_profile->finish() ? "saved" : "report write failed");

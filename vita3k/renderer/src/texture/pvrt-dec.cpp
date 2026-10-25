@@ -47,6 +47,7 @@
 #include <renderer/parallel_decode_worker.h>
 #include <renderer/pvrt-dec.h>
 #include <renderer/pvrtc-cache.h>
+#include <renderer/texture_work_profile.h>
 #include <xxhash.h>
 
 namespace pvr {
@@ -1054,9 +1055,13 @@ uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width,
     const auto budget = cache.stats().budget_bytes;
     if (!valid_layout || input_bytes > budget || uint64_t(width) * height > (budget - input_bytes) / 4) {
         cache.bypass();
+        renderer::TextureWorkScope decode(renderer::TextureWorkKind::Decode, { input_bytes, uint64_t(width) * height * 4, width, height, two_bit | (type << 1), 0, 0, 4 });
         const auto start = std::chrono::steady_clock::now();
         const auto result = PVRTDecompressPVRTCParallel(data, two_bit, width, height, type, output);
-        cache.decoded(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count(), width, height);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+        decode.end_now();
+        decode.result(0);
+        cache.decoded(elapsed, width, height);
         return result;
     }
     const size_t output_bytes = size_t(width) * height * 4;
@@ -1064,20 +1069,51 @@ uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width,
     // Decode from the same immutable bytes used for the key. Guest memory can be
     // rewritten, and caching output computed from another version would be stale.
     const auto *source = static_cast<const uint8_t *>(data);
-    std::vector<uint8_t> compressed(source, source + size_t(input_bytes));
-    const renderer::DecodedTextureCache::Key key{
-        XXH3_64bits(compressed.data(), compressed.size()), width, height, two_bit | (type << 1)
-    };
+    const renderer::TextureWorkContext work_context{ input_bytes, output_bytes, width, height, two_bit | (type << 1) };
+    std::vector<uint8_t> compressed;
+    renderer::DecodedTextureCache::Key key{};
+    {
+        renderer::TextureWorkScope snapshot(renderer::TextureWorkKind::SourceSnapshotHash, work_context);
+        compressed.assign(source, source + size_t(input_bytes));
+        key = { XXH3_64bits(compressed.data(), compressed.size()), width, height, two_bit | (type << 1) };
+        snapshot.result(0);
+    }
     const std::span<uint8_t> pixels(output, size_t(output_bytes));
     uint32_t result;
     renderer::DecodedTextureCache::Observation observation;
-    if (cache.copy(key, compressed, pixels, result, &observation))
+    bool hit;
+    {
+        renderer::TextureWorkScope copy(renderer::TextureWorkKind::CacheTotal, work_context);
+        renderer::DecodedTextureCache::CopyTiming timing{ renderer::TextureWorkProfile::counter };
+        hit = cache.copy(key, compressed, pixels, result, &observation, copy.active() ? &timing : nullptr);
+        copy.result(0);
+        copy.flags(hit ? 1 : 2);
+        if (copy.active()) {
+            copy.bounds(timing.start, timing.done);
+            copy.record(renderer::TextureWorkKind::CacheLockWait, timing.start, timing.locked);
+            copy.record(renderer::TextureWorkKind::CacheValidate, timing.locked, timing.validated);
+            if (hit)
+                copy.record(renderer::TextureWorkKind::CachePixelCopy, timing.validated, timing.copied);
+            copy.record(renderer::TextureWorkKind::CacheBookkeeping, hit ? timing.copied : timing.validated, timing.done);
+        }
+    }
+    if (hit)
         return result;
-    const auto start = std::chrono::steady_clock::now();
-    result = PVRTDecompressPVRTCParallel(compressed.data(), two_bit, width, height, type, output);
-    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+    int64_t elapsed;
+    {
+        renderer::TextureWorkScope decode(renderer::TextureWorkKind::Decode, work_context);
+        const auto start = std::chrono::steady_clock::now();
+        result = PVRTDecompressPVRTCParallel(compressed.data(), two_bit, width, height, type, output);
+        elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+        decode.end_now();
+        decode.result(0);
+    }
     cache.decoded(elapsed, width, height, observation);
-    cache.insert(key, std::move(compressed), pixels, result, elapsed);
+    {
+        renderer::TextureWorkScope insertion(renderer::TextureWorkKind::CacheInsert, work_context);
+        const bool inserted = cache.insert(key, std::move(compressed), pixels, result, elapsed);
+        insertion.result(inserted ? 0 : 1);
+    }
     return result;
 }
 

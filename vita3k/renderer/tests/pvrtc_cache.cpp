@@ -10,8 +10,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <renderer/pvrt-dec.h>
 #include <renderer/pvrtc-cache.h>
+#include <renderer/texture_work_profile.h>
+#include <sstream>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -24,7 +27,13 @@ int main(int argc, char **argv) {
     const bool configured = argc > 1 && std::string_view(argv[1]) == "configured";
     const bool serial = argc > 1 && std::string_view(argv[1]) == "serial";
     const bool reuse = argc > 1 && std::string_view(argv[1]) == "reuse";
-    const bool disabled = argc > 1 && !configured && !serial && !reuse;
+    const bool work = argc > 1 && std::string_view(argv[1]) == "work";
+    const bool disabled = argc > 1 && !configured && !serial && !reuse && !work;
+    std::shared_ptr<renderer::TextureWorkProfile> work_profile;
+    if (work) {
+        work_profile = std::make_shared<renderer::TextureWorkProfile>(std::filesystem::temp_directory_path() / ("vita-work-decoder-" + std::to_string(renderer::TextureWorkProfile::counter())), "TEST");
+        renderer::publish_texture_work_profile(work_profile);
+    }
     const auto report = std::filesystem::temp_directory_path() / ("vita3k-reuse-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".csv");
     if (reuse) {
         pvr::PVRTCConfigureDecodeTelemetry(report.string().c_str());
@@ -132,6 +141,26 @@ int main(int argc, char **argv) {
         assert(!pvr::PVRTCDecodeCacheStats().reuse.enabled);
         assert(std::filesystem::file_size(report) > 0);
         std::filesystem::remove(report);
+    }
+    if (work) {
+        renderer::publish_texture_work_profile({});
+        assert(work_profile->finish());
+        std::ifstream totals(work_profile->directory / "kinds.csv");
+        std::string line, token;
+        std::getline(totals, line);
+        std::array<uint64_t, static_cast<size_t>(renderer::TextureWorkKind::Count)> counts{};
+        while (std::getline(totals, line)) {
+            std::istringstream row(line);
+            std::getline(row, token, ',');
+            const auto kind = std::stoull(token);
+            std::getline(row, token, ',');
+            std::getline(row, token, ',');
+            counts[kind] = std::stoull(token);
+        }
+        assert(counts[static_cast<size_t>(renderer::TextureWorkKind::CachePixelCopy)] == stats.hits);
+        assert(counts[static_cast<size_t>(renderer::TextureWorkKind::CacheTotal)] == stats.hits + stats.misses);
+        assert(counts[static_cast<size_t>(renderer::TextureWorkKind::Decode)] == stats.decodes);
+        std::filesystem::remove_all(work_profile->directory);
     }
     printf("%u byte-identical decode comparisons; requests=%llu hits=%llu misses=%llu evictions=%llu resident=%zu budget=%zu\n", cases, (unsigned long long)stats.requests, (unsigned long long)stats.hits, (unsigned long long)stats.misses, (unsigned long long)stats.evictions, stats.resident_bytes, stats.budget_bytes);
 }

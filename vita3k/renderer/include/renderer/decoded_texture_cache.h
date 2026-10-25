@@ -27,6 +27,10 @@ public:
         uint32_t width, height, format;
         bool operator==(const Key &) const = default;
     };
+    struct CopyTiming {
+        uint64_t (*counter)() noexcept = nullptr;
+        uint64_t start = 0, locked = 0, validated = 0, copied = 0, done = 0;
+    };
     enum class MissClass : uint8_t { FirstObserved,
         CapacityEvicted,
         Cleared,
@@ -154,8 +158,16 @@ public:
         return max_entries && compressed <= budget && decoded <= budget - compressed;
     }
 
-    bool copy(const Key &key, std::span<const uint8_t> compressed, std::span<uint8_t> output, uint32_t &result, Observation *observation = nullptr) {
+    bool copy(const Key &key, std::span<const uint8_t> compressed, std::span<uint8_t> output, uint32_t &result, Observation *observation = nullptr, CopyTiming *timing = nullptr) {
+        if (timing && !timing->counter)
+            timing = nullptr;
+        if (timing) {
+            *timing = CopyTiming{ timing->counter };
+            timing->start = timing->counter();
+        }
         std::lock_guard lock(mutex);
+        if (timing)
+            timing->locked = timing->counter();
         ++counts.requests;
         if (observation)
             *observation = {};
@@ -165,7 +177,11 @@ public:
             if (entry->decoded.size() != output.size() || entry->compressed.size() != compressed.size()
                 || !std::equal(compressed.begin(), compressed.end(), entry->compressed.begin()))
                 continue;
+            if (timing)
+                timing->validated = timing->counter();
             std::memcpy(output.data(), entry->decoded.data(), output.size());
+            if (timing)
+                timing->copied = timing->counter();
             result = entry->result;
             lru.splice(lru.begin(), lru, entry);
             ++entry->uses;
@@ -182,8 +198,12 @@ public:
                     ++counts.reuse.demand_hits;
                 slot.state = slot.state == ReuseState::Preloaded ? ReuseState::Preloaded : ReuseState::Resident;
             }
+            if (timing)
+                timing->done = timing->counter();
             return true;
         }
+        if (timing)
+            timing->validated = timing->counter();
         ++counts.misses;
         if (reuse) {
             auto &slot = reuse_slot(key, compressed.size(), output.size());
@@ -198,6 +218,8 @@ public:
         }
         if (coverage && observation)
             observation->coverage = coverage->request(key, false, static_cast<unsigned>(observation->classification));
+        if (timing)
+            timing->done = timing->counter();
         return false;
     }
 

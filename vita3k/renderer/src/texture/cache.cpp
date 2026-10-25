@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <renderer/functions.h>
+#include <renderer/texture_work_profile.h>
 
 #include <chrono>
 #include <cpu/functions.h>
@@ -503,6 +504,8 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
     uint32_t width = gxm::get_width(gxm_texture);
     uint32_t height = gxm::get_height(gxm_texture);
 
+    renderer::TextureWorkScope upload_work(renderer::TextureWorkKind::UploadTotal,
+        { 0, 0, width, height, static_cast<uint32_t>(base_format) });
     const Ptr<uint8_t> data(gxm_texture.data_addr << 2);
     uint8_t *texture_data = data.get(mem);
 
@@ -822,6 +825,7 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
         std::vector<uint8_t>().swap(texture_data_decompressed);
     if (texture_pixels_lineared.capacity() > 32u * 1024 * 1024)
         std::vector<uint8_t>().swap(texture_pixels_lineared);
+    upload_work.result(0);
 }
 
 // remove everything related to the sampler state

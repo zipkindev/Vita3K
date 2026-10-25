@@ -28,6 +28,10 @@
 #include <utility>
 #include <vector>
 
+namespace renderer {
+class TextureWorkProfile;
+}
+
 namespace util {
 class SyncWaitProfile;
 class PipelineProfile;
@@ -152,6 +156,7 @@ public:
     std::shared_ptr<util::SyncWaitProfile> sync_wait_profile;
     std::shared_ptr<util::PipelineProfile> pipeline_profile;
     std::shared_ptr<util::JitStartupProfile> jit_startup_profile;
+    std::shared_ptr<renderer::TextureWorkProfile> texture_work_profile;
     size_t frame_count = 0;
     uint32_t fps = 0;
     uint32_t avg_fps = 0;

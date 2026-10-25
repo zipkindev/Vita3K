@@ -1265,10 +1265,10 @@ QGroupBox[flat=&quot;true&quot;]::title {
                 <item>
                  <widget class="QCheckBox" name="decoded_texture_telemetry">
                   <property name="text">
-                   <string>Texture Cache Coverage Telemetry</string>
+                   <string>Texture Cache and Upload Telemetry</string>
                   </property>
                   <property name="toolTip">
-                   <string>Writes cache counters and bounded texture coverage reports: missing learned inputs, preparation budget/deadline skips, and decoding after eviction. Adds up to 4 MiB reuse history plus less than 4 MiB coverage payload. Diagnostic only; does not improve speed. Close normally to save detail. No texture content or hashes are written.</string>
+                   <string>Records cache coverage plus CPU copying, validation, decoding, Vulkan staging and fence waits. Adds up to 4 MiB reuse history, less than 4 MiB coverage and about 10 MiB bounded work telemetry. CPU elapsed times include observer overhead; these are not GPU execution timings. Diagnostic only; close normally to save reports. No texture content, hashes or pointers are written.</string>
                   </property>
                  </widget>
                 </item>

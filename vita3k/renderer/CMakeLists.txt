@@ -30,6 +30,7 @@ add_library(
 	src/vulkan/sync_state.cpp
 	src/vulkan/texture.cpp
 
+	src/texture/work_profile.cpp
 	src/texture/cache.cpp
 	src/texture/format.cpp
 	src/texture/palette.cpp
@@ -65,7 +66,7 @@ target_include_directories(decoded-texture-retention-tests PRIVATE include)
 target_link_libraries(decoded-texture-retention-tests PRIVATE Threads::Threads)
 add_test(NAME decoded-texture-retention COMMAND decoded-texture-retention-tests)
 
-add_executable(pvrtc-cache-tests tests/pvrtc_cache.cpp src/texture/pvrt-dec.cpp)
+add_executable(pvrtc-cache-tests src/texture/work_profile.cpp tests/pvrtc_cache.cpp src/texture/pvrt-dec.cpp)
 target_include_directories(pvrtc-cache-tests PRIVATE include)
 target_link_libraries(pvrtc-cache-tests PRIVATE xxHash::xxhash Threads::Threads)
 add_test(NAME pvrtc-cache COMMAND pvrtc-cache-tests)
@@ -73,6 +74,7 @@ add_test(NAME pvrtc-cache-disabled COMMAND pvrtc-cache-tests disabled)
 add_test(NAME pvrtc-cache-configured COMMAND pvrtc-cache-tests configured)
 add_test(NAME pvrtc-cache-serial COMMAND pvrtc-cache-tests serial)
 add_test(NAME pvrtc-cache-reuse COMMAND pvrtc-cache-tests reuse)
+add_test(NAME pvrtc-cache-work-telemetry COMMAND pvrtc-cache-tests work)
 
 if(ANDROID)
 	target_link_libraries(renderer PRIVATE android adrenotools)
@@ -108,11 +110,11 @@ target_include_directories(decoded-texture-telemetry-tests PRIVATE include)
 target_link_libraries(decoded-texture-telemetry-tests PRIVATE Threads::Threads)
 add_test(NAME decoded-texture-telemetry COMMAND decoded-texture-telemetry-tests)
 
-add_executable(learned-texture-profile-tests tests/learned_texture_profile.cpp src/texture/pvrt-dec.cpp)
+add_executable(learned-texture-profile-tests src/texture/work_profile.cpp tests/learned_texture_profile.cpp src/texture/pvrt-dec.cpp)
 target_include_directories(learned-texture-profile-tests PRIVATE include)
 target_link_libraries(learned-texture-profile-tests PRIVATE xxHash::xxhash Threads::Threads)
 add_test(NAME learned-texture-profile COMMAND learned-texture-profile-tests)
-add_executable(texture-profile-lifecycle-tests tests/texture_profile_lifecycle.cpp src/texture/pvrt-dec.cpp)
+add_executable(texture-profile-lifecycle-tests src/texture/work_profile.cpp tests/texture_profile_lifecycle.cpp src/texture/pvrt-dec.cpp)
 target_include_directories(texture-profile-lifecycle-tests PRIVATE include)
 target_link_libraries(texture-profile-lifecycle-tests PRIVATE xxHash::xxhash Threads::Threads)
 add_test(NAME texture-profile-lifecycle COMMAND texture-profile-lifecycle-tests)
@@ -128,3 +130,8 @@ add_executable(texture-coverage-tests tests/texture_coverage.cpp)
 target_include_directories(texture-coverage-tests PRIVATE include)
 target_link_libraries(texture-coverage-tests PRIVATE Threads::Threads)
 add_test(NAME texture-coverage COMMAND texture-coverage-tests)
+
+add_executable(texture-work-profile-tests tests/texture_work_profile.cpp src/texture/work_profile.cpp)
+target_include_directories(texture-work-profile-tests PRIVATE include)
+target_link_libraries(texture-work-profile-tests PRIVATE Threads::Threads)
+add_test(NAME texture-work-profile COMMAND texture-work-profile-tests)
