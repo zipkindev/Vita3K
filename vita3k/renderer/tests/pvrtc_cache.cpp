@@ -160,6 +160,7 @@ int main(int argc, char **argv) {
         assert(counts[static_cast<size_t>(renderer::TextureWorkKind::CachePixelCopy)] == stats.hits);
         assert(counts[static_cast<size_t>(renderer::TextureWorkKind::CacheTotal)] == stats.hits + stats.misses);
         assert(counts[static_cast<size_t>(renderer::TextureWorkKind::Decode)] == stats.decodes);
+        totals.close(); // Windows does not allow deleting an open report file.
         std::filesystem::remove_all(work_profile->directory);
     }
     printf("%u byte-identical decode comparisons; requests=%llu hits=%llu misses=%llu evictions=%llu resident=%zu budget=%zu\n", cases, (unsigned long long)stats.requests, (unsigned long long)stats.hits, (unsigned long long)stats.misses, (unsigned long long)stats.evictions, stats.resident_bytes, stats.budget_bytes);
