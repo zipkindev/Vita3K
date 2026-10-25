@@ -90,7 +90,8 @@ int main() {
     assert(reset.decode_ns == peak.decode_ns && reset.max_decode_ns == peak.max_decode_ns);
     // Reuse diagnostics must distinguish capacity removal from explicit clear,
     // preserve actual decoded pixels, and carry miss classification to decode.
-    Cache measured(8, 1);
+    // Keep one entry, with enough protected bytes for the later preload.
+    Cache measured(12, 1);
     Cache::Observation observation;
     assert(!measured.stats().reuse.enabled);
     measured.acquire_reuse_tracking();
