@@ -19,6 +19,7 @@
 
 #include <blockingconcurrentqueue.h>
 #include <util/containers.h>
+#include <renderer/protected_pipeline_pairs.h>
 #include <vkutil/vkutil.h>
 
 #include <array>
@@ -126,6 +127,8 @@ private:
         std::shared_ptr<ProgramBinding> fragment;
         uint64_t pair_key;
         uint64_t telemetry_queued = 0;
+        uint64_t request_key = 0;
+        bool learned = false;
     };
     moodycamel::BlockingConcurrentQueue<WarmRequest *> warm_queue;
     std::vector<std::thread> warm_threads;
@@ -133,6 +136,14 @@ private:
     std::atomic<bool> warm_stopping{ false };
     std::mutex warm_mutex;
     std::unordered_set<uint64_t> warm_pairs_requested;
+    std::map<uint64_t, unsigned> warm_attempts;
+    static constexpr size_t warm_pending_limit = 64, warm_program_limit = 2048;
+    size_t warm_pending = 0, warm_registered = 0;
+    std::map<Sha256Hash, std::vector<std::weak_ptr<ProgramBinding>>> warm_vertices, warm_fragments;
+    ProtectedPipelinePairs protected_pairs;
+    std::vector<ProtectedPipelinePair> loaded_protected_pairs;
+    void queue_warm_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool learned);
+    void learn_protected_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment);
     // pairs a draw created a pipeline for before their warm compile started
     std::unordered_set<uint64_t> pairs_drawn;
     vk::RenderPass warm_render_pass;
@@ -157,7 +168,7 @@ private:
     std::vector<WarmState> warm_states;
     void note_draw_state(const WarmState &draw_state);
     void warm_thread(MemState &mem);
-    void warm_pair(const WarmRequest &request, MemState &mem);
+    bool warm_pair(const WarmRequest &request, MemState &mem);
     void stop_warm_threads();
     bool codegen_ignores_draw_hints(const SceGxmProgram &program, bool is_vertex, const shader::Hints &hints);
     bool shader_available(const SceGxmProgram &program, const Sha256Hash &base_hash, bool is_vertex, const shader::Hints &hints);
@@ -193,6 +204,7 @@ private:
     void bisect_pipeline_failure(const vk::GraphicsPipelineCreateInfo &failing_info);
 
     // ready_only: return an empty stage instead of loading or translating a shader that has no module yet
+    vk::ShaderModule load_cached_shader(const Sha256Hash &hash, const std::string &filename);
     vk::PipelineShaderStageCreateInfo retrieve_shader(const SceGxmProgram *program, const Sha256Hash &hash, bool is_vertex, bool maskupdate, MemState &mem, const shader::Hints &hints, bool is_srgb = false, bool has_casts = false, bool ready_only = false);
     vk::PipelineVertexInputStateCreateInfo get_vertex_input_state(const ProgramBinding &vertex_program);
 

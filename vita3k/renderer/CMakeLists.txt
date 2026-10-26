@@ -145,3 +145,7 @@ add_executable(retention-aware-preparation-tests tests/retention_aware_preparati
 target_include_directories(retention-aware-preparation-tests PRIVATE include)
 target_link_libraries(retention-aware-preparation-tests PRIVATE xxHash::xxhash Threads::Threads)
 add_test(NAME retention-aware-preparation COMMAND retention-aware-preparation-tests)
+
+add_executable(protected-pipeline-pairs-tests tests/protected_pipeline_pairs.cpp)
+target_include_directories(protected-pipeline-pairs-tests PRIVATE include)
+add_test(NAME protected-pipeline-pairs COMMAND protected-pipeline-pairs-tests)

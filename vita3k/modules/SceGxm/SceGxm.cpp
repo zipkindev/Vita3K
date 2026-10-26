@@ -55,6 +55,7 @@
 #include <util/align.h>
 #include <util/bytes.h>
 #include <util/log.h>
+#include <util/pipeline_profile.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceGxm);
@@ -4892,6 +4893,13 @@ EXPORT(int, sceGxmShaderPatcherCreateFragmentProgram, SceGxmShaderPatcher *shade
     if (cached != shaderPatcher->fragment_program_cache.end()) {
         ++cached->second.get(mem)->reference_count;
         *fragmentProgram = cached->second;
+        const auto &binding = cached->second.get(mem)->renderer_binding;
+        renderer::warm_pipeline(*emuenv.renderer, {}, binding);
+        if (vertexProgram)
+            warm_program_pair(emuenv, *shaderPatcher, vertexProgram.address(), binding);
+        else {
+            util::PipelineScope missing(util::PipelineKind::WarmNoLinkHint);
+        }
         return 0;
     }
 
@@ -4925,8 +4933,12 @@ EXPORT(int, sceGxmShaderPatcherCreateFragmentProgram, SceGxmShaderPatcher *shade
     gxm_program_register(fragmentProgram->address(), GxmProgramKind::Fragment);
 
     shaderPatcher->fragment_program_cache.emplace(key, *fragmentProgram);
+    renderer::warm_pipeline(*emuenv.renderer, {}, fp->renderer_binding);
     if (vertexProgram)
         warm_program_pair(emuenv, *shaderPatcher, vertexProgram.address(), fp->renderer_binding);
+    else {
+        util::PipelineScope missing(util::PipelineKind::WarmNoLinkHint);
+    }
 
     return 0;
 }
@@ -4983,6 +4995,7 @@ EXPORT(int, sceGxmShaderPatcherCreateVertexProgram, SceGxmShaderPatcher *shaderP
     if (cached != shaderPatcher->vertex_program_cache.end()) {
         ++cached->second.get(mem)->reference_count;
         *vertexProgram = cached->second;
+        renderer::warm_pipeline(*emuenv.renderer, cached->second.get(mem)->renderer_binding, {});
         return 0;
     }
 
@@ -5009,6 +5022,7 @@ EXPORT(int, sceGxmShaderPatcherCreateVertexProgram, SceGxmShaderPatcher *shaderP
     }
     vp->renderer_data = std::move(renderer_data);
     vp->renderer_binding = make_vertex_program_binding(*vp, mem);
+    renderer::warm_pipeline(*emuenv.renderer, vp->renderer_binding, {});
     gxm_program_register(vertexProgram->address(), GxmProgramKind::Vertex);
 
     const auto pending = shaderPatcher->pending_warm.equal_range(programId->program.address());

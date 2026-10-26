@@ -382,6 +382,17 @@ void PipelineCache::stop_compile_workers(bool drain) {
 constexpr uint32_t pipeline_cache_magic = 0xBEEF4321;
 
 void PipelineCache::read_pipeline_cache() {
+    // Read independently of the opaque driver cache: stage identities contain no Vulkan handles.
+    {
+        fs::ifstream learned(state.shaders_path / fmt::format("protected-pairs-vk{}.bin", shader::CURRENT_VERSION), std::ios::binary);
+        ProtectedPipelinePairs loaded;
+        if (learned && loaded.read(learned)) {
+            std::lock_guard<std::mutex> guard(warm_mutex);
+            protected_pairs = loaded;
+            loaded_protected_pairs = loaded.entries();
+            LOG_INFO("[PIPEWARM] loaded {} protected program pairs", loaded_protected_pairs.size());
+        }
+    }
     const std::string pipeline_cache_name = fmt::format("pipeline-cache-vk{}.dat", shader::CURRENT_VERSION);
     const fs::path path = state.shaders_path / pipeline_cache_name;
 
@@ -516,6 +527,15 @@ void PipelineCache::write_pipeline_cache(const std::vector<uint64_t> &keys) {
 
     LOG_INFO("Saving pipeline cache...");
 
+    // The learned set is independently bounded and checksummed. A partial write is ignored on load.
+    {
+        ProtectedPipelinePairs copy;
+        { std::lock_guard<std::mutex> guard(warm_mutex); copy = protected_pairs; }
+        fs::ofstream learned(state.shaders_path / fmt::format("protected-pairs-vk{}.bin", shader::CURRENT_VERSION), std::ios::binary | std::ios::trunc);
+        if (learned && !copy.write(learned))
+            LOG_WARN("[PIPEWARM] could not save protected program pairs");
+    }
+
     // first save the hashes of all pipelines
     auto write_integer = [&]<typename T>(T val) {
         pipeline_cache_file.write(reinterpret_cast<const char *>(&val), sizeof(T));
@@ -540,6 +560,12 @@ void PipelineCache::cleanup() {
     {
         std::lock_guard<std::mutex> guard(warm_mutex);
         warm_pairs_requested.clear();
+        warm_attempts.clear();
+        warm_vertices.clear();
+        warm_fragments.clear();
+        warm_registered = warm_pending = 0;
+        protected_pairs = {};
+        loaded_protected_pairs.clear();
         pairs_drawn.clear();
         warm_states.clear();
     }
@@ -699,7 +725,9 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     }
 
     if (*shader_module == shader_compiling) {
-        precompile_shader(hash, false);
+        // Variant files use the base program hash plus a suffix; the in-memory key is derived.
+        // Looking up the derived key as a base filename silently regenerated cached variants.
+        load_cached_shader(hash, fmt::format("vk{}{}-{}.spv", shader::CURRENT_VERSION, version_suffix, hex_string(base_hash)));
     }
 
     if (*shader_module != shader_compiling) {
@@ -1747,6 +1775,8 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
 
     // add the hash of the attribute and stream layout
     const std::shared_ptr<ProgramBinding> &vertex_program_binding = record.vertex_program_binding;
+    if (must_not_skip_draw(record, consider_for_async))
+        learn_protected_pair(vertex_program_binding, fragment_program_binding);
     key ^= vertex_program_binding->key_hash;
     raw_key ^= vertex_program_binding->key_hash;
 
@@ -1957,9 +1987,13 @@ vk::ShaderModule PipelineCache::precompile_shader(const Sha256Hash &hash, bool s
     if (!fs::exists(state.shaders_path) || fs::is_empty(state.shaders_path))
         return nullptr;
 
-    Sha256Hash shader_hash;
-    memcpy(shader_hash.data(), hash.data(), sizeof(Sha256Hash));
-    const std::string shader_file_name = fmt::format("vk{}-{}.spv", shader::CURRENT_VERSION, hex_string(shader_hash));
+    return load_cached_shader(hash, fmt::format("vk{}-{}.spv", shader::CURRENT_VERSION, hex_string(hash)));
+} catch (const std::exception &error) {
+    LOG_ERROR("Could not load cached shader {}: {}", hex_string(hash), error.what());
+    return nullptr;
+}
+
+vk::ShaderModule PipelineCache::load_cached_shader(const Sha256Hash &hash, const std::string &shader_file_name) try {
     const std::vector<uint32_t> source = renderer::pre_load_shader_spirv(state.shaders_path / shader_file_name);
 
     if (source.empty())
@@ -1986,16 +2020,107 @@ bool PipelineCache::must_not_skip_draw(const GxmRecordState &record, bool consid
     return !consider_for_async || (sync_new_surface_draws && !can_use_deferred_compilation) || (sync_depth_stencil_writers && writes_depth_or_stencil(record));
 }
 
-void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment) {
-    if (!warm_enabled || !vertex || !fragment || !vertex->vertex_program || !fragment->fragment_program || fragment->is_maskupdate)
+void PipelineCache::learn_protected_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment) {
+    if (!vertex || !fragment || !vertex->vertex_program || !fragment->fragment_program || fragment->is_maskupdate)
         return;
-    const uint64_t pair = warm_pair_key(vertex->vertex_program->hash, fragment->fragment_program->hash, fragment->fragment_program->output_register_format);
+    const ProtectedPipelinePair pair{ vertex->vertex_program->hash, fragment->fragment_program->hash,
+        static_cast<uint32_t>(fragment->fragment_program->output_register_format) };
+    std::lock_guard<std::mutex> guard(warm_mutex);
+    if (protected_pairs.learn(pair)) {
+        util::PipelineScope learned(util::PipelineKind::WarmLearnedPair);
+    }
+}
+
+void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment) {
+    if (!warm_enabled)
+        return;
+    std::vector<std::pair<std::shared_ptr<ProgramBinding>, std::shared_ptr<ProgramBinding>>> ready;
     {
         std::lock_guard<std::mutex> guard(warm_mutex);
-        if (!warm_pairs_requested.insert(pair).second)
-            return;
+        const auto register_stage = [&](const auto &binding, bool is_vertex) {
+            if (!binding || (is_vertex ? !binding->vertex_program : !binding->fragment_program) || binding->is_maskupdate)
+                return;
+            auto &registry = is_vertex ? warm_vertices : warm_fragments;
+            const auto &hash = is_vertex ? binding->vertex_program->hash : binding->fragment_program->hash;
+            if (warm_registered >= warm_program_limit) {
+                for (auto *map : { &warm_vertices, &warm_fragments }) {
+                    for (auto it = map->begin(); it != map->end();) {
+                        auto &items = it->second;
+                        const auto old = items.size();
+                        std::erase_if(items, [](const auto &item) { return item.expired(); });
+                        warm_registered -= old - items.size();
+                        if (items.empty()) it = map->erase(it); else ++it;
+                    }
+                }
+            }
+            auto found = registry.find(hash);
+            if (found != registry.end()) {
+                for (const auto &item : found->second)
+                    if (item.lock() == binding) return;
+            }
+            if (warm_registered >= warm_program_limit || (found != registry.end() && found->second.size() >= 8)) {
+                util::PipelineScope bounded(util::PipelineKind::WarmBounded);
+                return;
+            }
+            registry[hash].push_back(binding);
+            ++warm_registered;
+            util::PipelineScope registered(util::PipelineKind::WarmStageRegistered, { 0, 0, is_vertex ? 1u : 0u });
+        };
+        register_stage(vertex, true);
+        register_stage(fragment, false);
+        // Match only previously observed protected pairs, never a guessed stage cross-product.
+        for (const auto &pair : loaded_protected_pairs) {
+            if ((!vertex || !vertex->vertex_program || vertex->vertex_program->hash != pair.vertex)
+                && (!fragment || !fragment->fragment_program || fragment->fragment_program->hash != pair.fragment))
+                continue;
+            const auto vs = warm_vertices.find(pair.vertex), fs = warm_fragments.find(pair.fragment);
+            if (vs == warm_vertices.end() || fs == warm_fragments.end()) continue;
+            for (const auto &v : vs->second) {
+                auto vp = v.lock(); if (!vp) continue;
+                for (const auto &f : fs->second) {
+                    auto fp = f.lock();
+                    if (fp && fp->fragment_program && static_cast<uint32_t>(fp->fragment_program->output_register_format) == pair.output_format) {
+                        if (ready.size() < warm_pending_limit)
+                            ready.emplace_back(vp, fp);
+                        else {
+                            util::PipelineScope bounded(util::PipelineKind::WarmBounded);
+                        }
+                    }
+                }
+            }
+        }
     }
-    warm_queue.enqueue(new WarmRequest{ vertex, fragment, pair, util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0 });
+    for (const auto &[vp, fp] : ready)
+        queue_warm_pair(vp, fp, true);
+    if (vertex && fragment)
+        queue_warm_pair(vertex, fragment, false);
+}
+
+void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool learned) {
+    if (!vertex || !fragment || !vertex->vertex_program || !fragment->fragment_program || fragment->is_maskupdate)
+        return;
+    const uint64_t pair = warm_pair_key(vertex->vertex_program->hash, fragment->fragment_program->hash, fragment->fragment_program->output_register_format);
+    const auto &fp = static_cast<const VKFragmentProgram &>(*fragment->fragment_program);
+    const uint64_t request_key = pair ^ std::rotl(vertex->key_hash, 17) ^ std::rotl(fp.blending_hash, 31);
+    std::lock_guard<std::mutex> guard(warm_mutex);
+    if (!warm_enabled) return;
+    if (warm_pairs_requested.contains(request_key)) {
+        util::PipelineScope duplicate(util::PipelineKind::WarmDuplicate, { 0, pair });
+        return;
+    }
+    const auto attempt = warm_attempts.find(request_key);
+    if (warm_pending >= warm_pending_limit
+        || (attempt == warm_attempts.end() && warm_attempts.size() >= ProtectedPipelinePairs::limit)
+        || (attempt != warm_attempts.end() && attempt->second >= 2)) {
+        util::PipelineScope bounded(util::PipelineKind::WarmBounded, { 0, pair });
+        return;
+    }
+    auto *request = new WarmRequest{ vertex, fragment, pair,
+        util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0, request_key, learned };
+    if (!warm_queue.enqueue(request)) { delete request; return; }
+    warm_pairs_requested.insert(request_key);
+    ++warm_attempts[request_key];
+    ++warm_pending;
 }
 
 void PipelineCache::warm_thread(MemState &mem) {
@@ -2011,8 +2136,12 @@ void PipelineCache::warm_thread(MemState &mem) {
         if (request->telemetry_queued) {
             util::PipelineScope delay(util::PipelineKind::WarmQueueDelay, { 0, request->pair_key }, request->telemetry_queued);
         }
-        if (!warm_stopping)
-            warm_pair(*request, mem);
+        const bool ready = !warm_stopping && warm_pair(*request, mem);
+        {
+            std::lock_guard<std::mutex> guard(warm_mutex);
+            if (!ready) warm_pairs_requested.erase(request->request_key);
+            --warm_pending;
+        }
         delete request;
     }
 }
@@ -2078,7 +2207,7 @@ bool PipelineCache::shader_available(const SceGxmProgram &program, const Sha256H
     return fs::exists(state.shaders_path / fmt::format("vk{}{}-{}.spv", shader::CURRENT_VERSION, version_suffix, hex_string(base_hash)));
 }
 
-void PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
+bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
     util::PipelineScope total(util::PipelineKind::WarmTotal, { 0, request.pair_key });
     const ProgramBinding &vertex_binding = *request.vertex;
     const ProgramBinding &fragment_binding = *request.fragment;
@@ -2089,9 +2218,9 @@ void PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
     {
         std::lock_guard<std::mutex> guard(warm_mutex);
         // a draw already created a pipeline for it, so the driver cache holds that draw's state
-        if (pairs_drawn.contains(request.pair_key)) {
+        if (!request.learned && pairs_drawn.contains(request.pair_key)) {
             util::PipelineScope skipped(util::PipelineKind::WarmSkipDrawn, { 0, request.pair_key });
-            return;
+            return false;
         }
         states = warm_states;
     }
@@ -2115,9 +2244,10 @@ void PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
     // a stage with no cached module is only generated here when the draw would generate the same module
     if (!shader_available(vertex_gxp, vertex_binding.vertex_program->hash, true, hints) && !codegen_ignores_draw_hints(vertex_gxp, true, hints)) {
         util::PipelineScope skipped(util::PipelineKind::WarmMissingShader, { 0, request.pair_key });
-        return;
+        return false;
     }
 
+    bool prepared = false;
     const bool interlock = state.features.support_shader_interlock && fragment_gxp.is_frag_color_used();
     for (const WarmState &warm_state : states) {
         hints.color_format = static_cast<SceGxmColorFormat>(warm_state.color_format);
@@ -2147,9 +2277,12 @@ void PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
             continue;
         // only the driver cache entry is wanted: the draw creates its own pipeline from it
         state.device.destroyPipeline(pipeline);
+        prepared = true;
     }
+    return prepared;
 } catch (const std::exception &error) {
     LOG_WARN("[PIPEWARM] background compile failed: {}", error.what());
+    return false;
 }
 
 void PipelineCache::note_draw_state(const WarmState &draw_state) {

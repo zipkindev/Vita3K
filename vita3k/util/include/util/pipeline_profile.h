@@ -29,6 +29,11 @@ enum class PipelineKind : uint32_t {
     WarmProbe,
     WarmCompile,
     WarmTotal,
+    WarmStageRegistered,
+    WarmLearnedPair,
+    WarmBounded,
+    WarmDuplicate,
+    WarmNoLinkHint,
     Count
 };
 struct PipelineContext {
