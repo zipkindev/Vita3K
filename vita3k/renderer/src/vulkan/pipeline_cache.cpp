@@ -729,7 +729,7 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
 
     if (*shader_module == shader_compiling) {
         // Variant files use the base program hash plus a suffix; the in-memory key is derived.
-        // Looking up the derived key as a base filename silently regenerated cached variants.
+        // The old direct lookup missed these files and fell back through the generic loader.
         load_cached_shader(hash, fmt::format("vk{}{}-{}.spv", shader::CURRENT_VERSION, version_suffix, hex_string(base_hash)));
     }
 
@@ -2061,7 +2061,12 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
             }
             auto found = registry.find(hash);
             if (found != registry.end()) {
-                for (const auto &item : found->second)
+                // Recreated patcher bindings must not exhaust a program's variant slots.
+                auto &items = found->second;
+                const auto old = items.size();
+                std::erase_if(items, [](const auto &item) { return item.expired(); });
+                warm_registered -= old - items.size();
+                for (const auto &item : items)
                     if (item.lock() == binding)
                         return;
             }

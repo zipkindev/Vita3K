@@ -3,9 +3,11 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <istream>
 #include <ostream>
+#include <utility>
 #include <vector>
 
 namespace renderer {
