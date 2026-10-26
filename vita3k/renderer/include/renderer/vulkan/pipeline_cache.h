@@ -18,8 +18,8 @@
 #pragma once
 
 #include <blockingconcurrentqueue.h>
-#include <util/containers.h>
 #include <renderer/protected_pipeline_pairs.h>
+#include <util/containers.h>
 #include <vkutil/vkutil.h>
 
 #include <array>

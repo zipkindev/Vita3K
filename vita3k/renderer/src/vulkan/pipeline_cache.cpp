@@ -530,7 +530,10 @@ void PipelineCache::write_pipeline_cache(const std::vector<uint64_t> &keys) {
     // The learned set is independently bounded and checksummed. A partial write is ignored on load.
     {
         ProtectedPipelinePairs copy;
-        { std::lock_guard<std::mutex> guard(warm_mutex); copy = protected_pairs; }
+        {
+            std::lock_guard<std::mutex> guard(warm_mutex);
+            copy = protected_pairs;
+        }
         fs::ofstream learned(state.shaders_path / fmt::format("protected-pairs-vk{}.bin", shader::CURRENT_VERSION), std::ios::binary | std::ios::trunc);
         if (learned && !copy.write(learned))
             LOG_WARN("[PIPEWARM] could not save protected program pairs");
@@ -2049,14 +2052,18 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
                         const auto old = items.size();
                         std::erase_if(items, [](const auto &item) { return item.expired(); });
                         warm_registered -= old - items.size();
-                        if (items.empty()) it = map->erase(it); else ++it;
+                        if (items.empty())
+                            it = map->erase(it);
+                        else
+                            ++it;
                     }
                 }
             }
             auto found = registry.find(hash);
             if (found != registry.end()) {
                 for (const auto &item : found->second)
-                    if (item.lock() == binding) return;
+                    if (item.lock() == binding)
+                        return;
             }
             if (warm_registered >= warm_program_limit || (found != registry.end() && found->second.size() >= 8)) {
                 util::PipelineScope bounded(util::PipelineKind::WarmBounded);
@@ -2074,9 +2081,12 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
                 && (!fragment || !fragment->fragment_program || fragment->fragment_program->hash != pair.fragment))
                 continue;
             const auto vs = warm_vertices.find(pair.vertex), fs = warm_fragments.find(pair.fragment);
-            if (vs == warm_vertices.end() || fs == warm_fragments.end()) continue;
+            if (vs == warm_vertices.end() || fs == warm_fragments.end())
+                continue;
             for (const auto &v : vs->second) {
-                auto vp = v.lock(); if (!vp) continue;
+                auto vp = v.lock();
+                if (!vp)
+                    continue;
                 for (const auto &f : fs->second) {
                     auto fp = f.lock();
                     if (fp && fp->fragment_program && static_cast<uint32_t>(fp->fragment_program->output_register_format) == pair.output_format) {
@@ -2103,7 +2113,8 @@ void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &verte
     const auto &fp = static_cast<const VKFragmentProgram &>(*fragment->fragment_program);
     const uint64_t request_key = pair ^ std::rotl(vertex->key_hash, 17) ^ std::rotl(fp.blending_hash, 31);
     std::lock_guard<std::mutex> guard(warm_mutex);
-    if (!warm_enabled) return;
+    if (!warm_enabled)
+        return;
     if (warm_pairs_requested.contains(request_key)) {
         util::PipelineScope duplicate(util::PipelineKind::WarmDuplicate, { 0, pair });
         return;
@@ -2117,7 +2128,10 @@ void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &verte
     }
     auto *request = new WarmRequest{ vertex, fragment, pair,
         util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0, request_key, learned };
-    if (!warm_queue.enqueue(request)) { delete request; return; }
+    if (!warm_queue.enqueue(request)) {
+        delete request;
+        return;
+    }
     warm_pairs_requested.insert(request_key);
     ++warm_attempts[request_key];
     ++warm_pending;
@@ -2139,7 +2153,8 @@ void PipelineCache::warm_thread(MemState &mem) {
         const bool ready = !warm_stopping && warm_pair(*request, mem);
         {
             std::lock_guard<std::mutex> guard(warm_mutex);
-            if (!ready) warm_pairs_requested.erase(request->request_key);
+            if (!ready)
+                warm_pairs_requested.erase(request->request_key);
             --warm_pending;
         }
         delete request;

@@ -33,8 +33,10 @@ public:
             return false;
         uint32_t count = 0;
         uint64_t expected = 0;
-        for (unsigned i = 0; i < 4; ++i) count |= uint32_t(header[8 + i]) << (8 * i);
-        for (unsigned i = 0; i < 8; ++i) expected |= uint64_t(header[12 + i]) << (8 * i);
+        for (unsigned i = 0; i < 4; ++i)
+            count |= uint32_t(header[8 + i]) << (8 * i);
+        for (unsigned i = 0; i < 8; ++i)
+            expected |= uint64_t(header[12 + i]) << (8 * i);
         if (count > limit)
             return false;
         std::vector<uint8_t> payload(size_t(count) * 68);
@@ -47,7 +49,8 @@ public:
             const auto p = payload.begin() + i * 68;
             std::copy_n(p, 32, pair.vertex.begin());
             std::copy_n(p + 32, 32, pair.fragment.begin());
-            for (unsigned b = 0; b < 4; ++b) pair.output_format |= uint32_t(p[64 + b]) << (8 * b);
+            for (unsigned b = 0; b < 4; ++b)
+                pair.output_format |= uint32_t(p[64 + b]) << (8 * b);
             if (!parsed.learn(pair))
                 return false;
         }
@@ -60,20 +63,25 @@ public:
         for (const auto &pair : pairs) {
             payload.insert(payload.end(), pair.vertex.begin(), pair.vertex.end());
             payload.insert(payload.end(), pair.fragment.begin(), pair.fragment.end());
-            for (unsigned i = 0; i < 4; ++i) payload.push_back(uint8_t(pair.output_format >> (8 * i)));
+            for (unsigned i = 0; i < 4; ++i)
+                payload.push_back(uint8_t(pair.output_format >> (8 * i)));
         }
         std::array<uint8_t, 20> header{ 'V', '3', 'P', 'P', 'A', 'I', 'R', 1 };
-        for (unsigned i = 0; i < 4; ++i) header[8 + i] = uint8_t(pairs.size() >> (8 * i));
+        for (unsigned i = 0; i < 4; ++i)
+            header[8 + i] = uint8_t(pairs.size() >> (8 * i));
         const auto sum = checksum(payload);
-        for (unsigned i = 0; i < 8; ++i) header[12 + i] = uint8_t(sum >> (8 * i));
+        for (unsigned i = 0; i < 8; ++i)
+            header[12 + i] = uint8_t(sum >> (8 * i));
         out.write(reinterpret_cast<const char *>(header.data()), header.size());
         out.write(reinterpret_cast<const char *>(payload.data()), payload.size());
         return bool(out);
     }
+
 private:
     static uint64_t checksum(const std::vector<uint8_t> &data) {
         uint64_t h = 14695981039346656037ULL;
-        for (auto b : data) h = (h ^ b) * 1099511628211ULL;
+        for (auto b : data)
+            h = (h ^ b) * 1099511628211ULL;
         return h;
     }
     std::vector<ProtectedPipelinePair> pairs;
