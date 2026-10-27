@@ -194,6 +194,7 @@ struct CompileRequest {
     shader::Hints hints;
     bool has_casts;
     uint64_t telemetry_key = 0, telemetry_pair = 0, telemetry_queued = 0;
+    std::optional<ExactPipelineRecipe> exact_recipe;
 
     // the content of the record useful for the pipeline creation
     alignas(8) uint8_t record_data[record_pipeline_len];
@@ -1504,10 +1505,15 @@ void PipelineCache::compiler_thread(MemState &mem) {
             util::PipelineScope queue_delay(util::PipelineKind::QueueDelay, { request->telemetry_key, request->telemetry_pair, 1 }, request->telemetry_queued);
         }
         vk::Pipeline pipeline;
+        const auto compile_start = std::chrono::steady_clock::now();
         {
             util::PipelineScope compiling(util::PipelineKind::AsyncCompile, { request->telemetry_key, request->telemetry_pair, 1 });
             pipeline = compile_pipeline(request->type, request->render_pass, *request->vertex_program_binding, *request->fragment_program_binding, *request->get_record(), request->has_color_surface_data, request->hints, request->has_casts, mem);
             compiling.result(bool(pipeline));
+        }
+        if (pipeline && request->exact_recipe && std::chrono::steady_clock::now() - compile_start >= std::chrono::milliseconds(2)) {
+            std::lock_guard<std::mutex> guard(warm_mutex);
+            exact_recipes.learn(*request->exact_recipe);
         }
         // mark a refused pipeline as failed rather than leaving it null, which would make every
         // later draw queue the same doomed compilation again
@@ -1942,11 +1948,6 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
                 return prepared;
             }
         }
-        if (must_not_skip_draw(record, consider_for_async) || !use_async_compilation) {
-            std::lock_guard<std::mutex> guard(warm_mutex);
-            if (exact_recipes.learn(*recipe))
-                LOG_DEBUG("[PIPEEXACT] learned exact draw {}", key);
-        }
     }
     auto it = pipelines.find(key);
     if (it != pipelines.end()) {
@@ -2084,6 +2085,7 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
         memcpy(request->record_data, &record, record_pipeline_len);
         it->second = pipeline_compiling;
 
+        request->exact_recipe = recipe;
         request->telemetry_key = key;
         request->telemetry_pair = draw_pair;
         request->telemetry_queued = util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0;
@@ -2094,6 +2096,7 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     } else {
         // can't wait, compile it right now
         vk::Pipeline result;
+        const auto compile_start = std::chrono::steady_clock::now();
         {
             const auto reason = !use_async_compilation ? util::PipelineKind::SyncDisabled
                 : already_in_cache                     ? util::PipelineKind::SyncKnownCache
@@ -2101,6 +2104,11 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
             util::PipelineScope synchronous(reason, { key, draw_pair, telemetry_reason });
             result = compile_pipeline(type, render_pass, *vertex_program_binding, *fragment_program_binding, record, static_cast<bool>(record.color_surface.data), context.shader_hints, has_casts, mem);
             synchronous.result(bool(result));
+        }
+        // Do not fill the bounded replay set with cheap cache hits and loading-screen variants.
+        if (result && recipe && std::chrono::steady_clock::now() - compile_start >= std::chrono::milliseconds(2)) {
+            std::lock_guard<std::mutex> guard(warm_mutex);
+            exact_recipes.learn(*recipe);
         }
 
         const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
