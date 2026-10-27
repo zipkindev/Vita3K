@@ -1670,6 +1670,7 @@ vk::Pipeline PipelineCache::link_pipeline_libraries(const vk::GraphicsPipelineCr
                 part.pStages = part.stageCount ? &info.pStages[i - 1] : nullptr;
             }
             if (i == 1) {
+                part.pMultisampleState = info.pMultisampleState;
                 part.pViewportState = info.pViewportState;
                 part.pRasterizationState = info.pRasterizationState;
                 part.pDynamicState = &pre_dynamic_info;

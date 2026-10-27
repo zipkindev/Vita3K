@@ -160,5 +160,5 @@ add_test(NAME pipeline-preparation-queue COMMAND pipeline-preparation-queue-test
 
 add_executable(pipeline-library-keys-tests tests/pipeline_library_keys.cpp)
 target_include_directories(pipeline-library-keys-tests PRIVATE include)
-target_link_libraries(pipeline-library-keys-tests PRIVATE vkutil)
+target_link_libraries(pipeline-library-keys-tests PRIVATE vulkan)
 add_test(NAME pipeline-library-keys COMMAND pipeline-library-keys-tests)

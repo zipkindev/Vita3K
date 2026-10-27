@@ -1,5 +1,7 @@
 // Vita3K emulator project
 // SPDX-License-Identifier: GPL-2.0-or-later
+#define VULKAN_HPP_NO_CONSTRUCTORS
+#define VK_NO_PROTOTYPES
 #include <renderer/vulkan/pipeline_library_keys.h>
 #include <cstdlib>
 #include <iostream>

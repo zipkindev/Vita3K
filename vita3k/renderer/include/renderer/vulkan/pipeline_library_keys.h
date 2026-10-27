@@ -1,7 +1,7 @@
 // Vita3K emulator project
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
-#include <vkutil/vkutil.h>
+#include <vulkan/vulkan.hpp>
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -17,13 +17,12 @@ inline std::array<std::vector<uint64_t>, 4> pipeline_library_keys(const vk::Grap
         keys[i].push_back(i);
     auto &vi = keys[0];
     vi.insert(vi.end(), { uint64_t(p.pInputAssemblyState->topology), p.pInputAssemblyState->primitiveRestartEnable });
+    vi.push_back(p.pVertexInputState->vertexBindingDescriptionCount);
+    vi.push_back(p.pVertexInputState->vertexAttributeDescriptionCount);
     for (uint32_t i = 0; i < p.pVertexInputState->vertexBindingDescriptionCount; ++i) {
         const auto &b = p.pVertexInputState->pVertexBindingDescriptions[i];
         vi.insert(vi.end(), { b.binding, b.stride, uint64_t(b.inputRate) });
     }
-    // Include counts so different binding/attribute partitions cannot alias.
-    vi.push_back(p.pVertexInputState->vertexBindingDescriptionCount);
-    vi.push_back(p.pVertexInputState->vertexAttributeDescriptionCount);
     for (uint32_t i = 0; i < p.pVertexInputState->vertexAttributeDescriptionCount; ++i) {
         const auto &a = p.pVertexInputState->pVertexAttributeDescriptions[i];
         vi.insert(vi.end(), { a.location, a.binding, uint64_t(a.format), a.offset });
@@ -60,7 +59,7 @@ inline std::array<std::vector<uint64_t>, 4> pipeline_library_keys(const vk::Grap
         keys[2].insert(keys[2].end(), { uint64_t(face.failOp), uint64_t(face.passOp), uint64_t(face.depthFailOp), uint64_t(face.compareOp) });
     // Multisampling belongs to both fragment subsets. Sample mask is null in this renderer.
     const auto &m = *p.pMultisampleState;
-    for (size_t i : { 2u, 3u })
+    for (size_t i : { 1u, 2u, 3u })
         keys[i].insert(keys[i].end(), { uint64_t(m.rasterizationSamples), m.sampleShadingEnable, std::bit_cast<uint32_t>(m.minSampleShading), m.alphaToCoverageEnable, m.alphaToOneEnable });
     const auto &b = *p.pColorBlendState;
     keys[3].insert(keys[3].end(), { uint64_t(VkPipelineColorBlendStateCreateFlags(b.flags)), b.logicOpEnable, uint64_t(b.logicOp), b.attachmentCount });
