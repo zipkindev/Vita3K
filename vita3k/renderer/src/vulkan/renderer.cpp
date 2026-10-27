@@ -23,9 +23,11 @@
 #include <renderer/functions.h>
 #include <renderer/types.h>
 #include <renderer/vulkan/functions.h>
+#include <renderer/vulkan/pipeline_library_control.h>
 #include <renderer/vulkan/state.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <future>
 #include <thread>
 #include <vector>
@@ -909,7 +911,11 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             support_fast_pipeline_libraries = library_features.get<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>().graphicsPipelineLibrary
                 && library_properties.get<vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT>().graphicsPipelineLibraryFastLinking;
         }
-        LOG_INFO("[PIPEGPL] fast-linking capability={} (draw compilation setting unchanged)", support_fast_pipeline_libraries);
+        const bool library_capable = support_fast_pipeline_libraries;
+        const char *disable_libraries = std::getenv("VITA3K_DISABLE_PIPELINE_LIBRARIES");
+        support_fast_pipeline_libraries = pipeline_libraries_enabled(library_capable, disable_libraries);
+        LOG_INFO("[PIPEGPL] fast-linking capable={} enabled={} disabled_by_control={} (draw compilation setting unchanged)",
+            library_capable, support_fast_pipeline_libraries, disable_libraries && std::string_view(disable_libraries) == "1");
 
         constexpr bool raw_preserve_needs_interlock = false;
         features.preserve_f16_nan_as_u16 = static_cast<bool>(physical_device_features.independentBlend) && (!raw_preserve_needs_interlock || features.support_shader_interlock);

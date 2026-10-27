@@ -9,8 +9,10 @@
 
 namespace renderer::vulkan {
 // Structural keys, never addresses of create-info payloads or padding bytes. Module/layout
-// handles are stable for this cache lifetime. Compatibility describes the subpass formats,
-// attachment references and flags; load/store operations do not distinguish compatible passes.
+// handles are stable for this cache lifetime. The native render-pass handle scopes every
+// pass-dependent subset conservatively: a guest color hint does not encode native sRGB,
+// fallback formats or attachment interfaces. The compatibility token is an extra discriminator,
+// not proof that two native passes are compatible.
 inline std::array<std::vector<uint64_t>, 4> pipeline_library_keys(const vk::GraphicsPipelineCreateInfo &p, uint64_t compatibility) {
     std::array<std::vector<uint64_t>, 4> keys;
     for (uint64_t i = 0; i < keys.size(); ++i)
@@ -28,7 +30,7 @@ inline std::array<std::vector<uint64_t>, 4> pipeline_library_keys(const vk::Grap
         vi.insert(vi.end(), { a.location, a.binding, uint64_t(a.format), a.offset });
     }
     for (size_t i = 1; i < keys.size(); ++i)
-        keys[i].insert(keys[i].end(), { compatibility, p.subpass });
+        keys[i].insert(keys[i].end(), { compatibility, std::bit_cast<uint64_t>(static_cast<VkRenderPass>(p.renderPass)), p.subpass });
     keys[1].push_back(std::bit_cast<uint64_t>(static_cast<VkPipelineLayout>(p.layout)));
     keys[2].push_back(std::bit_cast<uint64_t>(static_cast<VkPipelineLayout>(p.layout)));
     for (uint32_t i = 0; i < p.stageCount; ++i) {

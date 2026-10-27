@@ -1842,9 +1842,9 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     // A fragment-disabled pipeline has no fragment stage. Keep that established monolithic
     // path: an independent FRAGMENT_SHADER library requires a nonzero stageCount.
     if (state.support_fast_pipeline_libraries && shader_stage_count == 2) {
-        // retrieve_render_pass constructs all passes here with fixed samples/depth format.
-        // Color format, raw attachment and interlock distinguish the subpass interfaces;
-        // load/store/transient variants are compatible and can share shader libraries.
+        // Keep the guest-format/raw/interlock token as an extra discriminator only.
+        // The library key also includes the actual native render-pass handle: gamma
+        // and fallback surface formats are not fully described by these guest hints.
         const uint64_t compatibility = uint64_t(hints.color_format) | (uint64_t(with_raw_attachment) << 32) | (uint64_t(use_shader_interlock) << 33);
         if (auto linked = link_pipeline_libraries(pipeline_info, compatibility, cache_only)) {
             ++pipelines_created;

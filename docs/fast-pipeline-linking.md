@@ -13,3 +13,9 @@ Pipeline telemetry appends library_compile, library_wait, library_link, library_
 This is a test candidate. First-use shaders can still stall when their valid specialization/state becomes known too late. Fast linking support alone does not establish a measured improvement, and linked pipelines can have different GPU efficiency. Validate image correctness and worst-frame latency in a short matched run before recommending this path generally.
 
 References: [Khronos graphics pipeline libraries](https://docs.vulkan.org/features/latest/features/proposals/VK_EXT_graphics_pipeline_library.html), [fast-linking property](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT.html), [ANGLE implementation design](https://chromium.googlesource.com/angle/angle/+/refs/heads/main/src/libANGLE/renderer/vulkan/doc/PipelineCreation.md).
+
+## .33 correctness isolation and diagnostic control
+
+The `.32` loading attempt lost its Vulkan device before racing. A cache-key audit found that guest format hints did not fully encode actual native render-pass compatibility. `.33` conservatively includes the native render-pass handle in all pass-dependent library keys; cross-handle sharing is deferred until a complete compatibility signature is available. This fixes a demonstrated keying gap, but does not establish the cause of the captured device loss.
+
+For a controlled comparison, launch with `VITA3K_DISABLE_PIPELINE_LIBRARIES=1` to use monolithic pipelines while retaining early preparation. Unset it or use `0` to allow capability-gated libraries. The value is read at device creation, so restart between comparisons. Startup logs report `capable`, `enabled` and `disabled_by_control` independently. Async draw compilation remains a separate setting.

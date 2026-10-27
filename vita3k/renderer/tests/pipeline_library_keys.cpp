@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #define VULKAN_HPP_NO_CONSTRUCTORS
 #define VK_NO_PROTOTYPES
+#include <renderer/vulkan/pipeline_library_control.h>
 #include <renderer/vulkan/pipeline_library_keys.h>
 
 #include <cstdlib>
@@ -12,6 +13,12 @@ static void check(bool good) {
         std::abort();
 }
 int main() {
+    check(pipeline_libraries_enabled(true, nullptr));
+    check(pipeline_libraries_enabled(true, "0"));
+    check(!pipeline_libraries_enabled(true, "1"));
+    check(!pipeline_libraries_enabled(false, nullptr));
+    check(!pipeline_libraries_enabled(false, "0"));
+    check(!pipeline_libraries_enabled(false, "1"));
     vk::PipelineVertexInputStateCreateInfo vi{};
     vk::PipelineInputAssemblyStateCreateInfo ia{ .topology = vk::PrimitiveTopology::eTriangleList };
     vk::PipelineViewportStateCreateInfo viewport{ .viewportCount = 1, .scissorCount = 1 };
@@ -57,5 +64,17 @@ int main() {
     check(base[0] == next[0] && base[1] != next[1] && base[2] != next[2] && base[3] != next[3]);
     p.stageCount = 1;
     check(base[2] != pipeline_library_keys(p, 7)[2]);
+    // Native sRGB/UNORM or attachment-interface changes may share a guest format hint.
+    // A different pass must not reuse pre-raster, fragment or output libraries.
+    p.stageCount = 2;
+    p.renderPass = std::bit_cast<vk::RenderPass>(uint64_t{ 1 });
+    const auto pass_a = pipeline_library_keys(p, 7);
+    p.renderPass = std::bit_cast<vk::RenderPass>(uint64_t{ 2 });
+    const auto pass_b = pipeline_library_keys(p, 7);
+    check(pass_a[0] == pass_b[0]);
+    for (unsigned i = 1; i < 4; ++i)
+        check(pass_a[i] != pass_b[i]);
+    p.renderPass = std::bit_cast<vk::RenderPass>(uint64_t{ 1 });
+    check(pass_a == pipeline_library_keys(p, 7));
     std::cout << "pipeline library variant and reuse keys passed\n";
 }
