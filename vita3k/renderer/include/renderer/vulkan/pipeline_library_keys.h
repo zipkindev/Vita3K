@@ -1,11 +1,11 @@
 // Vita3K emulator project
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
-#include <vulkan/vulkan.hpp>
 #include <array>
 #include <bit>
 #include <cstdint>
 #include <vector>
+#include <vulkan/vulkan.hpp>
 
 namespace renderer::vulkan {
 // Structural keys, never addresses of create-info payloads or padding bytes. Module/layout

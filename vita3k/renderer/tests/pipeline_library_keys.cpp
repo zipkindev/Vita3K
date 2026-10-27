@@ -3,10 +3,14 @@
 #define VULKAN_HPP_NO_CONSTRUCTORS
 #define VK_NO_PROTOTYPES
 #include <renderer/vulkan/pipeline_library_keys.h>
+
 #include <cstdlib>
 #include <iostream>
 using namespace renderer::vulkan;
-static void check(bool good) { if (!good) std::abort(); }
+static void check(bool good) {
+    if (!good)
+        std::abort();
+}
 int main() {
     vk::PipelineVertexInputStateCreateInfo vi{};
     vk::PipelineInputAssemblyStateCreateInfo ia{ .topology = vk::PrimitiveTopology::eTriangleList };
@@ -24,9 +28,7 @@ int main() {
         { .stage = vk::ShaderStageFlagBits::eVertex, .pName = "main_vs" },
         { .stage = vk::ShaderStageFlagBits::eFragment, .pName = "main_fs", .pSpecializationInfo = &spec },
     };
-    vk::GraphicsPipelineCreateInfo p{ .stageCount = 2, .pStages = stages, .pVertexInputState = &vi,
-        .pInputAssemblyState = &ia, .pViewportState = &viewport, .pRasterizationState = &raster,
-        .pMultisampleState = &ms, .pDepthStencilState = &depth, .pColorBlendState = &blend, .pDynamicState = &dynamic };
+    vk::GraphicsPipelineCreateInfo p{ .stageCount = 2, .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &viewport, .pRasterizationState = &raster, .pMultisampleState = &ms, .pDepthStencilState = &depth, .pColorBlendState = &blend, .pDynamicState = &dynamic };
     const auto base = pipeline_library_keys(p, 7);
     // Blend/output changes must not recompile unchanged shader libraries.
     attachment.blendEnable = VK_TRUE;
@@ -46,7 +48,10 @@ int main() {
     check(base[0] != next[0] && base[1] == next[1] && base[2] == next[2]);
     ia.topology = vk::PrimitiveTopology::eTriangleList;
     // Payload relocation must preserve identity; format/interlock/raw compatibility must not.
-    auto copy = spec; uint32_t copied_data = 0; copy.pData = &copied_data; stages[1].pSpecializationInfo = &copy;
+    auto copy = spec;
+    uint32_t copied_data = 0;
+    copy.pData = &copied_data;
+    stages[1].pSpecializationInfo = &copy;
     check(base == pipeline_library_keys(p, 7));
     next = pipeline_library_keys(p, 8);
     check(base[0] == next[0] && base[1] != next[1] && base[2] != next[2] && base[3] != next[3]);
