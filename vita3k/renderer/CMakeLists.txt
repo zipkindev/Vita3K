@@ -149,3 +149,7 @@ add_test(NAME retention-aware-preparation COMMAND retention-aware-preparation-te
 add_executable(protected-pipeline-pairs-tests tests/protected_pipeline_pairs.cpp)
 target_include_directories(protected-pipeline-pairs-tests PRIVATE include)
 add_test(NAME protected-pipeline-pairs COMMAND protected-pipeline-pairs-tests)
+
+add_executable(exact-pipeline-recipes-tests tests/exact_pipeline_recipes.cpp)
+target_include_directories(exact-pipeline-recipes-tests PRIVATE include)
+add_test(NAME exact-pipeline-recipes COMMAND exact-pipeline-recipes-tests)

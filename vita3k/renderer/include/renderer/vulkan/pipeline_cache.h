@@ -18,6 +18,9 @@
 #pragma once
 
 #include <blockingconcurrentqueue.h>
+#include <condition_variable>
+#include <optional>
+#include <renderer/exact_pipeline_recipes.h>
 #include <renderer/protected_pipeline_pairs.h>
 #include <util/containers.h>
 #include <vkutil/vkutil.h>
@@ -122,6 +125,28 @@ private:
 
     // background compiles of the vertex/fragment pairs a game creates, so the driver cache already holds their
     // shaders when the first draw needs a pipeline
+    struct WarmRequest;
+    struct ExactWarmJob {
+        ExactPipelineRecipe recipe;
+        vk::RenderPass render_pass;
+        enum Status { Queued,
+            Running,
+            Ready,
+            Taken,
+            Failed } status = Queued;
+        vk::Pipeline pipeline;
+    };
+    ExactPipelineRecipes exact_recipes;
+    std::vector<std::pair<ExactPipelineRecipe, vk::RenderPass>> loaded_exact_recipes;
+    std::map<ExactPipelineRecipe, std::shared_ptr<ExactWarmJob>> exact_jobs;
+    std::condition_variable exact_ready;
+    uint64_t exact_prepared_count = 0, exact_reused_count = 0, exact_draw_claimed_count = 0;
+    static constexpr size_t exact_ready_limit = 256;
+    // Render-pass construction parameters, never persisted Vulkan handles.
+    std::map<vk::RenderPass, std::array<uint32_t, 2>> render_pass_recipes;
+    std::optional<ExactPipelineRecipe> describe_exact_pipeline(const VKContext &context, SceGxmPrimitiveType type, bool casts, uint64_t key);
+    vk::Pipeline reuse_exact_pipeline(const ExactPipelineRecipe &recipe);
+    bool warm_exact_pipeline(const WarmRequest &request, MemState &mem);
     struct WarmRequest {
         std::shared_ptr<ProgramBinding> vertex;
         std::shared_ptr<ProgramBinding> fragment;
@@ -129,6 +154,7 @@ private:
         uint64_t telemetry_queued = 0;
         uint64_t request_key = 0;
         bool learned = false;
+        std::shared_ptr<ExactWarmJob> exact;
     };
     moodycamel::BlockingConcurrentQueue<WarmRequest *> warm_queue;
     std::vector<std::thread> warm_threads;

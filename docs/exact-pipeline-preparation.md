@@ -1,0 +1,13 @@
+# Exact Vulkan pipeline preparation candidate (.30)
+
+A prepared vertex/fragment pair does not guarantee that a later draw uses the same pipeline. Primitive topology, vertex layout, blending, colour/output formats, rasterization, depth/stencil and shader texture hints can change the required pipeline. Pair preparation previously destroyed the completed Vulkan pipeline and retained only the driver's opaque cache entry.
+
+This candidate learns a bounded per-game set of actual draw recipes. Each recipe contains program hashes, layout/blend identity and explicit scalar state. Profiles contain no shader code, guest pointers or Vulkan handles. The format has its own version, checksum, 1,024-recipe limit (352,276 bytes including header), shader-cache version and feature-mask namespace. Incompatible or damaged files are ignored. Vulkan load/store operations are canonicalized because they do not change render-pass compatibility.
+
+When matching live program bindings become available on a later launch, existing background preparation workers can build the recorded state. Up to 256 exact pipeline objects are retained, with the existing 64-request queue bound. Completed objects are transferred to the renderer's pipeline cache for direct reuse. Workers do not modify that cache. Matching requires the actual recipe, layout and blend state; an approximate pair match cannot supply a prepared object.
+
+A draw claims work that has not started rather than waiting behind speculative requests. If its exact compilation is already running, a condition-variable wait avoids duplicate compilation and active spinning. Failed preparations fall back to the existing path. Protected-draw rules remain in place. Generic guessed-state preparation is suppressed for bindings already covered by exact work. Session logs report learned/queued/prepared/reused/claimed counts; exact compiles use existing pipeline telemetry with reason `0x30`.
+
+The texture-cache budget and texture/JIT learning formats do not change. No game-specific states are hardcoded. A first run learns recipes; normal closure saves them. A fresh process can then validate preparation and direct reuse. A first run cannot prove benefits from recipes that have never been observed. GPU/driver pipeline memory per retained object is driver-dependent; 256 is an object-count bound, not a fixed GPU-memory allocation.
+
+Validation requires matching optimized EXE/PDB provenance, persistence/corruption/bounds tests, the native suite and short first-run/fresh-process Metropia comparisons. No performance gain is claimed before those tests. The .29 comparison and production installation remain separate.

@@ -111,6 +111,75 @@ static uint64_t hash_pipeline_record(const GxmRecordState &record) {
     return XXH3_64bits(block, record_pipeline_len);
 }
 
+namespace {
+GxmRecordState exact_record(const ExactPipelineRecipe &r) {
+    GxmRecordState out{};
+    out.vertex_program_hash = r.vertex;
+    out.fragment_program_hash = r.fragment;
+    const auto &w = r.words;
+    out.color_base_format = static_cast<decltype(out.color_base_format)>(w[6]);
+    out.cull_mode = static_cast<decltype(out.cull_mode)>(w[7]);
+    out.two_sided = static_cast<decltype(out.two_sided)>(w[8]);
+    out.region_clip_mode = static_cast<decltype(out.region_clip_mode)>(w[9]);
+    out.front_polygon_mode = static_cast<decltype(out.front_polygon_mode)>(w[10]);
+    out.back_polygon_mode = static_cast<decltype(out.back_polygon_mode)>(w[11]);
+    out.front_stencil_state_op.func = static_cast<decltype(out.front_stencil_state_op.func)>(w[12]);
+    out.front_stencil_state_op.stencil_fail = static_cast<decltype(out.front_stencil_state_op.stencil_fail)>(w[13]);
+    out.front_stencil_state_op.depth_fail = static_cast<decltype(out.front_stencil_state_op.depth_fail)>(w[14]);
+    out.front_stencil_state_op.depth_pass = static_cast<decltype(out.front_stencil_state_op.depth_pass)>(w[15]);
+    out.back_stencil_state_op.func = static_cast<decltype(out.back_stencil_state_op.func)>(w[16]);
+    out.back_stencil_state_op.stencil_fail = static_cast<decltype(out.back_stencil_state_op.stencil_fail)>(w[17]);
+    out.back_stencil_state_op.depth_fail = static_cast<decltype(out.back_stencil_state_op.depth_fail)>(w[18]);
+    out.back_stencil_state_op.depth_pass = static_cast<decltype(out.back_stencil_state_op.depth_pass)>(w[19]);
+    out.front_depth_func = static_cast<decltype(out.front_depth_func)>(w[20]);
+    out.back_depth_func = static_cast<decltype(out.back_depth_func)>(w[21]);
+    out.front_depth_write_mode = static_cast<decltype(out.front_depth_write_mode)>(w[22]);
+    out.back_depth_write_mode = static_cast<decltype(out.back_depth_write_mode)>(w[23]);
+    out.front_side_fragment_program_mode = static_cast<decltype(out.front_side_fragment_program_mode)>(w[24]);
+    out.back_side_fragment_program_mode = static_cast<decltype(out.back_side_fragment_program_mode)>(w[25]);
+    out.is_maskupdate = static_cast<decltype(out.is_maskupdate)>(w[26]);
+    out.is_gamma_corrected = static_cast<decltype(out.is_gamma_corrected)>(w[27]);
+    return out;
+}
+bool valid_exact_recipe(const ExactPipelineRecipe &r) {
+    const auto &w = r.words;
+    // Reject malformed cached scalar state before it can reach translation switches.
+    if (w[0] > 0x14000000 || (w[0] & 0x03FFFFFF) || w[2] > 1 || w[3] > 1 || w[5] > 63 || w[7] > 2 || (w[8] != 0 && w[8] != 0x800)
+        || (w[9] & 0x3FFFFFFF) || w[10] > 0x30000 || (w[10] & 0x7FFF)
+        || w[11] > 0x30000 || (w[11] & 0x7FFF) || w[26] != 0 || w[27] > 1
+        || w[28] > 8 || w[29] > 1 || w[62] || w[63])
+        return false;
+    for (auto i : { 12, 16 })
+        if (w[i] > 0x0E000000 || (w[i] & 0x01FFFFFF))
+            return false;
+    for (auto i : { 13, 14, 15, 17, 18, 19 })
+        if (w[i] > 7)
+            return false;
+    for (auto i : { 20, 21 })
+        if (w[i] > 0x01C00000 || (w[i] & 0x003FFFFF))
+            return false;
+    for (auto i : { 22, 23 })
+        if (w[i] != 0 && w[i] != 0x00100000)
+            return false;
+    for (auto i : { 24, 25 })
+        if (w[i] != 0 && w[i] != 0x00200000)
+            return false;
+    const auto record = exact_record(r);
+    if (record.color_base_format != gxm::get_base_format(static_cast<SceGxmColorFormat>(w[1])))
+        return false;
+    uint64_t key = hash_pipeline_record(record) ^ r.layout ^ r.blend ^ w[0];
+    if (w[28] != SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED)
+        key ^= uint64_t(w[28]) << 56;
+    const int channel = gxm::one_channel_source_component(static_cast<SceGxmColorFormat>(w[1]));
+    if (channel > 0)
+        key ^= uint64_t(channel) << 48;
+    if (w[3])
+        key ^= 0xC2B2AE3D27D4EB4FULL;
+    // Output-register bits are only in the key for native-colour shaders, checked with live bindings instead.
+    return key == r.pipeline_key || (w[28] != SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED && (key ^ (uint64_t(w[28]) << 56)) == r.pipeline_key);
+}
+} // namespace
+
 // structure containing everything needed to compile a pipeline
 struct CompileRequest {
     // iterator to the pipeline location
@@ -393,6 +462,29 @@ void PipelineCache::read_pipeline_cache() {
             LOG_INFO("[PIPEWARM] loaded {} protected program pairs", loaded_protected_pairs.size());
         }
     }
+    {
+        fs::ifstream file(state.shaders_path / fmt::format("exact-pipelines-vk{}-f{}.bin", shader::CURRENT_VERSION, state.get_features_mask()), std::ios::binary);
+        ExactPipelineRecipes loaded;
+        if (file && loaded.read(file)) {
+            for (const auto &recipe : loaded.entries()) {
+                if (!valid_exact_recipe(recipe))
+                    continue;
+                const auto &w = recipe.words;
+                try {
+                    const auto format = static_cast<vk::Format>(w[4]);
+                    const auto props = state.physical_device.getFormatProperties(format);
+                    if (!(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eColorAttachment))
+                        continue;
+                    const auto pass = retrieve_render_pass(format, w[5] & 1, w[5] & 2, w[5] & 4, w[5] & 8, w[5] & 16, w[5] & 32);
+                    loaded_exact_recipes.emplace_back(recipe, pass);
+                    exact_recipes.learn(recipe);
+                } catch (const std::exception &error) {
+                    LOG_WARN("[PIPEEXACT] ignored invalid render-pass recipe: {}", error.what());
+                }
+            }
+            LOG_INFO("[PIPEEXACT] loaded {} exact pipeline recipes", loaded_exact_recipes.size());
+        }
+    }
     const std::string pipeline_cache_name = fmt::format("pipeline-cache-vk{}.dat", shader::CURRENT_VERSION);
     const fs::path path = state.shaders_path / pipeline_cache_name;
 
@@ -539,6 +631,16 @@ void PipelineCache::write_pipeline_cache(const std::vector<uint64_t> &keys) {
             LOG_WARN("[PIPEWARM] could not save protected program pairs");
     }
 
+    {
+        ExactPipelineRecipes copy;
+        {
+            std::lock_guard<std::mutex> guard(warm_mutex);
+            copy = exact_recipes;
+        }
+        fs::ofstream file(state.shaders_path / fmt::format("exact-pipelines-vk{}-f{}.bin", shader::CURRENT_VERSION, state.get_features_mask()), std::ios::binary | std::ios::trunc);
+        if (file && !copy.write(file))
+            LOG_WARN("[PIPEEXACT] could not save exact recipes");
+    }
     // first save the hashes of all pipelines
     auto write_integer = [&]<typename T>(T val) {
         pipeline_cache_file.write(reinterpret_cast<const char *>(&val), sizeof(T));
@@ -567,11 +669,21 @@ void PipelineCache::cleanup() {
         warm_vertices.clear();
         warm_fragments.clear();
         warm_registered = warm_pending = 0;
+        LOG_INFO("[PIPEEXACT] session recipes={} queued={} prepared={} reused={} draw_claimed={}",
+            exact_recipes.entries().size(), exact_jobs.size(), exact_prepared_count, exact_reused_count, exact_draw_claimed_count);
+        exact_prepared_count = exact_reused_count = exact_draw_claimed_count = 0;
+        for (auto &[recipe, job] : exact_jobs)
+            if (job->pipeline)
+                state.device.destroyPipeline(job->pipeline);
+        exact_jobs.clear();
+        loaded_exact_recipes.clear();
+        exact_recipes = {};
         protected_pairs = {};
         loaded_protected_pairs.clear();
         pairs_drawn.clear();
         warm_states.clear();
     }
+    render_pass_recipes.clear();
     draw_states.clear();
     draw_states_total = 0;
 
@@ -947,6 +1059,9 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool depth
         render_pass_descriptions[std::bit_cast<uint64_t>(static_cast<VkRenderPass>(render_passes_map[format]))] = std::move(desc);
     }
 
+    render_pass_recipes[render_passes_map[format]] = {
+        static_cast<uint32_t>(format), uint32_t(depth_load) | (uint32_t(stencil_load) << 1) | (uint32_t(force_store) << 2) | (uint32_t(is_color_transient) << 3) | (uint32_t(no_color) << 4) | (uint32_t(has_raw_attachment) << 5)
+    };
     return render_passes_map[format];
 }
 
@@ -1812,6 +1927,27 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     // if the pipeline is in the pipeline cache, we can expect its creation time to be almost instantaneous
     bool already_in_cache = false;
 
+    // Exact learned objects are published under warm_mutex; workers never mutate pipelines.
+    const auto before_exact = pipelines.find(key);
+    const auto recipe = before_exact == pipelines.end() || before_exact->second == nullptr
+        ? describe_exact_pipeline(context, type, has_casts, key)
+        : std::optional<ExactPipelineRecipe>{};
+    if (recipe) {
+        const auto existing = pipelines.find(key);
+        if (existing == pipelines.end() || existing->second == nullptr) {
+            if (auto prepared = reuse_exact_pipeline(*recipe)) {
+                pipelines[key] = prepared;
+                next_pipeline_cache_save = now_s() + pipeline_cache_save_delay;
+                ++state.shaders_count_compiled;
+                return prepared;
+            }
+        }
+        if (must_not_skip_draw(record, consider_for_async) || !use_async_compilation) {
+            std::lock_guard<std::mutex> guard(warm_mutex);
+            if (exact_recipes.learn(*recipe))
+                LOG_DEBUG("[PIPEEXACT] learned exact draw {}", key);
+        }
+    }
     auto it = pipelines.find(key);
     if (it != pipelines.end()) {
         if (it->second != nullptr) {
@@ -2080,6 +2216,49 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
         };
         register_stage(vertex, true);
         register_stage(fragment, false);
+        for (const auto &[recipe, pass] : loaded_exact_recipes) {
+            if (exact_jobs.size() >= exact_ready_limit || warm_pending >= warm_pending_limit)
+                break;
+            if (exact_jobs.contains(recipe))
+                continue;
+            if ((!vertex || !vertex->vertex_program || vertex->vertex_program->hash != recipe.vertex)
+                && (!fragment || !fragment->fragment_program || fragment->fragment_program->hash != recipe.fragment))
+                continue;
+            const auto vs = warm_vertices.find(recipe.vertex), fs = warm_fragments.find(recipe.fragment);
+            if (vs == warm_vertices.end() || fs == warm_fragments.end())
+                continue;
+            std::shared_ptr<ProgramBinding> vp, fp;
+            for (const auto &v : vs->second) {
+                auto binding = v.lock();
+                if (binding && binding->key_hash == recipe.layout) {
+                    vp = std::move(binding);
+                    break;
+                }
+            }
+            for (const auto &f : fs->second) {
+                auto binding = f.lock();
+                if (!binding || !binding->fragment_program)
+                    continue;
+                const auto &program = static_cast<const VKFragmentProgram &>(*binding->fragment_program);
+                if (program.blending_hash == recipe.blend && static_cast<uint32_t>(program.output_register_format) == recipe.words[28]) {
+                    fp = std::move(binding);
+                    break;
+                }
+            }
+            if (!vp || !fp)
+                continue;
+            auto job = std::make_shared<ExactWarmJob>();
+            job->recipe = recipe;
+            job->render_pass = pass;
+            auto *request = new WarmRequest{ vp, fp, warm_pair_key(recipe.vertex, recipe.fragment, fp->fragment_program->output_register_format),
+                util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0, 0, true, job };
+            if (!warm_queue.enqueue(request)) {
+                delete request;
+                continue;
+            }
+            exact_jobs.emplace(recipe, job);
+            ++warm_pending;
+        }
         // Match only previously observed protected pairs, never a guessed stage cross-product.
         for (const auto &pair : loaded_protected_pairs) {
             if ((!vertex || !vertex->vertex_program || vertex->vertex_program->hash != pair.vertex)
@@ -2120,6 +2299,12 @@ void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &verte
     std::lock_guard<std::mutex> guard(warm_mutex);
     if (!warm_enabled)
         return;
+    for (const auto &[recipe, job] : exact_jobs) {
+        if (job->status != ExactWarmJob::Failed && recipe.vertex == vertex->vertex_program->hash
+            && recipe.fragment == fragment->fragment_program->hash && recipe.layout == vertex->key_hash
+            && recipe.blend == fp.blending_hash && recipe.words[28] == static_cast<uint32_t>(fp.output_register_format))
+            return;
+    }
     if (warm_pairs_requested.contains(request_key)) {
         util::PipelineScope duplicate(util::PipelineKind::WarmDuplicate, { 0, pair });
         return;
@@ -2155,10 +2340,10 @@ void PipelineCache::warm_thread(MemState &mem) {
         if (request->telemetry_queued) {
             util::PipelineScope delay(util::PipelineKind::WarmQueueDelay, { 0, request->pair_key }, request->telemetry_queued);
         }
-        const bool ready = !warm_stopping && warm_pair(*request, mem);
+        const bool ready = !warm_stopping && (request->exact ? warm_exact_pipeline(*request, mem) : warm_pair(*request, mem));
         {
             std::lock_guard<std::mutex> guard(warm_mutex);
-            if (!ready)
+            if (!ready && !request->exact)
                 warm_pairs_requested.erase(request->request_key);
             --warm_pending;
         }
@@ -2327,4 +2512,131 @@ void PipelineCache::note_draw_state(const WarmState &draw_state) {
     if (top.size() != warm_states.size() || !std::equal(top.begin(), top.end(), warm_states.begin(), [](const WarmState &a, const WarmState &b) { return a.key() == b.key(); }))
         warm_states = top;
 }
+
+std::optional<ExactPipelineRecipe> PipelineCache::describe_exact_pipeline(const VKContext &context, SceGxmPrimitiveType type, bool casts, uint64_t key) {
+    const auto &record = context.record;
+    const auto &vp = record.vertex_program_binding;
+    const auto &fp = record.fragment_program_binding;
+    if (!vp || !fp || !vp->vertex_program || !fp->fragment_program || fp->is_maskupdate)
+        return {};
+    const bool interlock = state.features.support_shader_interlock && fp->program()->is_frag_color_used();
+    const auto pass = interlock ? context.current_shader_interlock_pass : context.current_render_pass;
+    const auto found = render_pass_recipes.find(pass);
+    if (found == render_pass_recipes.end())
+        return {};
+    ExactPipelineRecipe r;
+    r.vertex = record.vertex_program_hash;
+    r.fragment = record.fragment_program_hash;
+    if (r.vertex != vp->vertex_program->hash || r.fragment != fp->fragment_program->hash)
+        return {};
+    r.layout = vp->key_hash;
+    r.blend = static_cast<const VKFragmentProgram &>(*fp->fragment_program).blending_hash;
+    r.pipeline_key = key;
+    auto &w = r.words;
+    w[0] = static_cast<uint32_t>(type);
+    w[1] = static_cast<uint32_t>(record.color_surface.colorFormat);
+    w[2] = bool(record.color_surface.data);
+    w[3] = casts;
+    w[4] = found->second[0];
+    // Load/store operations do not change Vulkan render-pass compatibility.
+    w[5] = (found->second[1] & 0x38u) | 7u;
+    w[6] = static_cast<uint32_t>(record.color_base_format);
+    w[7] = static_cast<uint32_t>(record.cull_mode);
+    w[8] = static_cast<uint32_t>(record.two_sided);
+    w[9] = static_cast<uint32_t>(record.region_clip_mode);
+    w[10] = static_cast<uint32_t>(record.front_polygon_mode);
+    w[11] = static_cast<uint32_t>(record.back_polygon_mode);
+    w[12] = static_cast<uint32_t>(record.front_stencil_state_op.func);
+    w[13] = static_cast<uint32_t>(record.front_stencil_state_op.stencil_fail);
+    w[14] = static_cast<uint32_t>(record.front_stencil_state_op.depth_fail);
+    w[15] = static_cast<uint32_t>(record.front_stencil_state_op.depth_pass);
+    w[16] = static_cast<uint32_t>(record.back_stencil_state_op.func);
+    w[17] = static_cast<uint32_t>(record.back_stencil_state_op.stencil_fail);
+    w[18] = static_cast<uint32_t>(record.back_stencil_state_op.depth_fail);
+    w[19] = static_cast<uint32_t>(record.back_stencil_state_op.depth_pass);
+    w[20] = static_cast<uint32_t>(record.front_depth_func);
+    w[21] = static_cast<uint32_t>(record.back_depth_func);
+    w[22] = static_cast<uint32_t>(record.front_depth_write_mode);
+    w[23] = static_cast<uint32_t>(record.back_depth_write_mode);
+    w[24] = static_cast<uint32_t>(record.front_side_fragment_program_mode);
+    w[25] = static_cast<uint32_t>(record.back_side_fragment_program_mode);
+    w[26] = static_cast<uint32_t>(record.is_maskupdate);
+    w[27] = static_cast<uint32_t>(record.is_gamma_corrected);
+    w[28] = static_cast<uint32_t>(fp->fragment_program->output_register_format);
+    w[29] = context.shader_hints.raw_color_attachment_input;
+    for (size_t i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; ++i) {
+        w[30 + i] = static_cast<uint32_t>(context.shader_hints.vertex_textures[i]);
+        w[46 + i] = static_cast<uint32_t>(context.shader_hints.fragment_textures[i]);
+    }
+    if (!valid_exact_recipe(r))
+        return {};
+    return r;
+}
+
+vk::Pipeline PipelineCache::reuse_exact_pipeline(const ExactPipelineRecipe &recipe) {
+    std::unique_lock<std::mutex> lock(warm_mutex);
+    const auto found = exact_jobs.find(recipe);
+    if (found == exact_jobs.end())
+        return nullptr;
+    const auto &job = found->second;
+    if (job->status == ExactWarmJob::Queued) {
+        // A draw must not wait behind speculative queue work. It claims this recipe instead.
+        job->status = ExactWarmJob::Taken;
+        ++exact_draw_claimed_count;
+        return nullptr;
+    }
+    if (job->status == ExactWarmJob::Running) {
+        util::PipelineScope wait(util::PipelineKind::ProtectedWait, { recipe.pipeline_key, 0, 0x30 });
+        exact_ready.wait(lock, [&] { return job->status != ExactWarmJob::Running; });
+    }
+    if (job->status != ExactWarmJob::Ready)
+        return nullptr;
+    const auto pipeline = job->pipeline;
+    job->pipeline = nullptr;
+    job->status = ExactWarmJob::Taken;
+    ++exact_reused_count;
+    if (exact_reused_count <= 16)
+        LOG_INFO("[PIPEEXACT] reused exact prepared pipeline {}", recipe.pipeline_key);
+    return pipeline;
+}
+
+bool PipelineCache::warm_exact_pipeline(const WarmRequest &request, MemState &mem) {
+    const auto &job = request.exact;
+    {
+        std::lock_guard<std::mutex> guard(warm_mutex);
+        if (job->status != ExactWarmJob::Queued)
+            return false;
+        job->status = ExactWarmJob::Running;
+    }
+    vk::Pipeline pipeline;
+    try {
+        const auto &r = job->recipe;
+        const auto &w = r.words;
+        auto record = exact_record(r);
+        shader::Hints hints{};
+        hints.attributes = &request.vertex->attributes;
+        hints.color_format = static_cast<SceGxmColorFormat>(w[1]);
+        hints.output_register_format = static_cast<SceGxmOutputRegisterFormat>(w[28]);
+        hints.raw_color_attachment_input = w[29];
+        for (size_t i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; ++i) {
+            hints.vertex_textures[i] = static_cast<SceGxmTextureFormat>(w[30 + i]);
+            hints.fragment_textures[i] = static_cast<SceGxmTextureFormat>(w[46 + i]);
+        }
+        util::PipelineScope compile(util::PipelineKind::WarmCompile, { r.pipeline_key, request.pair_key, 0x30 });
+        pipeline = compile_pipeline(static_cast<SceGxmPrimitiveType>(w[0]), job->render_pass, *request.vertex, *request.fragment, record, w[2], hints, w[3], mem);
+        compile.result(bool(pipeline));
+    } catch (const std::exception &error) {
+        LOG_WARN("[PIPEEXACT] exact preparation failed: {}", error.what());
+    }
+    {
+        std::lock_guard<std::mutex> guard(warm_mutex);
+        job->pipeline = pipeline;
+        if (pipeline)
+            ++exact_prepared_count;
+        job->status = pipeline ? ExactWarmJob::Ready : ExactWarmJob::Failed;
+    }
+    exact_ready.notify_all();
+    return bool(pipeline);
+}
+
 } // namespace renderer::vulkan
