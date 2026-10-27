@@ -380,9 +380,9 @@ bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProg
     return true;
 }
 
-void warm_pipeline(State &state, const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment) {
+void warm_pipeline(State &state, const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair) {
     if (state.current_backend == Backend::Vulkan)
-        dynamic_cast<vulkan::VKState &>(state).pipeline_cache.warm_program_pair(vertex, fragment);
+        dynamic_cast<vulkan::VKState &>(state).pipeline_cache.warm_program_pair(vertex, fragment, actual_pair);
 }
 
 bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgram &program, GXPPtrMap &gxp_ptr_map, const std::vector<SceGxmVertexAttribute> &attributes) {

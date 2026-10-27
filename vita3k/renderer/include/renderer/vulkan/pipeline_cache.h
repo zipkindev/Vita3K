@@ -124,6 +124,21 @@ private:
     // the driver can hand over a pipeline from its cache without compiling it (VK_EXT_pipeline_creation_cache_control)
     bool support_cache_only_creation = false;
 
+    // Libraries are kept until cleanup, after all compile workers stop. Full pipelines remain
+    // owned by their existing caches; no handle replacement or GPU lifetime change is needed.
+    struct LibraryEntry {
+        vk::Pipeline pipeline;
+        bool complete = false;
+        uint32_t owner_tid = 0;
+        std::condition_variable ready;
+    };
+    std::mutex libraries_mutex;
+    std::map<std::vector<uint64_t>, std::shared_ptr<LibraryEntry>> libraries;
+    static constexpr size_t library_limit = 2048;
+    std::atomic<uint64_t> library_hits{ 0 }, library_compiles{ 0 }, library_waits{ 0 }, library_links{ 0 }, library_fallbacks{ 0 };
+    vk::Pipeline retrieve_library(std::vector<uint64_t> key, const vk::GraphicsPipelineCreateInfo &info, bool cache_only);
+    vk::Pipeline link_pipeline_libraries(const vk::GraphicsPipelineCreateInfo &info, uint64_t compatibility, bool cache_only);
+
     // background compiles of the vertex/fragment pairs a game creates, so the driver cache already holds their
     // shaders when the first draw needs a pipeline
     struct WarmRequest;
@@ -174,6 +189,7 @@ private:
     std::atomic<bool> warm_stopping{ false };
     std::mutex warm_mutex;
     std::unordered_set<uint64_t> warm_pairs_requested;
+    std::unordered_set<uint64_t> early_pairs;
     std::map<uint64_t, unsigned> warm_attempts;
     static constexpr size_t warm_pending_limit = 64, warm_program_limit = 2048;
     size_t warm_pending = 0, warm_registered = 0;
@@ -288,7 +304,7 @@ public:
     // the periodic save written by a background thread
     void save_pipeline_cache_async();
     // queue a background compile of a vertex/fragment pair the game has just created
-    void warm_program_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment);
+    void warm_program_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair = false);
 
     vk::RenderPass retrieve_render_pass(vk::Format format, bool depth_load, bool stencil_load, bool force_store, bool is_color_transient, bool no_color = false, bool has_raw_attachment = false);
     vk::Pipeline retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem);

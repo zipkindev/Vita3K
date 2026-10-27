@@ -34,6 +34,11 @@ enum class PipelineKind : uint32_t {
     WarmBounded,
     WarmDuplicate,
     WarmNoLinkHint,
+    LibraryCompile,
+    LibraryWait,
+    LibraryLink,
+    LibraryFallback,
+    EarlyPair,
     Count
 };
 struct PipelineContext {

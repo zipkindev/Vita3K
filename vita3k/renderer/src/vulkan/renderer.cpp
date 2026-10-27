@@ -723,6 +723,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         bool support_external_memory = false;
         bool support_shader_interlock = false;
         bool support_float_controls = false;
+        bool support_pipeline_library = false, support_graphics_pipeline_library = false;
         const std::map<std::string_view, bool *> optional_extensions = {
             { vk::KHRGetMemoryRequirements2ExtensionName, &temp_bool },
             // can be used by vma to improve performance
@@ -745,6 +746,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             { vk::EXTFragmentShaderInterlockExtensionName, &support_shader_interlock },
             // lets a pipeline be requested from the driver cache without compiling it
             { vk::EXTPipelineCreationCacheControlExtensionName, &support_pipeline_cache_control },
+            { VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME, &support_pipeline_library },
+            { VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME, &support_graphics_pipeline_library },
 #ifdef __APPLE__
             // Needed to create the MoltenVK device
             { vk::KHRPortabilitySubsetExtensionName, &temp_bool },
@@ -900,6 +903,14 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             support_pipeline_cache_control = static_cast<bool>(props.get<vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT>().pipelineCreationCacheControl);
         }
 
+        if (has_features2_khr && support_pipeline_library && support_graphics_pipeline_library) {
+            auto library_features = physical_device.getFeatures2KHR<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>();
+            auto library_properties = physical_device.getProperties2KHR<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT>();
+            support_fast_pipeline_libraries = library_features.get<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>().graphicsPipelineLibrary
+                && library_properties.get<vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT>().graphicsPipelineLibraryFastLinking;
+        }
+        LOG_INFO("[PIPEGPL] fast-linking capability={} (draw compilation setting unchanged)", support_fast_pipeline_libraries);
+
         constexpr bool raw_preserve_needs_interlock = false;
         features.preserve_f16_nan_as_u16 = static_cast<bool>(physical_device_features.independentBlend) && (!raw_preserve_needs_interlock || features.support_shader_interlock);
 
@@ -923,7 +934,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             vk::PhysicalDeviceShaderFloat16Int8Features,
             vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT,
             vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT,
-            vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT>
+            vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT,
+            vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>
             device_info{
                 vk::DeviceCreateInfo{
                     .pEnabledFeatures = &enabled_features },
@@ -939,7 +951,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
                 vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT{
                     .rasterizationOrderColorAttachmentAccess = VK_TRUE },
                 vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT{
-                    .pipelineCreationCacheControl = VK_TRUE }
+                    .pipelineCreationCacheControl = VK_TRUE },
+                vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT{
+                    .graphicsPipelineLibrary = VK_TRUE }
             };
         device_info.get().setQueueCreateInfos(queue_infos);
         device_info.get().setPEnabledExtensionNames(device_extensions);
@@ -961,6 +975,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 
         if (!support_pipeline_cache_control)
             device_info.unlink<vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT>();
+
+        if (!support_fast_pipeline_libraries)
+            device_info.unlink<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>();
 
         try {
             device = physical_device.createDevice(device_info.get());

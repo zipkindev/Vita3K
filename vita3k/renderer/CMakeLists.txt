@@ -157,3 +157,8 @@ add_test(NAME exact-pipeline-recipes COMMAND exact-pipeline-recipes-tests)
 add_executable(pipeline-preparation-queue-tests tests/pipeline_preparation_queue.cpp)
 target_include_directories(pipeline-preparation-queue-tests PRIVATE include)
 add_test(NAME pipeline-preparation-queue COMMAND pipeline-preparation-queue-tests)
+
+add_executable(pipeline-library-keys-tests tests/pipeline_library_keys.cpp)
+target_include_directories(pipeline-library-keys-tests PRIVATE include)
+target_link_libraries(pipeline-library-keys-tests PRIVATE vkutil)
+add_test(NAME pipeline-library-keys COMMAND pipeline-library-keys-tests)

@@ -41,7 +41,7 @@ struct YUVConversionCache;
 
 bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend, GXPPtrMap &gxp_ptr_map, SceGxmOutputRegisterFormat output_format = SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED, SceGxmMultisampleMode multisample_mode = SCE_GXM_MULTISAMPLE_NONE);
 bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgram &program, GXPPtrMap &gxp_ptr_map, const std::vector<SceGxmVertexAttribute> &attributes);
-void warm_pipeline(State &state, const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment);
+void warm_pipeline(State &state, const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair = false);
 void create(SceGxmSyncObject *sync, State &state);
 void destroy(SceGxmSyncObject *sync, State &state, std::function<void()> dealloc = nullptr);
 void finish(State &state, Context *context);

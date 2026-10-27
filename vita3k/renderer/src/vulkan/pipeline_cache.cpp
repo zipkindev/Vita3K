@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <renderer/vulkan/pipeline_cache.h>
+#include <renderer/vulkan/pipeline_library_keys.h>
 
 #include <renderer/functions.h>
 #include <renderer/vulkan/functions.h>
@@ -691,6 +692,7 @@ void PipelineCache::cleanup() {
     {
         std::lock_guard<std::mutex> guard(warm_mutex);
         warm_pairs_requested.clear();
+        early_pairs.clear();
         warm_attempts.clear();
         warm_vertices.clear();
         warm_fragments.clear();
@@ -729,6 +731,16 @@ void PipelineCache::cleanup() {
     for (auto &[hash, pipeline] : pipelines)
         state.device.destroy(pipeline);
     pipelines.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(libraries_mutex);
+        LOG_INFO("[PIPEGPL] libraries={} hits={} compiled={} waits={} links={} fallback={}", libraries.size(), library_hits.load(), library_compiles.load(), library_waits.load(), library_links.load(), library_fallbacks.load());
+        for (const auto &[key, entry] : libraries)
+            if (entry->pipeline)
+                state.device.destroyPipeline(entry->pipeline);
+        libraries.clear();
+        library_hits = library_compiles = library_waits = library_links = library_fallbacks = 0;
+    }
 
     {
         std::lock_guard<std::mutex> guard(shaders_mutex);
@@ -1569,6 +1581,137 @@ static vk::StencilOpState convert_op_state(const GxmStencilStateOp &state) {
     };
 }
 
+vk::Pipeline PipelineCache::retrieve_library(std::vector<uint64_t> key, const vk::GraphicsPipelineCreateInfo &info, bool cache_only) {
+    std::shared_ptr<LibraryEntry> entry;
+    {
+        std::unique_lock<std::mutex> lock(libraries_mutex);
+        auto found = libraries.find(key);
+        if (found != libraries.end()) {
+            entry = found->second;
+            if (!entry->complete) {
+                if (cache_only)
+                    return nullptr;
+                ++library_waits;
+                util::PipelineScope wait(util::PipelineKind::LibraryWait, { 0, 0, static_cast<uint32_t>(key[0]) });
+#if defined(_WIN32)
+                // Promote only the compiler whose result this required draw actually needs.
+                if (entry->owner_tid) {
+                    HANDLE worker = OpenThread(THREAD_SET_INFORMATION, FALSE, entry->owner_tid);
+                    if (worker) {
+                        SetThreadPriority(worker, THREAD_PRIORITY_NORMAL);
+                        CloseHandle(worker);
+                    }
+                }
+#endif
+                entry->ready.wait(lock, [&] { return entry->complete; });
+            }
+            ++library_hits;
+            return entry->pipeline;
+        }
+        if (cache_only || libraries.size() >= library_limit)
+            return nullptr;
+        entry = std::make_shared<LibraryEntry>();
+#if defined(_WIN32)
+        entry->owner_tid = GetCurrentThreadId();
+#endif
+        libraries.emplace(std::move(key), entry);
+    }
+    vk::Pipeline pipeline;
+    try {
+        util::PipelineScope compile(util::PipelineKind::LibraryCompile, { 0, 0, static_cast<uint32_t>(VkGraphicsPipelineLibraryFlagsEXT(static_cast<const vk::GraphicsPipelineLibraryCreateInfoEXT *>(info.pNext)->flags)) });
+        const auto result = state.device.createGraphicsPipeline(pipeline_cache, info);
+        pipeline = result.result == vk::Result::eSuccess ? result.value : vk::Pipeline{};
+        compile.result(bool(pipeline));
+        ++library_compiles;
+    } catch (const std::exception &error) {
+        LOG_WARN("[PIPEGPL] library creation failed; synchronous fallback remains available: {}", error.what());
+    }
+    {
+        std::lock_guard<std::mutex> lock(libraries_mutex);
+        entry->pipeline = pipeline;
+        entry->owner_tid = 0;
+        entry->complete = true;
+    }
+    entry->ready.notify_all();
+    return pipeline;
+}
+
+vk::Pipeline PipelineCache::link_pipeline_libraries(const vk::GraphicsPipelineCreateInfo &info, uint64_t compatibility, bool cache_only) {
+    auto keys = pipeline_library_keys(info, compatibility);
+    std::array<vk::Pipeline, 4> parts;
+    const std::array<vk::GraphicsPipelineLibraryFlagsEXT, 4> subsets = {
+        vk::GraphicsPipelineLibraryFlagBitsEXT::eVertexInputInterface,
+        vk::GraphicsPipelineLibraryFlagBitsEXT::ePreRasterizationShaders,
+        vk::GraphicsPipelineLibraryFlagBitsEXT::eFragmentShader,
+        vk::GraphicsPipelineLibraryFlagBitsEXT::eFragmentOutputInterface,
+    };
+    const std::array pre_dynamic = { vk::DynamicState::eViewport, vk::DynamicState::eScissor, vk::DynamicState::eDepthBias, vk::DynamicState::eLineWidth };
+    const std::array frag_dynamic = { vk::DynamicState::eStencilCompareMask, vk::DynamicState::eStencilReference, vk::DynamicState::eStencilWriteMask };
+    vk::PipelineDynamicStateCreateInfo pre_dynamic_info{}, frag_dynamic_info{};
+    pre_dynamic_info.setDynamicStates(pre_dynamic);
+    if (!state.physical_device_features.wideLines)
+        --pre_dynamic_info.dynamicStateCount;
+    frag_dynamic_info.setDynamicStates(frag_dynamic);
+    for (size_t i = 0; i < parts.size(); ++i) {
+        vk::GraphicsPipelineLibraryCreateInfoEXT subset{ .flags = subsets[i] };
+        vk::GraphicsPipelineCreateInfo part{
+            .pNext = &subset,
+            .flags = vk::PipelineCreateFlagBits::eLibraryKHR,
+        };
+        if (i == 0) {
+            part.pVertexInputState = info.pVertexInputState;
+            part.pInputAssemblyState = info.pInputAssemblyState;
+        } else {
+            part.renderPass = info.renderPass;
+            part.subpass = info.subpass;
+            if (i == 1 || i == 2) {
+                part.layout = info.layout;
+                part.stageCount = (i == 1 || info.stageCount == 2) ? 1 : 0;
+                part.pStages = part.stageCount ? &info.pStages[i - 1] : nullptr;
+            }
+            if (i == 1) {
+                part.pViewportState = info.pViewportState;
+                part.pRasterizationState = info.pRasterizationState;
+                part.pDynamicState = &pre_dynamic_info;
+            } else {
+                part.pMultisampleState = info.pMultisampleState;
+                if (i == 2) {
+                    part.pDepthStencilState = info.pDepthStencilState;
+                    part.pDynamicState = &frag_dynamic_info;
+                } else {
+                    part.pColorBlendState = info.pColorBlendState;
+                }
+            }
+        }
+        parts[i] = retrieve_library(std::move(keys[i]), part, cache_only);
+        if (!parts[i])
+            return nullptr;
+    }
+    vk::PipelineLibraryCreateInfoKHR libraries_info{};
+    libraries_info.setLibraries(parts);
+    // No LINK_TIME_OPTIMIZATION: fast linking is explicitly queried before enabling this path.
+    vk::GraphicsPipelineCreateInfo link_info{
+        .pNext = &libraries_info,
+        .layout = info.layout,
+        .renderPass = info.renderPass,
+        .subpass = info.subpass,
+    };
+    if (cache_only)
+        link_info.flags |= vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequiredEXT;
+    try {
+        util::PipelineScope link(util::PipelineKind::LibraryLink);
+        const auto result = state.device.createGraphicsPipeline(pipeline_cache, link_info);
+        link.result(result.result == vk::Result::eSuccess);
+        if (result.result == vk::Result::eSuccess) {
+            ++library_links;
+            return result.value;
+        }
+    } catch (const std::exception &error) {
+        LOG_WARN("[PIPEGPL] link failed; using synchronous fallback: {}", error.what());
+    }
+    return nullptr;
+}
+
 vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const ProgramBinding &vertex_program_binding, const ProgramBinding &fragment_program_binding, const GxmRecordState &record, bool has_color_surface_data, const shader::Hints &hints, bool has_casts, MemState &mem, bool cache_only) try {
     const VertexProgram &vertex_program = *vertex_program_binding.vertex_program;
     const SceGxmProgram *gxm_fragment_shader = fragment_program_binding.program();
@@ -1690,6 +1833,21 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         .renderPass = render_pass,
         .subpass = 0
     };
+
+    if (state.support_fast_pipeline_libraries) {
+        // retrieve_render_pass constructs all passes here with fixed samples/depth format.
+        // Color format, raw attachment and interlock distinguish the subpass interfaces;
+        // load/store/transient variants are compatible and can share shader libraries.
+        const uint64_t compatibility = uint64_t(hints.color_format) | (uint64_t(with_raw_attachment) << 32) | (uint64_t(use_shader_interlock) << 33);
+        if (auto linked = link_pipeline_libraries(pipeline_info, compatibility, cache_only)) {
+            ++pipelines_created;
+            return linked;
+        }
+        if (cache_only)
+            return nullptr;
+        ++library_fallbacks;
+        util::PipelineScope fallback(util::PipelineKind::LibraryFallback);
+    }
 
     // The stock Adreno driver can SIGSEGV inside createGraphicsPipeline
     // If the log ends on this line this exact vert/frag pair killed the driver's compiler
@@ -2269,7 +2427,19 @@ void PipelineCache::schedule_exact_locked() {
     warm_work_ready.notify_all();
 }
 
-void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment) {
+void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair) {
+    if (actual_pair && vertex && fragment && vertex->vertex_program && fragment->fragment_program) {
+        std::lock_guard<std::mutex> guard(warm_mutex);
+        if (!warm_enabled || warm_stopping)
+            return;
+        const uint64_t identity = warm_pair_key(vertex->vertex_program->hash, fragment->fragment_program->hash, fragment->fragment_program->output_register_format);
+        const uint64_t variant = identity ^ std::rotl(vertex->key_hash, 17) ^ std::rotl(static_cast<const VKFragmentProgram &>(*fragment->fragment_program).blending_hash, 31);
+        if (early_pairs.contains(variant) || early_pairs.size() >= warm_program_limit)
+            return;
+        early_pairs.insert(variant);
+        if (early_pairs.size() <= 128)
+            LOG_INFO("[PIPEEARLY] actual_pair={} variant={} qpc={}", identity, variant, util::PipelineProfile::counter());
+    }
     if (!warm_enabled)
         return;
     std::vector<std::pair<std::shared_ptr<ProgramBinding>, std::shared_ptr<ProgramBinding>>> ready;

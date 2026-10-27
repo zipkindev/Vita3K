@@ -1072,6 +1072,15 @@ struct SceGxmContext {
     uint32_t command_allocator_size = 0;
 
     bool last_precomputed = false;
+    std::shared_ptr<renderer::ProgramBinding> early_vertex, early_fragment;
+    void prepare_pair(renderer::State &renderer_state, const std::shared_ptr<renderer::ProgramBinding> &vertex, const std::shared_ptr<renderer::ProgramBinding> &fragment) {
+        if (early_vertex == vertex && early_fragment == fragment)
+            return;
+        early_vertex = vertex;
+        early_fragment = fragment;
+        util::PipelineScope early(util::PipelineKind::EarlyPair);
+        renderer::warm_pipeline(renderer_state, vertex, fragment, true);
+    }
 
     // this is used for deferred contexts
     Ptr<uint8_t> alloc_space_start{};
@@ -2648,6 +2657,9 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
         }
     }
 
+    // The actual pair is known here, before command submission and render-thread surface work.
+    // This also covers precomputed program selection above. Queueing is deduplicated and bounded.
+    context->prepare_pair(*emuenv.renderer, gxm_vertex_program.renderer_binding, gxm_fragment_program.renderer_binding);
     renderer::draw(*emuenv.renderer, context->renderer.get(), primType, indexType, indexData, indexCount, instanceCount);
 
     // increase the ringbuffer position if a default vertex or fragment buffer was reserved, we know the new position will fit in the ringbuffer
@@ -2793,6 +2805,7 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
         }
     }
 
+    context->prepare_pair(*emuenv.renderer, vertex_program->renderer_binding, fragment_program->renderer_binding);
     renderer::draw(*emuenv.renderer, context->renderer.get(), draw->type, draw->index_format, draw->index_data, draw->vertex_count, draw->instance_count);
 
     // increase the ringbuffer position if a default vertex or fragment buffer was reserved, we know the new position will fit in the ringbuffer
