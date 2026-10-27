@@ -75,6 +75,8 @@ static constexpr bool sync_depth_stencil_writers = false; // the draw writes dep
 static constexpr bool save_in_background = true;
 
 namespace {
+thread_local bool pipeline_preparation_worker = false;
+
 uint64_t pipeline_clock_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -1523,6 +1525,7 @@ VertexStreamLayout PipelineCache::vertex_stream_layout(const ProgramBinding &ver
 }
 
 void PipelineCache::compiler_thread(MemState &mem) {
+    pipeline_preparation_worker = true;
     moodycamel::ConsumerToken consumer_token(pipeline_compile_queue);
 
     // just a single loop, waiting for a pipeline compile request and compiling it
@@ -1595,7 +1598,7 @@ vk::Pipeline PipelineCache::retrieve_library(std::vector<uint64_t> key, const vk
                 util::PipelineScope wait(util::PipelineKind::LibraryWait, { 0, 0, static_cast<uint32_t>(key[0]) });
 #if defined(_WIN32)
                 // Promote only the compiler whose result this required draw actually needs.
-                if (entry->owner_tid) {
+                if (!pipeline_preparation_worker && entry->owner_tid) {
                     HANDLE worker = OpenThread(THREAD_SET_INFORMATION, FALSE, entry->owner_tid);
                     if (worker) {
                         SetThreadPriority(worker, THREAD_PRIORITY_NORMAL);
@@ -1835,6 +1838,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         .subpass = 0
     };
 
+    std::optional<util::PipelineScope> library_fallback_scope;
     // A fragment-disabled pipeline has no fragment stage. Keep that established monolithic
     // path: an independent FRAGMENT_SHADER library requires a nonzero stageCount.
     if (state.support_fast_pipeline_libraries && shader_stage_count == 2) {
@@ -1849,7 +1853,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         if (cache_only)
             return nullptr;
         ++library_fallbacks;
-        util::PipelineScope fallback(util::PipelineKind::LibraryFallback);
+        library_fallback_scope.emplace(util::PipelineKind::LibraryFallback);
     }
 
     // The stock Adreno driver can SIGSEGV inside createGraphicsPipeline
@@ -2441,7 +2445,7 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
             return;
         early_pairs.insert(variant);
         if (early_pairs.size() <= 128)
-            LOG_INFO("[PIPEEARLY] actual_pair={} variant={} qpc={}", identity, variant, util::PipelineProfile::counter());
+            LOG_INFO("[PIPEEARLY] actual_pair={} variant={} vertex={} fragment={} qpc={}", identity, variant, hex_string(vertex->vertex_program->hash), hex_string(fragment->fragment_program->hash), util::PipelineProfile::counter());
     }
     if (!warm_enabled)
         return;
@@ -2485,6 +2489,8 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
             registry[hash].push_back(binding);
             ++warm_registered;
             ++warm_registry_generation;
+            if (warm_registered <= 256)
+                LOG_INFO("[PIPESTAGE] vertex={} hash={} qpc={}", is_vertex, hex_string(hash), util::PipelineProfile::counter());
             util::PipelineScope registered(util::PipelineKind::WarmStageRegistered, { 0, 0, is_vertex ? 1u : 0u });
         };
         register_stage(vertex, true);
@@ -2560,6 +2566,7 @@ void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &verte
 }
 
 void PipelineCache::warm_thread(MemState &mem) {
+    pipeline_preparation_worker = true;
 #if defined(__linux__)
     // below the guest and render threads: this work only pays off later
     setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);
