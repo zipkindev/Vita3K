@@ -166,6 +166,7 @@ private:
     PipelinePreparationQueue<WarmRequest *> warm_queue;
     std::condition_variable warm_work_ready;
     std::atomic<uint64_t> last_pipeline_draw_ns{ 0 };
+    std::atomic<bool> pipeline_draw_busy{ false };
     uint32_t pipeline_draw_poll = 0;
     size_t warm_running = 0;
     std::vector<std::thread> warm_threads;

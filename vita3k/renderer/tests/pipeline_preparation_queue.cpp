@@ -26,6 +26,7 @@ int main() {
     assert(queue.concurrency(1000000000, 0) == 2);
     assert(queue.concurrency(1000000000, 900000000) == 1);
     assert(queue.concurrency(1150000000, 900000000) == 2);
+    assert(queue.concurrency(3000000000, 900000000, true) == 1); // blocked draw is not idle
 
     renderer::ExactPipelineRecipe a, b;
     a.words[8] = 0; // one-sided: back-face state does not affect pipeline creation

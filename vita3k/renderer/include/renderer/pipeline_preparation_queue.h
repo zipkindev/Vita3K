@@ -28,8 +28,8 @@ public:
         return item;
     }
     // Nanoseconds from the same monotonic clock; no recent draws permits both workers.
-    static size_t concurrency(uint64_t now, uint64_t last_draw) {
-        return last_draw && now >= last_draw && now - last_draw < 250000000ULL ? 1 : 2;
+    static size_t concurrency(uint64_t now, uint64_t last_draw, bool draw_work_in_progress = false) {
+        return draw_work_in_progress || (last_draw && now >= last_draw && now - last_draw < 250000000ULL) ? 1 : 2;
     }
 };
 } // namespace renderer

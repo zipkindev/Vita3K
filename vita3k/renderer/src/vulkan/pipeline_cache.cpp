@@ -78,6 +78,18 @@ uint64_t pipeline_clock_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+struct PipelineDrawActivity {
+    std::atomic<bool> &busy;
+    std::atomic<uint64_t> &last_draw;
+    PipelineDrawActivity(std::atomic<bool> &busy, std::atomic<uint64_t> &last_draw)
+        : busy(busy)
+        , last_draw(last_draw) { busy.store(true, std::memory_order_release); }
+    ~PipelineDrawActivity() {
+        last_draw.store(pipeline_clock_ns(), std::memory_order_relaxed);
+        busy.store(false, std::memory_order_release);
+    }
+};
+
 uint64_t now_s() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 }
@@ -684,6 +696,7 @@ void PipelineCache::cleanup() {
         warm_fragments.clear();
         warm_registered = warm_pending = warm_running = exact_live_jobs = 0;
         last_pipeline_draw_ns = 0;
+        pipeline_draw_busy = false;
         pipeline_draw_poll = 0;
         warm_registry_generation = exact_scan_generation = 0;
         exact_deferred = false;
@@ -1957,6 +1970,9 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
 
     // Exact learned objects are published under warm_mutex; workers never mutate pipelines.
     auto it = pipelines.find(key);
+    std::optional<PipelineDrawActivity> draw_activity;
+    if (it == pipelines.end() || it->second == nullptr || it->second == pipeline_compiling)
+        draw_activity.emplace(pipeline_draw_busy, last_pipeline_draw_ns);
     const auto recipe = it == pipelines.end() || it->second == nullptr
         ? describe_exact_pipeline(context, type, has_casts, key)
         : std::optional<ExactPipelineRecipe>{};
@@ -2384,11 +2400,11 @@ void PipelineCache::warm_thread(MemState &mem) {
             std::unique_lock<std::mutex> lock(warm_mutex);
             // Completion and registration wake this loop. The timeout also reopens quiet-time capacity.
             warm_work_ready.wait_for(lock, std::chrono::milliseconds(25), [&] {
-                return warm_stopping || (!warm_queue.empty() && warm_running < PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed)));
+                return warm_stopping || (!warm_queue.empty() && warm_running < PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)));
             });
             if (warm_stopping)
                 break;
-            if (warm_queue.empty() || warm_running >= PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed)))
+            if (warm_queue.empty() || warm_running >= PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)))
                 continue;
             request = warm_queue.pop();
             ++warm_running;
