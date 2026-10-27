@@ -1835,7 +1835,9 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         .subpass = 0
     };
 
-    if (state.support_fast_pipeline_libraries) {
+    // A fragment-disabled pipeline has no fragment stage. Keep that established monolithic
+    // path: an independent FRAGMENT_SHADER library requires a nonzero stageCount.
+    if (state.support_fast_pipeline_libraries && shader_stage_count == 2) {
         // retrieve_render_pass constructs all passes here with fixed samples/depth format.
         // Color format, raw attachment and interlock distinguish the subpass interfaces;
         // load/store/transient variants are compatible and can share shader libraries.
