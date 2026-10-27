@@ -19,3 +19,9 @@ References: [Khronos graphics pipeline libraries](https://docs.vulkan.org/featur
 The `.32` loading attempt lost its Vulkan device before racing. A cache-key audit found that guest format hints did not fully encode actual native render-pass compatibility. `.33` conservatively includes the native render-pass handle in all pass-dependent library keys; cross-handle sharing is deferred until a complete compatibility signature is available. This fixes a demonstrated keying gap, but does not establish the cause of the captured device loss.
 
 For a controlled comparison, launch with `VITA3K_DISABLE_PIPELINE_LIBRARIES=1` to use monolithic pipelines while retaining early preparation. Unset it or use `0` to allow capability-gated libraries. The value is read at device creation, so restart between comparisons. Startup logs report `capable`, `enabled` and `disabled_by_control` independently. Async draw compilation remains a separate setting.
+
+## .34 full device-contract isolation
+
+Libraries are now disabled by default following loading failures. `VITA3K_ENABLE_PIPELINE_LIBRARIES=1` explicitly opts in; `VITA3K_DISABLE_PIPELINE_LIBRARIES=1` always wins. When disabled, both library extension names and the feature structure are removed before device creation. The .33 control removed only the feature structure and library creation path.
+
+`VITA3K_DISABLE_EARLY_PIPELINE_PREPARATION=1` independently bypasses only actual-pair offers from HLE draws. Existing program-creation preparation and exact recipes remain available. Restart between modes. No improvement or GPU fault cause is established by these controls alone.

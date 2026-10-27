@@ -15,6 +15,9 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <cstdlib>
+#include <string_view>
+
 #include <atomic>
 
 #include <gxm/types.h>
@@ -381,6 +384,13 @@ bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProg
 }
 
 void warm_pipeline(State &state, const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair) {
+    // Isolate only the .32 HLE draw-time hook; .31 program-creation preparation stays active.
+    static const bool early_enabled = [] {
+        const char *disable = std::getenv("VITA3K_DISABLE_EARLY_PIPELINE_PREPARATION");
+        return !disable || std::string_view(disable) != "1";
+    }();
+    if (actual_pair && !early_enabled)
+        return;
     if (state.current_backend == Backend::Vulkan)
         dynamic_cast<vulkan::VKState &>(state).pipeline_cache.warm_program_pair(vertex, fragment, actual_pair);
 }

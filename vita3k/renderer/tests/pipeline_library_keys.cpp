@@ -13,12 +13,16 @@ static void check(bool good) {
         std::abort();
 }
 int main() {
-    check(pipeline_libraries_enabled(true, nullptr));
-    check(pipeline_libraries_enabled(true, "0"));
-    check(!pipeline_libraries_enabled(true, "1"));
-    check(!pipeline_libraries_enabled(false, nullptr));
-    check(!pipeline_libraries_enabled(false, "0"));
-    check(!pipeline_libraries_enabled(false, "1"));
+    check(!pipeline_libraries_enabled(true, nullptr, nullptr));
+    check(!pipeline_libraries_enabled(true, "0", nullptr));
+    check(pipeline_libraries_enabled(true, "1", nullptr));
+    check(pipeline_libraries_enabled(true, "1", "0"));
+    check(!pipeline_libraries_enabled(true, "1", "1"));
+    check(!pipeline_libraries_enabled(false, "1", nullptr));
+    check(!pipeline_library_extension_enabled("VK_KHR_pipeline_library", false));
+    check(!pipeline_library_extension_enabled("VK_EXT_graphics_pipeline_library", false));
+    check(pipeline_library_extension_enabled("VK_KHR_swapchain", false));
+    check(pipeline_library_extension_enabled("VK_EXT_graphics_pipeline_library", true));
     vk::PipelineVertexInputStateCreateInfo vi{};
     vk::PipelineInputAssemblyStateCreateInfo ia{ .topology = vk::PrimitiveTopology::eTriangleList };
     vk::PipelineViewportStateCreateInfo viewport{ .viewportCount = 1, .scissorCount = 1 };

@@ -782,14 +782,6 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             }
         }
 
-        {
-            std::string enabled;
-            for (const char *ext : device_extensions)
-                enabled += (enabled.empty() ? "" : ", ") + std::string(ext);
-            LOG_INFO("Device extensions: {} available, {} enabled: {}", available_extension_count, device_extensions.size(), enabled);
-            LOG_INFO("All available device extensions: {}", available_extensions);
-        }
-
         bool support_memory_mapping = true;
         const bool has_features2_khr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2KHR != nullptr;
         support_buffer_device_address &= has_features2_khr;
@@ -913,9 +905,25 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         }
         const bool library_capable = support_fast_pipeline_libraries;
         const char *disable_libraries = std::getenv("VITA3K_DISABLE_PIPELINE_LIBRARIES");
-        support_fast_pipeline_libraries = pipeline_libraries_enabled(library_capable, disable_libraries);
+        support_fast_pipeline_libraries = pipeline_libraries_enabled(library_capable, std::getenv("VITA3K_ENABLE_PIPELINE_LIBRARIES"), disable_libraries);
         LOG_INFO("[PIPEGPL] fast-linking capable={} enabled={} disabled_by_control={} (draw compilation setting unchanged)",
             library_capable, support_fast_pipeline_libraries, disable_libraries && std::string_view(disable_libraries) == "1");
+
+        // The off control restores the pre-library device extension contract as well
+        // as avoiding library creation and unlinking the feature structure below.
+        std::erase_if(device_extensions, [&](const char *name) {
+            return !pipeline_library_extension_enabled(name, support_fast_pipeline_libraries);
+        });
+        {
+            std::string enabled;
+            for (const char *ext : device_extensions)
+                enabled += (enabled.empty() ? "" : ", ") + std::string(ext);
+            LOG_INFO("Device extensions: {} available, {} enabled: {}", available_extension_count, device_extensions.size(), enabled);
+            LOG_INFO("All available device extensions: {}", available_extensions);
+        }
+
+        const char *disable_early = std::getenv("VITA3K_DISABLE_EARLY_PIPELINE_PREPARATION");
+        LOG_INFO("[PIPEEARLY] HLE pair preparation enabled={}", !disable_early || std::string_view(disable_early) != "1");
 
         constexpr bool raw_preserve_needs_interlock = false;
         features.preserve_f16_nan_as_u16 = static_cast<bool>(physical_device_features.independentBlend) && (!raw_preserve_needs_interlock || features.support_shader_interlock);
