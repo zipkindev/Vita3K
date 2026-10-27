@@ -21,6 +21,7 @@
 #include <condition_variable>
 #include <optional>
 #include <renderer/exact_pipeline_recipes.h>
+#include <renderer/pipeline_preparation_queue.h>
 #include <renderer/protected_pipeline_pairs.h>
 #include <util/containers.h>
 #include <vkutil/vkutil.h>
@@ -135,12 +136,18 @@ private:
             Taken,
             Failed } status = Queued;
         vk::Pipeline pipeline;
+        uint32_t worker_id = 0;
     };
     ExactPipelineRecipes exact_recipes;
     std::vector<std::pair<ExactPipelineRecipe, vk::RenderPass>> loaded_exact_recipes;
     std::map<ExactPipelineRecipe, std::shared_ptr<ExactWarmJob>> exact_jobs;
     std::condition_variable exact_ready;
     uint64_t exact_prepared_count = 0, exact_reused_count = 0, exact_draw_claimed_count = 0;
+    uint64_t exact_miss_count = 0, exact_wait_count = 0, exact_refill_count = 0;
+    size_t exact_live_jobs = 0;
+    uint64_t warm_registry_generation = 0, exact_scan_generation = 0;
+    bool exact_deferred = false;
+    void schedule_exact_locked();
     static constexpr size_t exact_ready_limit = 256;
     // Render-pass construction parameters, never persisted Vulkan handles.
     std::map<vk::RenderPass, std::array<uint32_t, 2>> render_pass_recipes;
@@ -156,7 +163,11 @@ private:
         bool learned = false;
         std::shared_ptr<ExactWarmJob> exact;
     };
-    moodycamel::BlockingConcurrentQueue<WarmRequest *> warm_queue;
+    PipelinePreparationQueue<WarmRequest *> warm_queue;
+    std::condition_variable warm_work_ready;
+    std::atomic<uint64_t> last_pipeline_draw_ns{ 0 };
+    uint32_t pipeline_draw_poll = 0;
+    size_t warm_running = 0;
     std::vector<std::thread> warm_threads;
     std::atomic<bool> warm_enabled{ false };
     std::atomic<bool> warm_stopping{ false };

@@ -153,3 +153,7 @@ add_test(NAME protected-pipeline-pairs COMMAND protected-pipeline-pairs-tests)
 add_executable(exact-pipeline-recipes-tests tests/exact_pipeline_recipes.cpp)
 target_include_directories(exact-pipeline-recipes-tests PRIVATE include)
 add_test(NAME exact-pipeline-recipes COMMAND exact-pipeline-recipes-tests)
+
+add_executable(pipeline-preparation-queue-tests tests/pipeline_preparation_queue.cpp)
+target_include_directories(pipeline-preparation-queue-tests PRIVATE include)
+add_test(NAME pipeline-preparation-queue COMMAND pipeline-preparation-queue-tests)

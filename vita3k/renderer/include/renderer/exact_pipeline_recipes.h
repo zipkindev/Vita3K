@@ -17,6 +17,22 @@ struct ExactPipelineRecipe {
     std::array<uint32_t, 64> words{};
     auto operator<=>(const ExactPipelineRecipe &) const = default;
 };
+// Match only inputs that affect pipeline creation. Keep the on-disk schema unchanged.
+inline void canonicalize_exact_pipeline(ExactPipelineRecipe &r, uint32_t vertex_mask, uint32_t fragment_mask, uint32_t unused_texture) {
+    auto &w = r.words;
+    w[5] = (w[5] & 0x38u) | 7u;
+    for (auto i : { 9, 11, 21, 23, 25 })
+        w[i] = 0;
+    if (w[8] != 0x800)
+        for (auto i : { 16, 17, 18, 19 })
+            w[i] = 0;
+    for (unsigned i = 0; i < 16; ++i) {
+        if (!(vertex_mask & (1u << i)))
+            w[30 + i] = unused_texture;
+        if (!(fragment_mask & (1u << i)))
+            w[46 + i] = unused_texture;
+    }
+}
 class ExactPipelineRecipes {
     std::vector<ExactPipelineRecipe> recipes;
     static uint64_t checksum(const std::vector<uint8_t> &bytes) {

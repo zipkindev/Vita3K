@@ -47,6 +47,13 @@
 #include <SDL3/SDL_cpuinfo.h>
 #include <util/pipeline_profile.h>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #if defined(__linux__)
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -67,6 +74,10 @@ static constexpr bool sync_depth_stencil_writers = false; // the draw writes dep
 static constexpr bool save_in_background = true;
 
 namespace {
+uint64_t pipeline_clock_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 uint64_t now_s() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 }
@@ -399,6 +410,7 @@ void PipelineCache::init(bool support_rasterized_order_access) {
 
     support_cache_only_creation = state.support_pipeline_cache_control;
     if (warm_at_program_creation) {
+        warm_stopping = false;
         warm_render_pass = retrieve_render_pass(vk::Format::eR8G8B8A8Unorm, true, true, true, false);
         if (state.features.support_shader_interlock)
             warm_interlock_render_pass = retrieve_render_pass(vk::Format::eR8G8B8A8Unorm, true, true, true, false, true);
@@ -467,9 +479,10 @@ void PipelineCache::read_pipeline_cache() {
         fs::ifstream file(state.shaders_path / fmt::format("exact-pipelines-vk{}-f{}.bin", shader::CURRENT_VERSION, state.get_features_mask()), std::ios::binary);
         ExactPipelineRecipes loaded;
         if (file && loaded.read(file)) {
-            for (const auto &recipe : loaded.entries()) {
+            for (auto recipe : loaded.entries()) {
                 if (!valid_exact_recipe(recipe))
                     continue;
+                canonicalize_exact_pipeline(recipe, 0xFFFF, 0xFFFF, 0);
                 const auto &w = recipe.words;
                 try {
                     const auto format = static_cast<vk::Format>(w[4]);
@@ -669,10 +682,16 @@ void PipelineCache::cleanup() {
         warm_attempts.clear();
         warm_vertices.clear();
         warm_fragments.clear();
-        warm_registered = warm_pending = 0;
+        warm_registered = warm_pending = warm_running = exact_live_jobs = 0;
+        last_pipeline_draw_ns = 0;
+        pipeline_draw_poll = 0;
+        warm_registry_generation = exact_scan_generation = 0;
+        exact_deferred = false;
         LOG_INFO("[PIPEEXACT] session recipes={} queued={} prepared={} reused={} draw_claimed={}",
             exact_recipes.entries().size(), exact_jobs.size(), exact_prepared_count, exact_reused_count, exact_draw_claimed_count);
+        LOG_INFO("[PIPESCHED] misses={} waits={} refills={} active_limit=1 quiet_limit=2", exact_miss_count, exact_wait_count, exact_refill_count);
         exact_prepared_count = exact_reused_count = exact_draw_claimed_count = 0;
+        exact_miss_count = exact_wait_count = exact_refill_count = 0;
         for (auto &[recipe, job] : exact_jobs)
             if (job->pipeline)
                 state.device.destroyPipeline(job->pipeline);
@@ -1886,6 +1905,9 @@ void PipelineCache::bisect_pipeline_failure(const vk::GraphicsPipelineCreateInfo
 }
 
 vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem) {
+    // Sample activity once per 64 draws, including ready hits; avoid a clock call on every draw.
+    if ((pipeline_draw_poll++ & 63u) == 0)
+        last_pipeline_draw_ns.store(pipeline_clock_ns(), std::memory_order_relaxed);
     const GxmRecordState &record = context.record;
     uint64_t key = hash_pipeline_record(record);
     uint64_t raw_key = XXH3_64bits(&record, record_pipeline_len);
@@ -2175,6 +2197,62 @@ void PipelineCache::learn_protected_pair(const std::shared_ptr<ProgramBinding> &
     }
 }
 
+void PipelineCache::schedule_exact_locked() {
+    if (!warm_enabled || warm_stopping)
+        return;
+    if (!exact_deferred && exact_scan_generation == warm_registry_generation)
+        return;
+    exact_scan_generation = warm_registry_generation;
+    exact_deferred = false;
+    for (const auto &[stored_recipe, pass] : loaded_exact_recipes) {
+        if (exact_live_jobs >= exact_ready_limit || warm_pending >= warm_pending_limit) {
+            exact_deferred = true;
+            break;
+        }
+        auto recipe = stored_recipe;
+        const auto vs = warm_vertices.find(recipe.vertex), fs = warm_fragments.find(recipe.fragment);
+        if (vs == warm_vertices.end() || fs == warm_fragments.end())
+            continue;
+        std::shared_ptr<ProgramBinding> vp, fp;
+        for (const auto &v : vs->second) {
+            auto binding = v.lock();
+            if (binding && binding->key_hash == recipe.layout) {
+                vp = std::move(binding);
+                break;
+            }
+        }
+        for (const auto &f : fs->second) {
+            auto binding = f.lock();
+            if (!binding || !binding->fragment_program)
+                continue;
+            const auto &program = static_cast<const VKFragmentProgram &>(*binding->fragment_program);
+            if (program.blending_hash == recipe.blend && static_cast<uint32_t>(program.output_register_format) == recipe.words[28]) {
+                fp = std::move(binding);
+                break;
+            }
+        }
+        if (!vp || !fp)
+            continue;
+        canonicalize_exact_pipeline(recipe, vp->vertex_program->textures_used.to_ulong(), fp->fragment_program->textures_used.to_ulong(), SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
+        if (exact_jobs.contains(recipe))
+            continue;
+        auto job = std::make_shared<ExactWarmJob>();
+        job->recipe = recipe;
+        job->render_pass = pass;
+        auto *request = new WarmRequest{ vp, fp, warm_pair_key(recipe.vertex, recipe.fragment, fp->fragment_program->output_register_format),
+            util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0, 0, true, job };
+        if (!warm_queue.push(request, true)) {
+            delete request;
+            continue;
+        }
+        exact_jobs.emplace(recipe, job);
+        ++warm_pending;
+        ++exact_live_jobs;
+        ++exact_refill_count;
+    }
+    warm_work_ready.notify_all();
+}
+
 void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment) {
     if (!warm_enabled)
         return;
@@ -2217,53 +2295,12 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
             }
             registry[hash].push_back(binding);
             ++warm_registered;
+            ++warm_registry_generation;
             util::PipelineScope registered(util::PipelineKind::WarmStageRegistered, { 0, 0, is_vertex ? 1u : 0u });
         };
         register_stage(vertex, true);
         register_stage(fragment, false);
-        for (const auto &[recipe, pass] : loaded_exact_recipes) {
-            if (exact_jobs.size() >= exact_ready_limit || warm_pending >= warm_pending_limit)
-                break;
-            if (exact_jobs.contains(recipe))
-                continue;
-            if ((!vertex || !vertex->vertex_program || vertex->vertex_program->hash != recipe.vertex)
-                && (!fragment || !fragment->fragment_program || fragment->fragment_program->hash != recipe.fragment))
-                continue;
-            const auto vs = warm_vertices.find(recipe.vertex), fs = warm_fragments.find(recipe.fragment);
-            if (vs == warm_vertices.end() || fs == warm_fragments.end())
-                continue;
-            std::shared_ptr<ProgramBinding> vp, fp;
-            for (const auto &v : vs->second) {
-                auto binding = v.lock();
-                if (binding && binding->key_hash == recipe.layout) {
-                    vp = std::move(binding);
-                    break;
-                }
-            }
-            for (const auto &f : fs->second) {
-                auto binding = f.lock();
-                if (!binding || !binding->fragment_program)
-                    continue;
-                const auto &program = static_cast<const VKFragmentProgram &>(*binding->fragment_program);
-                if (program.blending_hash == recipe.blend && static_cast<uint32_t>(program.output_register_format) == recipe.words[28]) {
-                    fp = std::move(binding);
-                    break;
-                }
-            }
-            if (!vp || !fp)
-                continue;
-            auto job = std::make_shared<ExactWarmJob>();
-            job->recipe = recipe;
-            job->render_pass = pass;
-            auto *request = new WarmRequest{ vp, fp, warm_pair_key(recipe.vertex, recipe.fragment, fp->fragment_program->output_register_format),
-                util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0, 0, true, job };
-            if (!warm_queue.enqueue(request)) {
-                delete request;
-                continue;
-            }
-            exact_jobs.emplace(recipe, job);
-            ++warm_pending;
-        }
+        schedule_exact_locked();
         // Match only previously observed protected pairs, never a guessed stage cross-product.
         for (const auto &pair : loaded_protected_pairs) {
             if ((!vertex || !vertex->vertex_program || vertex->vertex_program->hash != pair.vertex)
@@ -2323,13 +2360,14 @@ void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &verte
     }
     auto *request = new WarmRequest{ vertex, fragment, pair,
         util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0, request_key, learned };
-    if (!warm_queue.enqueue(request)) {
+    if (!warm_queue.push(request, false)) {
         delete request;
         return;
     }
     warm_pairs_requested.insert(request_key);
     ++warm_attempts[request_key];
     ++warm_pending;
+    warm_work_ready.notify_all();
 }
 
 void PipelineCache::warm_thread(MemState &mem) {
@@ -2337,38 +2375,60 @@ void PipelineCache::warm_thread(MemState &mem) {
     // below the guest and render threads: this work only pays off later
     setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);
 #endif
+#if defined(_WIN32)
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
     while (true) {
         WarmRequest *request = nullptr;
-        warm_queue.wait_dequeue(request);
-        if (!request)
-            break;
+        {
+            std::unique_lock<std::mutex> lock(warm_mutex);
+            // Completion and registration wake this loop. The timeout also reopens quiet-time capacity.
+            warm_work_ready.wait_for(lock, std::chrono::milliseconds(25), [&] {
+                return warm_stopping || (!warm_queue.empty() && warm_running < PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed)));
+            });
+            if (warm_stopping)
+                break;
+            if (warm_queue.empty() || warm_running >= PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed)))
+                continue;
+            request = warm_queue.pop();
+            ++warm_running;
+        }
         if (request->telemetry_queued) {
             util::PipelineScope delay(util::PipelineKind::WarmQueueDelay, { 0, request->pair_key }, request->telemetry_queued);
         }
         const bool ready = !warm_stopping && (request->exact ? warm_exact_pipeline(*request, mem) : warm_pair(*request, mem));
+#if defined(_WIN32)
+        // A render-thread wait may have promoted this job. Only this worker restores its priority.
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
         {
             std::lock_guard<std::mutex> guard(warm_mutex);
             if (!ready && !request->exact)
                 warm_pairs_requested.erase(request->request_key);
             --warm_pending;
+            --warm_running;
+            schedule_exact_locked();
         }
         delete request;
     }
 }
 
 void PipelineCache::stop_warm_threads() {
-    warm_enabled = false;
-    warm_stopping = true;
-    for (size_t i = 0; i < warm_threads.size(); i++)
-        warm_queue.enqueue(nullptr);
+    {
+        std::lock_guard<std::mutex> guard(warm_mutex);
+        warm_enabled = false;
+        warm_stopping = true;
+    }
+    warm_work_ready.notify_all();
     for (auto &thread : warm_threads) {
         if (thread.joinable())
             thread.join();
     }
     warm_threads.clear();
-    WarmRequest *request;
-    while (warm_queue.try_dequeue(request))
-        delete request;
+    std::lock_guard<std::mutex> guard(warm_mutex);
+    while (!warm_queue.empty())
+        delete warm_queue.pop();
+    warm_pending = warm_running = 0;
     warm_stopping = false;
 }
 
@@ -2568,11 +2628,13 @@ std::optional<ExactPipelineRecipe> PipelineCache::describe_exact_pipeline(const 
     w[26] = static_cast<uint32_t>(record.is_maskupdate);
     w[27] = static_cast<uint32_t>(record.is_gamma_corrected);
     w[28] = static_cast<uint32_t>(fp->fragment_program->output_register_format);
-    w[29] = context.shader_hints.raw_color_attachment_input;
+    const bool raw_attachment = state.features.preserve_f16_nan_as_u16 && !interlock && record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16 && bool(record.color_surface.data);
+    w[29] = raw_attachment && state.features.direct_fragcolor && fp->program()->is_frag_color_used();
     for (size_t i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; ++i) {
         w[30 + i] = static_cast<uint32_t>(context.shader_hints.vertex_textures[i]);
         w[46 + i] = static_cast<uint32_t>(context.shader_hints.fragment_textures[i]);
     }
+    canonicalize_exact_pipeline(r, vp->vertex_program->textures_used.to_ulong(), fp->fragment_program->textures_used.to_ulong(), SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
     if (!valid_exact_recipe(r))
         return {};
     return r;
@@ -2581,16 +2643,28 @@ std::optional<ExactPipelineRecipe> PipelineCache::describe_exact_pipeline(const 
 vk::Pipeline PipelineCache::reuse_exact_pipeline(const ExactPipelineRecipe &recipe) {
     std::unique_lock<std::mutex> lock(warm_mutex);
     const auto found = exact_jobs.find(recipe);
-    if (found == exact_jobs.end())
+    if (found == exact_jobs.end()) {
+        ++exact_miss_count;
         return nullptr;
+    }
     const auto &job = found->second;
     if (job->status == ExactWarmJob::Queued) {
         // A draw must not wait behind speculative queue work. It claims this recipe instead.
         job->status = ExactWarmJob::Taken;
         ++exact_draw_claimed_count;
+        --exact_live_jobs;
+        warm_work_ready.notify_all();
         return nullptr;
     }
     if (job->status == ExactWarmJob::Running) {
+        ++exact_wait_count;
+#if defined(_WIN32)
+        // Resolve priority inversion for required work, without changing guest scheduling or affinity.
+        if (const auto worker = OpenThread(THREAD_SET_INFORMATION, FALSE, job->worker_id)) {
+            SetThreadPriority(worker, THREAD_PRIORITY_NORMAL);
+            CloseHandle(worker);
+        }
+#endif
         util::PipelineScope wait(util::PipelineKind::ProtectedWait, { recipe.pipeline_key, 0, 0x30 });
         exact_ready.wait(lock, [&] { return job->status != ExactWarmJob::Running; });
     }
@@ -2599,6 +2673,8 @@ vk::Pipeline PipelineCache::reuse_exact_pipeline(const ExactPipelineRecipe &reci
     const auto pipeline = job->pipeline;
     job->pipeline = nullptr;
     job->status = ExactWarmJob::Taken;
+    --exact_live_jobs;
+    schedule_exact_locked();
     ++exact_reused_count;
     if (exact_reused_count <= 16)
         LOG_INFO("[PIPEEXACT] reused exact prepared pipeline {}", recipe.pipeline_key);
@@ -2612,6 +2688,9 @@ bool PipelineCache::warm_exact_pipeline(const WarmRequest &request, MemState &me
         if (job->status != ExactWarmJob::Queued)
             return false;
         job->status = ExactWarmJob::Running;
+#if defined(_WIN32)
+        job->worker_id = GetCurrentThreadId();
+#endif
     }
     vk::Pipeline pipeline;
     try {
@@ -2639,6 +2718,8 @@ bool PipelineCache::warm_exact_pipeline(const WarmRequest &request, MemState &me
         if (pipeline)
             ++exact_prepared_count;
         job->status = pipeline ? ExactWarmJob::Ready : ExactWarmJob::Failed;
+        if (!pipeline)
+            --exact_live_jobs;
     }
     exact_ready.notify_all();
     return bool(pipeline);
