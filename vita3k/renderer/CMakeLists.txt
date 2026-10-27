@@ -158,6 +158,10 @@ add_executable(pipeline-preparation-queue-tests tests/pipeline_preparation_queue
 target_include_directories(pipeline-preparation-queue-tests PRIVATE include)
 add_test(NAME pipeline-preparation-queue COMMAND pipeline-preparation-queue-tests)
 
+add_executable(pipeline-binding-epochs-tests tests/pipeline_binding_epochs.cpp)
+target_include_directories(pipeline-binding-epochs-tests PRIVATE include)
+add_test(NAME pipeline-binding-epochs COMMAND pipeline-binding-epochs-tests)
+
 add_executable(pipeline-library-keys-tests tests/pipeline_library_keys.cpp)
 target_include_directories(pipeline-library-keys-tests PRIVATE include)
 target_link_libraries(pipeline-library-keys-tests PRIVATE vulkan)

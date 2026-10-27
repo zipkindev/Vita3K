@@ -21,6 +21,7 @@
 #include <condition_variable>
 #include <optional>
 #include <renderer/exact_pipeline_recipes.h>
+#include <renderer/pipeline_binding_epochs.h>
 #include <renderer/pipeline_preparation_queue.h>
 #include <renderer/protected_pipeline_pairs.h>
 #include <util/containers.h>
@@ -116,6 +117,7 @@ private:
 
     // only used when accessing the shaders map
     std::mutex shaders_mutex;
+    std::condition_variable shaders_ready;
     // because of multithreading, we want the pointers to remain stable
     unordered_map_stable<Sha256Hash, vk::ShaderModule> shaders;
     unordered_map_stable<uint64_t, vk::Pipeline> pipelines;
@@ -149,7 +151,8 @@ private:
             Running,
             Ready,
             Taken,
-            Failed } status = Queued;
+            Failed } status
+            = Queued;
         vk::Pipeline pipeline;
         uint32_t worker_id = 0;
     };
@@ -162,6 +165,33 @@ private:
     size_t exact_live_jobs = 0;
     uint64_t warm_registry_generation = 0, exact_scan_generation = 0;
     bool exact_deferred = false;
+    // Bounded identity coverage survives cheap skips and the rolling slow-event buffer.
+    struct ExactCoverage {
+        uint64_t pair = 0, first_qpc = 0, last_qpc = 0;
+        uint32_t events = 0;
+    };
+    std::map<uint64_t, ExactCoverage> exact_coverage;
+    enum CoverageEvent : uint32_t {
+        MissingBinding = 1,
+        MissingPass = 2,
+        HashMismatch = 4,
+        InvalidRecipe = 8,
+        NoJob = 16,
+        DrawClaimed = 32,
+        DrawWaited = 64,
+        NotReady = 128,
+        Reused = 256,
+        Queued = 512,
+        Started = 1024,
+        Prepared = 2048,
+        Failed = 4096
+    };
+    bool note_exact_coverage_locked(uint64_t key, uint64_t pair, uint32_t event);
+    struct PairCoverage {
+        uint64_t pair = 0, queued_qpc = 0, completed_qpc = 0;
+        uint32_t outcome = 0;
+    };
+    std::map<uint64_t, PairCoverage> pair_coverage;
     void schedule_exact_locked();
     static constexpr size_t exact_ready_limit = 256;
     // Render-pass construction parameters, never persisted Vulkan handles.
@@ -189,7 +219,7 @@ private:
     std::atomic<bool> warm_stopping{ false };
     std::mutex warm_mutex;
     std::unordered_set<uint64_t> warm_pairs_requested;
-    std::unordered_set<uint64_t> early_pairs;
+    PipelineBindingEpochs<ProgramBinding> early_pairs;
     std::map<uint64_t, unsigned> warm_attempts;
     static constexpr size_t warm_pending_limit = 64, warm_program_limit = 2048;
     size_t warm_pending = 0, warm_registered = 0;
@@ -222,7 +252,7 @@ private:
     std::vector<WarmState> warm_states;
     void note_draw_state(const WarmState &draw_state);
     void warm_thread(MemState &mem);
-    bool warm_pair(const WarmRequest &request, MemState &mem);
+    bool warm_pair(const WarmRequest &request, MemState &mem, uint32_t &outcome);
     void stop_warm_threads();
     bool codegen_ignores_draw_hints(const SceGxmProgram &program, bool is_vertex, const shader::Hints &hints);
     bool shader_available(const SceGxmProgram &program, const Sha256Hash &base_hash, bool is_vertex, const shader::Hints &hints);

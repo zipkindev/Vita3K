@@ -704,6 +704,12 @@ void PipelineCache::cleanup() {
         pipeline_draw_poll = 0;
         warm_registry_generation = exact_scan_generation = 0;
         exact_deferred = false;
+        for (const auto &[key, row] : exact_coverage)
+            LOG_INFO("[PIPECOVER] exact key={} pair={} events={} first_qpc={} last_qpc={}", key, row.pair, row.events, row.first_qpc, row.last_qpc);
+        for (const auto &[variant, row] : pair_coverage)
+            LOG_INFO("[PIPECOVER] pair variant={} pair={} queued_qpc={} completed_qpc={} outcome={}", variant, row.pair, row.queued_qpc, row.completed_qpc, row.outcome);
+        exact_coverage.clear();
+        pair_coverage.clear();
         LOG_INFO("[PIPEEXACT] session recipes={} queued={} prepared={} reused={} draw_claimed={}",
             exact_recipes.entries().size(), exact_jobs.size(), exact_prepared_count, exact_reused_count, exact_draw_claimed_count);
         LOG_INFO("[PIPESCHED] misses={} waits={} refills={} active_limit=1 quiet_limit=2", exact_miss_count, exact_wait_count, exact_refill_count);
@@ -867,39 +873,30 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     }
 
     vk::ShaderModule *shader_module;
+    vk::ShaderModule module;
     {
-        // look if it is in the cache
         std::unique_lock<std::mutex> lock(shaders_mutex);
         shader_module = &shaders.insert({ hash, nullptr }).first->second;
         if (*shader_module == shader_compiling) {
-            // another thread is compiling the same exact shader at the same time
-            // it's no use re-compiling it, so just wait for the other thread being done
-            lock.unlock();
-
-            // we shouldn't need atomics and the compiler shouldn't be able to optimize this
-            while (*shader_module == shader_compiling)
-                std::this_thread::yield();
+            util::PipelineScope waiting(util::PipelineKind::ShaderWait, { 0, 0, is_vertex ? 1u : 0u });
+            shaders_ready.wait(lock, [&] { return *shader_module != shader_compiling; });
         }
-
-        if (*shader_module == nullptr)
-            // now mark the shader as compiling so that other threads accessing it won't try to compile it a second time
+        module = *shader_module;
+        if (!module)
             *shader_module = shader_compiling;
     }
 
-    if (*shader_module == shader_compiling) {
-        // Variant files use the base program hash plus a suffix; the in-memory key is derived.
-        // The old direct lookup missed these files and fell back through the generic loader.
-        load_cached_shader(hash, fmt::format("vk{}{}-{}.spv", shader::CURRENT_VERSION, version_suffix, hex_string(base_hash)));
+    if (!module) {
+        // This thread owns the slot. A variant load publishes under shaders_mutex.
+        module = load_cached_shader(hash, fmt::format("vk{}{}-{}.spv", shader::CURRENT_VERSION, version_suffix, hex_string(base_hash)));
     }
-
-    if (*shader_module != shader_compiling) {
-        vk::PipelineShaderStageCreateInfo shader_stage_info{
+    if (module) {
+        return vk::PipelineShaderStageCreateInfo{
             .stage = is_vertex ? vk::ShaderStageFlagBits::eVertex : vk::ShaderStageFlagBits::eFragment,
-            .module = *shader_module,
+            .module = module,
             .pName = is_vertex ? "main_vs" : "main_fs",
             .pSpecializationInfo = spec_info,
         };
-        return shader_stage_info;
     }
 
     const std::string hash_text = hex_string(hash);
@@ -907,7 +904,7 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     LOG_DEBUG("Generating vulkan spv shader {}", hash_text);
     const std::string shader_version = fmt::format("vk{}{}", shader::CURRENT_VERSION, version_suffix);
 
-    // anything thrown here has to hand the slot back first or every thread waiting on this shader spins forever
+    // Release failed ownership and wake waiters as well as publishing successful modules.
     try {
         shader::usse::SpirvCode source = load_spirv_shader(*program, state.features, true, hints, maskupdate, state.shaders_path, state.shaders_log_path, shader_version, true);
         if (source.empty())
@@ -918,12 +915,18 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
             .pCode = source.data()
         };
 
-        *shader_module = state.device.createShaderModule(shader_info);
+        module = state.device.createShaderModule(shader_info);
+        {
+            std::lock_guard<std::mutex> guard(shaders_mutex);
+            *shader_module = module;
+        }
+        shaders_ready.notify_all();
     } catch (...) {
         {
             std::lock_guard<std::mutex> guard(shaders_mutex);
             *shader_module = nullptr;
         }
+        shaders_ready.notify_all();
         throw;
     }
     {
@@ -940,7 +943,7 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
 
     vk::PipelineShaderStageCreateInfo shader_stage_info{
         .stage = is_vertex ? vk::ShaderStageFlagBits::eVertex : vk::ShaderStageFlagBits::eFragment,
-        .module = *shader_module,
+        .module = module,
         .pName = is_vertex ? "main_vs" : "main_fs",
         .pSpecializationInfo = spec_info,
     };
@@ -2356,6 +2359,7 @@ vk::ShaderModule PipelineCache::load_cached_shader(const Sha256Hash &hash, const
         std::lock_guard<std::mutex> guard(shaders_mutex);
         shaders[hash] = shader;
     }
+    shaders_ready.notify_all();
 
     return shader;
 } catch (const std::exception &error) {
@@ -2427,6 +2431,7 @@ void PipelineCache::schedule_exact_locked() {
             continue;
         }
         exact_jobs.emplace(recipe, job);
+        note_exact_coverage_locked(recipe.pipeline_key, request->pair_key, Queued);
         ++warm_pending;
         ++exact_live_jobs;
         ++exact_refill_count;
@@ -2441,9 +2446,8 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
             return;
         const uint64_t identity = warm_pair_key(vertex->vertex_program->hash, fragment->fragment_program->hash, fragment->fragment_program->output_register_format);
         const uint64_t variant = identity ^ std::rotl(vertex->key_hash, 17) ^ std::rotl(static_cast<const VKFragmentProgram &>(*fragment->fragment_program).blending_hash, 31);
-        if (early_pairs.contains(variant) || early_pairs.size() >= warm_program_limit)
+        if (!early_pairs.observe(variant, vertex, fragment))
             return;
-        early_pairs.insert(variant);
         if (early_pairs.size() <= 128)
             LOG_INFO("[PIPEEARLY] actual_pair={} variant={} vertex={} fragment={} qpc={}", identity, variant, hex_string(vertex->vertex_program->hash), hex_string(fragment->fragment_program->hash), util::PipelineProfile::counter());
     }
@@ -2592,15 +2596,20 @@ void PipelineCache::warm_thread(MemState &mem) {
         if (request->telemetry_queued) {
             util::PipelineScope delay(util::PipelineKind::WarmQueueDelay, { 0, request->pair_key }, request->telemetry_queued);
         }
-        const bool ready = !warm_stopping && (request->exact ? warm_exact_pipeline(*request, mem) : warm_pair(*request, mem));
+        uint32_t outcome = 0;
+        const bool ready = !warm_stopping && (request->exact ? warm_exact_pipeline(*request, mem) : warm_pair(*request, mem, outcome));
 #if defined(_WIN32)
         // A render-thread wait may have promoted this job. Only this worker restores its priority.
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 #endif
         {
             std::lock_guard<std::mutex> guard(warm_mutex);
-            if (!ready && !request->exact)
-                warm_pairs_requested.erase(request->request_key);
+            if (!request->exact) {
+                if (!ready)
+                    warm_pairs_requested.erase(request->request_key);
+                if (util::pipeline_profile_enabled() && (pair_coverage.contains(request->request_key) || pair_coverage.size() < warm_program_limit))
+                    pair_coverage[request->request_key] = { request->pair_key, request->telemetry_queued, util::PipelineProfile::counter(), outcome };
+            }
             --warm_pending;
             --warm_running;
             schedule_exact_locked();
@@ -2673,7 +2682,10 @@ bool PipelineCache::shader_available(const SceGxmProgram &program, const Sha256H
     return fs::exists(state.shaders_path / fmt::format("vk{}{}-{}.spv", shader::CURRENT_VERSION, version_suffix, hex_string(base_hash)));
 }
 
-bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
+bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_t &outcome) try {
+    // Outcome bits: drawn=1, missing vertex=2, missing fragment=4,
+    // missing pass=8, compile failed=16, prepared=32, exception=64.
+    outcome = 0;
     util::PipelineScope total(util::PipelineKind::WarmTotal, { 0, request.pair_key });
     const ProgramBinding &vertex_binding = *request.vertex;
     const ProgramBinding &fragment_binding = *request.fragment;
@@ -2685,6 +2697,7 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
         std::lock_guard<std::mutex> guard(warm_mutex);
         // a draw already created a pipeline for it, so the driver cache holds that draw's state
         if (!request.learned && pairs_drawn.contains(request.pair_key)) {
+            outcome |= 1;
             util::PipelineScope skipped(util::PipelineKind::WarmSkipDrawn, { 0, request.pair_key });
             return false;
         }
@@ -2709,6 +2722,7 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
 
     // a stage with no cached module is only generated here when the draw would generate the same module
     if (!shader_available(vertex_gxp, vertex_binding.vertex_program->hash, true, hints) && !codegen_ignores_draw_hints(vertex_gxp, true, hints)) {
+        outcome |= 2;
         util::PipelineScope skipped(util::PipelineKind::WarmMissingShader, { 0, request.pair_key });
         return false;
     }
@@ -2718,12 +2732,15 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
     for (const WarmState &warm_state : states) {
         hints.color_format = static_cast<SceGxmColorFormat>(warm_state.color_format);
         if (!shader_available(fragment_gxp, fragment_binding.fragment_program->hash, false, hints) && !codegen_ignores_draw_hints(fragment_gxp, false, hints)) {
+            outcome |= 4;
             util::PipelineScope skipped(util::PipelineKind::WarmMissingShader, { 0, request.pair_key });
             continue;
         }
         const vk::RenderPass render_pass = interlock ? warm_state.interlock_render_pass : warm_state.render_pass;
-        if (!render_pass)
+        if (!render_pass) {
+            outcome |= 8;
             continue;
+        }
         GxmRecordState record{};
         record.color_base_format = gxm::get_base_format(hints.color_format);
         const bool has_color_surface_data = warm_state.raw || record.color_base_format != SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16;
@@ -2739,14 +2756,18 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem) try {
             pipeline = compile_pipeline(SCE_GXM_PRIMITIVE_TRIANGLES, render_pass, vertex_binding, fragment_binding, record, has_color_surface_data, hints, warm_state.casts, mem);
             compile.result(bool(pipeline));
         }
-        if (!pipeline)
+        if (!pipeline) {
+            outcome |= 16;
             continue;
+        }
+        outcome |= 32;
         // only the driver cache entry is wanted: the draw creates its own pipeline from it
         state.device.destroyPipeline(pipeline);
         prepared = true;
     }
     return prepared;
 } catch (const std::exception &error) {
+    outcome |= 64;
     LOG_WARN("[PIPEWARM] background compile failed: {}", error.what());
     return false;
 }
@@ -2774,22 +2795,47 @@ void PipelineCache::note_draw_state(const WarmState &draw_state) {
         warm_states = top;
 }
 
+bool PipelineCache::note_exact_coverage_locked(uint64_t key, uint64_t pair, uint32_t event) {
+    if (!util::pipeline_profile_enabled())
+        return false;
+    auto found = exact_coverage.find(key);
+    if (found == exact_coverage.end()) {
+        if (exact_coverage.size() >= ExactPipelineRecipes::limit)
+            return false;
+        found = exact_coverage.emplace(key, ExactCoverage{}).first;
+    }
+    auto &row = found->second;
+    const bool first_event = !(row.events & event);
+    row.events |= event;
+    if (pair)
+        row.pair = pair;
+    row.last_qpc = util::PipelineProfile::counter();
+    if (!row.first_qpc)
+        row.first_qpc = row.last_qpc;
+    return first_event;
+}
+
 std::optional<ExactPipelineRecipe> PipelineCache::describe_exact_pipeline(const VKContext &context, SceGxmPrimitiveType type, bool casts, uint64_t key) {
+    const auto reject = [&](uint32_t event) -> std::optional<ExactPipelineRecipe> {
+        std::lock_guard<std::mutex> guard(warm_mutex);
+        note_exact_coverage_locked(key, 0, event);
+        return {};
+    };
     const auto &record = context.record;
     const auto &vp = record.vertex_program_binding;
     const auto &fp = record.fragment_program_binding;
     if (!vp || !fp || !vp->vertex_program || !fp->fragment_program || fp->is_maskupdate)
-        return {};
+        return reject(MissingBinding);
     const bool interlock = state.features.support_shader_interlock && fp->program()->is_frag_color_used();
     const auto pass = interlock ? context.current_shader_interlock_pass : context.current_render_pass;
     const auto found = render_pass_recipes.find(pass);
     if (found == render_pass_recipes.end())
-        return {};
+        return reject(MissingPass);
     ExactPipelineRecipe r;
     r.vertex = record.vertex_program_hash;
     r.fragment = record.fragment_program_hash;
     if (r.vertex != vp->vertex_program->hash || r.fragment != fp->fragment_program->hash)
-        return {};
+        return reject(HashMismatch);
     r.layout = vp->key_hash;
     r.blend = static_cast<const VKFragmentProgram &>(*fp->fragment_program).blending_hash;
     r.pipeline_key = key;
@@ -2831,8 +2877,16 @@ std::optional<ExactPipelineRecipe> PipelineCache::describe_exact_pipeline(const 
         w[46 + i] = static_cast<uint32_t>(context.shader_hints.fragment_textures[i]);
     }
     canonicalize_exact_pipeline(r, vp->vertex_program->textures_used.to_ulong(), fp->fragment_program->textures_used.to_ulong(), SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
-    if (!valid_exact_recipe(r))
+    if (!valid_exact_recipe(r)) {
+        std::lock_guard<std::mutex> guard(warm_mutex);
+        if (note_exact_coverage_locked(key, 0, InvalidRecipe)) {
+            std::string words;
+            for (auto value : r.words)
+                words += fmt::format("{},", value);
+            LOG_INFO("[PIPECOVER] rejected key={} vertex={} fragment={} layout={} blend={} words={}", key, hex_string(r.vertex), hex_string(r.fragment), r.layout, r.blend, words);
+        }
         return {};
+    }
     return r;
 }
 
@@ -2840,6 +2894,7 @@ vk::Pipeline PipelineCache::reuse_exact_pipeline(const ExactPipelineRecipe &reci
     std::unique_lock<std::mutex> lock(warm_mutex);
     const auto found = exact_jobs.find(recipe);
     if (found == exact_jobs.end()) {
+        note_exact_coverage_locked(recipe.pipeline_key, 0, NoJob);
         ++exact_miss_count;
         return nullptr;
     }
@@ -2847,12 +2902,14 @@ vk::Pipeline PipelineCache::reuse_exact_pipeline(const ExactPipelineRecipe &reci
     if (job->status == ExactWarmJob::Queued) {
         // A draw must not wait behind speculative queue work. It claims this recipe instead.
         job->status = ExactWarmJob::Taken;
+        note_exact_coverage_locked(recipe.pipeline_key, 0, DrawClaimed);
         ++exact_draw_claimed_count;
         --exact_live_jobs;
         warm_work_ready.notify_all();
         return nullptr;
     }
     if (job->status == ExactWarmJob::Running) {
+        note_exact_coverage_locked(recipe.pipeline_key, 0, DrawWaited);
         ++exact_wait_count;
 #if defined(_WIN32)
         // Resolve priority inversion for required work, without changing guest scheduling or affinity.
@@ -2864,13 +2921,16 @@ vk::Pipeline PipelineCache::reuse_exact_pipeline(const ExactPipelineRecipe &reci
         util::PipelineScope wait(util::PipelineKind::ProtectedWait, { recipe.pipeline_key, 0, 0x30 });
         exact_ready.wait(lock, [&] { return job->status != ExactWarmJob::Running; });
     }
-    if (job->status != ExactWarmJob::Ready)
+    if (job->status != ExactWarmJob::Ready) {
+        note_exact_coverage_locked(recipe.pipeline_key, 0, NotReady);
         return nullptr;
+    }
     const auto pipeline = job->pipeline;
     job->pipeline = nullptr;
     job->status = ExactWarmJob::Taken;
     --exact_live_jobs;
     schedule_exact_locked();
+    note_exact_coverage_locked(recipe.pipeline_key, 0, Reused);
     ++exact_reused_count;
     if (exact_reused_count <= 16)
         LOG_INFO("[PIPEEXACT] reused exact prepared pipeline {}", recipe.pipeline_key);
@@ -2884,6 +2944,7 @@ bool PipelineCache::warm_exact_pipeline(const WarmRequest &request, MemState &me
         if (job->status != ExactWarmJob::Queued)
             return false;
         job->status = ExactWarmJob::Running;
+        note_exact_coverage_locked(job->recipe.pipeline_key, request.pair_key, Started);
 #if defined(_WIN32)
         job->worker_id = GetCurrentThreadId();
 #endif
@@ -2914,6 +2975,7 @@ bool PipelineCache::warm_exact_pipeline(const WarmRequest &request, MemState &me
         if (pipeline)
             ++exact_prepared_count;
         job->status = pipeline ? ExactWarmJob::Ready : ExactWarmJob::Failed;
+        note_exact_coverage_locked(job->recipe.pipeline_key, request.pair_key, pipeline ? Prepared : Failed);
         if (!pipeline)
             --exact_live_jobs;
     }

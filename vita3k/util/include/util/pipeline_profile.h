@@ -39,6 +39,7 @@ enum class PipelineKind : uint32_t {
     LibraryLink,
     LibraryFallback,
     EarlyPair,
+    ShaderWait,
     Count
 };
 struct PipelineContext {

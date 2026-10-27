@@ -61,7 +61,7 @@ void merge(PipelineProfile::Stats &a, const PipelineProfile::Stats &b) noexcept 
 void csv_stats(std::ostream &out, const PipelineProfile::Stats &s) {
     out << s.count << ',' << s.ticks << ',' << s.max_ticks << ',' << s.over_2ms << ',' << s.over_10ms << ',' << s.over_50ms << ',' << s.known_results << ',' << s.nonzero_results;
 }
-constexpr const char *names[] = { "async_queued", "async_skipped", "failed_cached", "queue_delay", "async_compile", "queue_cancelled", "protected_wait", "sync_disabled", "sync_known_cache", "sync_protected", "cache_probe", "warm_queue_delay", "warm_skip_drawn", "warm_missing_shader", "warm_probe", "warm_compile", "warm_total", "warm_stage_registered", "warm_learned_pair", "warm_bounded", "warm_duplicate", "warm_no_link_hint", "library_compile", "library_wait", "library_link", "library_fallback", "early_pair" };
+constexpr const char *names[] = { "async_queued", "async_skipped", "failed_cached", "queue_delay", "async_compile", "queue_cancelled", "protected_wait", "sync_disabled", "sync_known_cache", "sync_protected", "cache_probe", "warm_queue_delay", "warm_skip_drawn", "warm_missing_shader", "warm_probe", "warm_compile", "warm_total", "warm_stage_registered", "warm_learned_pair", "warm_bounded", "warm_duplicate", "warm_no_link_hint", "library_compile", "library_wait", "library_link", "library_fallback", "early_pair", "shader_wait" };
 static_assert(std::size(names) == static_cast<size_t>(PipelineKind::Count));
 } // namespace
 uint64_t PipelineProfile::counter() noexcept {
