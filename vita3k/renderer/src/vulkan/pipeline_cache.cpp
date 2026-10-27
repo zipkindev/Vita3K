@@ -1934,22 +1934,19 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     bool already_in_cache = false;
 
     // Exact learned objects are published under warm_mutex; workers never mutate pipelines.
-    const auto before_exact = pipelines.find(key);
-    const auto recipe = before_exact == pipelines.end() || before_exact->second == nullptr
+    auto it = pipelines.find(key);
+    const auto recipe = it == pipelines.end() || it->second == nullptr
         ? describe_exact_pipeline(context, type, has_casts, key)
         : std::optional<ExactPipelineRecipe>{};
     if (recipe) {
-        const auto existing = pipelines.find(key);
-        if (existing == pipelines.end() || existing->second == nullptr) {
-            if (auto prepared = reuse_exact_pipeline(*recipe)) {
-                pipelines[key] = prepared;
-                next_pipeline_cache_save = now_s() + pipeline_cache_save_delay;
-                ++state.shaders_count_compiled;
-                return prepared;
-            }
+        if (auto prepared = reuse_exact_pipeline(*recipe)) {
+            pipelines[key] = prepared;
+            raw_pipeline_keys_seen.insert(raw_key);
+            next_pipeline_cache_save = now_s() + pipeline_cache_save_delay;
+            ++state.shaders_count_compiled;
+            return prepared;
         }
     }
-    auto it = pipelines.find(key);
     if (it != pipelines.end()) {
         if (it->second != nullptr) {
             if (it->second == pipeline_failed) {
