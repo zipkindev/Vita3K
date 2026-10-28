@@ -69,6 +69,32 @@ int main(int argc, char **argv) {
         pvr::PVRTCConfigureDecodeCache(0);
     }
     assert(pvr::PVRTCDecodeParallelism() == (serial ? 1 : 2));
+    // Run before pressure: demand admission is conditional in a full cache.
+    // Direct consumers must match the reference for PVRTC I/II and both bit
+    // depths; failed preparation must never publish a partially uploaded image.
+    // Keep the original diagnostic-count test unchanged in work mode.
+    if (!disabled && !work) {
+        for (unsigned bits : { 0u, 1u })
+            for (unsigned type : { 0u, 1u }) {
+                std::vector<uint8_t> source(32 * 32 / (bits ? 4 : 2), 17), reference(32 * 32 * 4), staged(reference.size());
+                pvr::PVRTDecompressPVRTC(source.data(), bits, 32, 32, type, reference.data());
+                bool prepared = false, consumed = false;
+                assert(pvr::PVRTConsumeCachedPVRTC(source.data(), bits, 32, 32, type, [&] {
+                    // Proves staging preparation does not hold the cache mutex.
+                    assert(pvr::PVRTCDecodeCacheStats().entries > 0);
+                    prepared = true;
+                    return true;
+                }, [&](auto pixels) {
+                    assert(prepared);
+                    std::copy(pixels.begin(), pixels.end(), staged.begin());
+                    consumed = true;
+                }));
+                assert(consumed && staged == reference);
+                assert(!pvr::PVRTConsumeCachedPVRTC(source.data(), bits, 32, 32, type, [] { return false; }, [](auto) { assert(false); }));
+                source[0] ^= 1;
+                assert(!pvr::PVRTConsumeCachedPVRTC(source.data(), bits, 32, 32, type, [] { assert(false); return true; }, [](auto) { assert(false); }));
+            }
+    }
     unsigned seed = 17, cases = 0;
     for (unsigned bits : { 0u, 1u })
         for (unsigned type : { 0u, 1u }) {
@@ -96,31 +122,6 @@ int main(int argc, char **argv) {
                     ++cases;
                 }
         }
-    // Direct consumers must match the reference for PVRTC I/II and both bit
-    // depths; failed preparation must never publish a partially uploaded image.
-    // Keep the original diagnostic-count test unchanged in work mode.
-    if (!disabled && !work) {
-        for (unsigned bits : { 0u, 1u })
-            for (unsigned type : { 0u, 1u }) {
-                std::vector<uint8_t> source(32 * 32 / (bits ? 4 : 2), 17), reference(32 * 32 * 4), staged(reference.size());
-                pvr::PVRTDecompressPVRTC(source.data(), bits, 32, 32, type, reference.data());
-                bool prepared = false, consumed = false;
-                assert(pvr::PVRTConsumeCachedPVRTC(source.data(), bits, 32, 32, type, [&] {
-                    // Proves staging preparation does not hold the cache mutex.
-                    assert(pvr::PVRTCDecodeCacheStats().entries > 0);
-                    prepared = true;
-                    return true;
-                }, [&](auto pixels) {
-                    assert(prepared);
-                    std::copy(pixels.begin(), pixels.end(), staged.begin());
-                    consumed = true;
-                }));
-                assert(consumed && staged == reference);
-                assert(!pvr::PVRTConsumeCachedPVRTC(source.data(), bits, 32, 32, type, [] { return false; }, [](auto) { assert(false); }));
-                source[0] ^= 1;
-                assert(!pvr::PVRTConsumeCachedPVRTC(source.data(), bits, 32, 32, type, [] { assert(false); return true; }, [](auto) { assert(false); }));
-            }
-    }
     std::atomic<bool> identical = true;
     std::vector<std::thread> callers;
     for (unsigned n = 0; n < 4; ++n) {
