@@ -1080,7 +1080,10 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         default_raw_image = vkutil::Image(1, 1, vk::Format::eR16G16B16A16Uint);
         default_raw_image.init_image(vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eInputAttachment | vk::ImageUsageFlagBits::eTransferDst);
         default_raw_image.transition_to(cmd_buffer, vkutil::ImageLayout::StorageImage);
-        vkutil::end_single_time_command(device, general_queue, general_command_pool, cmd_buffer);
+        {
+            std::lock_guard<std::mutex> queue_lock(queue_mutex);
+            vkutil::end_single_time_command(device, general_queue, general_command_pool, cmd_buffer);
+        }
 
         // create the default sampler
         vk::SamplerCreateInfo sampler_info{
@@ -1567,7 +1570,10 @@ void VKState::swap_window() {
     // Android asked us to give memory back!
     const int trim_level = memory_trim_level.exchange(-1, std::memory_order_relaxed);
     if (trim_level >= 0) {
-        device.waitIdle();
+        {
+            std::lock_guard<std::mutex> queue_lock(queue_mutex);
+            device.waitIdle();
+        }
         const uint64_t freed = texture_cache.release_all_cached_textures();
         LOG_WARN("[ANDROID MEMORY] trim level {}: released {} MiB of cached textures", trim_level, freed / (1024 * 1024));
         dormant_trim_requested = true;
@@ -2447,7 +2453,10 @@ void VKState::wait_gpu_idle() {
     if (!device)
         return;
     try {
-        device.waitIdle();
+        {
+            std::lock_guard<std::mutex> queue_lock(queue_mutex);
+            device.waitIdle();
+        }
     } catch (const vk::SystemError &e) {
         LOG_WARN("wait_gpu_idle: device.waitIdle() failed ({}) — device may already be lost; continuing teardown", e.what());
     }

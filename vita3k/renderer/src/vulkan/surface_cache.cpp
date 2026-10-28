@@ -1806,7 +1806,10 @@ bool VKSurfaceCache::try_transfer_depth_gpu(Address src_address, Address dst_add
 
     vk::SubmitInfo submit_info{};
     submit_info.setCommandBuffers(transfer_cmd);
-    state.general_queue.submit(submit_info, fence);
+    {
+        std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+        state.general_queue.submit(submit_info, fence);
+    }
 
     dst_info->depth_content_stored = true;
 
@@ -2631,7 +2634,10 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
         // submit this command
         vk::SubmitInfo submit_info{};
         submit_info.setCommandBuffers(surface_cmd);
-        state.general_queue.submit(submit_info, fence);
+        {
+            std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+            state.general_queue.submit(submit_info, fence);
+        }
 
         // now we need to wait for the fence, then destroy it along with the command buffer
         // to prevent memory leaks
@@ -2692,7 +2698,10 @@ void VKSurfaceCache::submit_immediate_surface_sync(ColorSurfaceCacheInfo &surfac
     // submit this command
     vk::SubmitInfo submit_info{};
     submit_info.setCommandBuffers(surface_cmd);
-    state.general_queue.submit(submit_info, fence);
+    {
+        std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+        state.general_queue.submit(submit_info, fence);
+    }
 
     if (mem != nullptr) {
         // synchronous completion: the caller (a CPU operation like sceGxmTransfer) needs the
@@ -3432,7 +3441,10 @@ std::vector<uint32_t> VKSurfaceCache::dump_frame(Ptr<const void> address, uint32
     cmd_buffer.copyImageToBuffer(info.texture.image, vk::ImageLayout::eGeneral, temp_buff.buffer, image_copy);
 
     // this will cause a waitIdle, not an issue
-    vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+    {
+        std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+        vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+    }
 
     // on non-coherent staging memory the CPU would read stale data without an explicit invalidate
     const vk::MemoryPropertyFlags dump_mem_props = state.allocator.getAllocationMemoryProperties(temp_buff.allocation);

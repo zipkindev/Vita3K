@@ -84,6 +84,11 @@ struct VKState : public renderer::State {
     vk::Queue general_queue;
     vk::Queue transfer_queue;
 
+    // Host queue APIs require external synchronization. Both handles currently
+    // refer to queue index zero of the selected family; device idle covers all
+    // queues too. Keep fence waits/callback dispatch outside this mutex.
+    std::mutex queue_mutex;
+
     // These might be merged into one queue, but for now they are different.
     vk::CommandPool general_command_pool;
     // Transfer pool has transient bit set.

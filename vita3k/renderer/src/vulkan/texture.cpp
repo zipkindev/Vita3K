@@ -156,7 +156,10 @@ std::pair<uint32_t, vk::DeviceSize> VKTextureCache::evict_to_budget(const vk::De
 void VKTextureCache::recover_texture_memory() {
     memory_budget = std::max<vk::DeviceSize>(MiB(256), cached_bytes * 3 / 4);
     evict_to_budget(current_texture->memory_needed);
-    state.device.waitIdle();
+    {
+        std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+        state.device.waitIdle();
+    }
     for (int i = 0; i < MAX_FRAMES_RENDERING; i++)
         if (i != state.current_frame_idx)
             state.frames[i].destroy_queue.destroy_objects();
@@ -351,7 +354,10 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
 
             vk::SubmitInfo submit_info{};
             submit_info.setCommandBuffers(context->cmdbuffers_to_submit);
-            state.general_queue.submit(submit_info, current_fence);
+            {
+                std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+                state.general_queue.submit(submit_info, current_fence);
+            }
             context->cmdbuffers_to_submit.clear();
 
             const auto result = [&] {

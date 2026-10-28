@@ -594,7 +594,6 @@ void ScreenRenderer::swap_window() {
     submit_info.setWaitDstStageMask(dst_masks);
     submit_info.setSignalSemaphores(image_ready_semaphores[swapchain_image_idx]);
     submit_info.setCommandBuffers(current_cmd_buffer);
-    state.general_queue.submit(submit_info, fences[swapchain_image_idx]);
 
     // then present the surface
     vk::PresentInfoKHR present_info{
@@ -606,6 +605,8 @@ void ScreenRenderer::swap_window() {
     };
 
     auto result = [&]() {
+        std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+        state.general_queue.submit(submit_info, fences[swapchain_image_idx]);
         util::SyncWaitScope span(util::WaitKind::VulkanPresent, { reinterpret_cast<uintptr_t>(this), swapchain_image_idx });
         auto result = state.general_queue.presentKHR(&present_info);
         span.result(static_cast<int32_t>(result));
@@ -796,7 +797,10 @@ bool ScreenRenderer::rebuild_swapchain_if_visible() {
     std::chrono::steady_clock::time_point idled, destroyed;
     // a lost surface (an Android app switch, a closing window) or a lost device throws out of these calls
     try {
-        state.device.waitIdle();
+        {
+            std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+            state.device.waitIdle();
+        }
         idled = std::chrono::steady_clock::now();
         destroy_swapchain();
         destroyed = std::chrono::steady_clock::now();
