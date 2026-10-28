@@ -111,7 +111,10 @@ public:
         Key key;
         std::vector<uint8_t> compressed;
         uint64_t decode_ns, uses;
+        uint64_t recent = 0, cohort = 0;
+        uint32_t session_uses = 0; // Transient: seeding/preparation never counts as demand.
     };
+    static constexpr size_t profile_record_bytes = 56;
     struct LearningStats {
         uint64_t observations = 0, merged = 0, evictions = 0, dropped = 0;
         size_t entries = 0, bytes = 0, byte_limit = 0, entry_limit = 0;
@@ -128,9 +131,9 @@ public:
         std::lock_guard lock(mutex);
         stop_learning_unlocked();
     }
-    void merge_learning(const Key &key, std::span<const uint8_t> input, uint64_t ns, uint64_t uses) {
+    void merge_learning(const Key &key, std::span<const uint8_t> input, uint64_t ns, uint64_t uses, uint64_t recent = 0, uint64_t cohort = 0) {
         std::lock_guard lock(mutex);
-        learn_unlocked(key, input, ns, uses, true);
+        learn_unlocked(key, input, ns, uses, true, recent, cohort);
     }
     LearningStats learning_stats() const {
         std::lock_guard lock(mutex);
@@ -144,8 +147,12 @@ public:
         std::lock_guard lock(mutex);
         std::vector<ProfileInput> result;
         result.reserve(learning.size());
-        for (auto &entry : learning)
+        for (auto &entry : learning) {
+            // Decay only after actual demand; opening/closing a menu preserves history.
+            if (learning_counts.observations)
+                entry.recent = std::min<uint64_t>(64, entry.recent / 2 + entry.session_uses);
             result.push_back(std::move(entry));
+        }
         learning_lookup.clear();
         learning.clear();
         learning_bytes = 0;
@@ -821,8 +828,9 @@ private:
         learning.clear();
         learning_bytes = 0;
         learning_counts = {};
+        learning_novel = learning_cohort = 0;
     }
-    void learn_unlocked(const Key &key, std::span<const uint8_t> input, uint64_t ns, uint64_t uses, bool seed) {
+    void learn_unlocked(const Key &key, std::span<const uint8_t> input, uint64_t ns, uint64_t uses, bool seed, uint64_t recent = 0, uint64_t cohort = 0) {
         if (!learning_counts.byte_limit || !learning_counts.entry_limit)
             return;
         if (!seed)
@@ -832,7 +840,7 @@ private:
         if (!key.width || !key.height || key.format > 3 || (w & (w - 1)) || (h & (h - 1))
             || input.size() > job_limit || w * h / (key.format & 1 ? 4 : 2) != input.size()
             || uint64_t(key.width) * key.height > (job_limit - input.size()) / 4
-            || input.size() + 40 > learning_counts.byte_limit) {
+            || input.size() + profile_record_bytes > learning_counts.byte_limit) {
             ++learning_counts.dropped;
             return;
         }
@@ -843,13 +851,15 @@ private:
                 continue;
             entry->decode_ns = std::max(entry->decode_ns, ns);
             entry->uses = seed ? std::max(entry->uses, uses) : std::min<uint64_t>(entry->uses, 1000000) + 1;
-            if (!seed)
+            if (!seed) {
+                observe_learning(*entry);
                 learning.splice(learning.begin(), learning, entry);
+            }
             return;
         }
         try {
             std::vector<uint8_t> bytes(input.begin(), input.end());
-            const size_t cost = bytes.capacity() + 40;
+            const size_t cost = bytes.capacity() + profile_record_bytes;
             if (cost > learning_counts.byte_limit) {
                 ++learning_counts.dropped;
                 return;
@@ -865,11 +875,13 @@ private:
                 }
                 if (coverage)
                     coverage->learning_evicted(victim->key);
-                learning_bytes -= victim->compressed.capacity() + 40;
+                learning_bytes -= victim->compressed.capacity() + profile_record_bytes;
                 learning.erase(victim);
                 ++learning_counts.evictions;
             }
-            const auto entry = learning.insert(seed ? learning.end() : learning.begin(), { key, std::move(bytes), ns, seed ? uses : 1 });
+            const auto entry = learning.insert(seed ? learning.end() : learning.begin(), { key, std::move(bytes), ns, seed ? uses : 1, std::min<uint64_t>(recent, 64), cohort });
+            if (!seed)
+                observe_learning(*entry);
             try {
                 learning_lookup.emplace(key, entry);
             } catch (...) {
@@ -883,6 +895,17 @@ private:
             ++learning_counts.dropped; // Learning must not interrupt normal rendering.
         }
     }
+    // First demand of each distinct input defines bounded, deterministic cohorts.
+    // These are co-use hints, not a prediction of GPU visibility or an event ID.
+    void observe_learning(ProfileInput &entry) {
+        if (!entry.session_uses) {
+            if ((learning_novel++ % 32) == 0)
+                learning_cohort = entry.key.hash ^ (uint64_t(entry.key.width) << 32) ^ entry.key.height;
+            entry.cohort = learning_cohort ? learning_cohort : 1;
+        }
+        entry.session_uses = std::min<uint32_t>(entry.session_uses + 1, 64);
+    }
+    uint64_t learning_novel = 0, learning_cohort = 0;
     std::unique_ptr<std::array<AdmissionSlot, 1024>> admissions;
     std::unique_ptr<TextureCoverage> coverage;
     std::list<ProfileInput> learning;

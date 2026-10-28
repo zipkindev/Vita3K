@@ -68,6 +68,22 @@ int main() {
     assert(valid.size() < Profile::file_limit);
     std::vector<Profile::Record> records;
     assert(Profile::validate(valid, "TEST01|1.04|eboot", records) && records.size() == tests.size());
+    // Version 1 seed packs remain readable; only normal close migrates to v2.
+    auto legacy = valid;
+    for (auto it = records.rbegin(); it != records.rend(); ++it)
+        legacy.erase(legacy.begin() + it->offset - 16, legacy.begin() + it->offset);
+    legacy[8] = 1;
+    seal(legacy);
+    assert(Profile::validate(legacy, "TEST01|1.04|eboot", records));
+    assert(std::all_of(records.begin(), records.end(), [](const auto &e) { return e.recent == 0 && e.cohort == 0; }));
+    write(file, legacy);
+    auto migration = profile.begin(root, "TEST01", "1.04|eboot", Profile::Mode::Learn, {}, decode);
+    assert(migration.learning.merged == tests.size());
+    assert(profile.finish().saved_entries == tests.size());
+    // Migrating a legacy pack adds zero history, never fabricated recent demand.
+    assert(Profile::validate(read(file), "TEST01|1.04|eboot", records));
+    assert(std::all_of(records.begin(), records.end(), [](const auto &e) { return e.recent == 0 && e.cohort == 0; }));
+    write(file, valid);
     assert(!Profile::validate(valid, "OTHER|1.04|eboot", records));
     assert(!Profile::validate(valid, "TEST01|1.05|eboot", records));
     auto report = profile.begin(root, "TEST01", "1.04|eboot", Profile::Mode::Preload, {}, decode);

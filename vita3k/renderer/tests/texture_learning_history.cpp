@@ -73,11 +73,11 @@ int main() {
     // Both bounds are independent of decoded residency; exact input equality
     // handles hash collisions. Oversize/invalid records cannot break the bound.
     cache.clear();
-    cache.start_learning(144, 2);
+    cache.start_learning(176, 2);
     add(1, 100);
     add(2, 100);
     add(3, 100);
-    assert(cache.learning_stats().entries == 2 && cache.learning_stats().bytes <= 144 && cache.learning_stats().evictions == 1);
+    assert(cache.learning_stats().entries == 2 && cache.learning_stats().bytes <= 176 && cache.learning_stats().evictions == 1);
     cache.start_learning(10000, 1);
     add(1, 100);
     add(2, 100);

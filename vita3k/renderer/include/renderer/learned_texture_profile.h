@@ -11,6 +11,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <unordered_set>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -35,6 +36,7 @@ public:
         DecodedTextureCache::Key key;
         uint64_t decode_ns, uses;
         size_t offset, size;
+        uint64_t recent = 0, cohort = 0;
     };
     struct Report {
         std::string status = "off";
@@ -74,7 +76,7 @@ public:
             return true;
         };
         uint64_t version, length, count;
-        if (!get(4, version) || version != 1 || !get(4, length) || length > 256 || length != identity.size() || cursor + length > bytes.size() - 8)
+        if (!get(4, version) || (version != 1 && version != 2) || !get(4, length) || length > 256 || length != identity.size() || cursor + length > bytes.size() - 8)
             return false;
         if (std::memcmp(identity.data(), bytes.data() + cursor, identity.size()) != 0)
             return false;
@@ -85,7 +87,12 @@ public:
             uint64_t hash, w, h, format, size, cost, uses;
             if (!get(8, hash) || !get(4, w) || !get(4, h) || !get(4, format) || !get(4, size) || !get(8, cost) || !get(8, uses) || size > bytes.size() - 8 - cursor)
                 return false;
-            Record record{ { hash, uint32_t(w), uint32_t(h), uint32_t(format) }, cost, uses, cursor, size_t(size) };
+            uint64_t recent = 0, cohort = 0;
+            if (version == 2 && (!get(8, recent) || recent > 64 || !get(8, cohort)))
+                return false;
+            if (size > bytes.size() - 8 - cursor)
+                return false;
+            Record record{ { hash, uint32_t(w), uint32_t(h), uint32_t(format) }, cost, uses, cursor, size_t(size), recent, cohort };
             size_t pixels;
             if (!layout(record.key, size_t(size), pixels) || XXH3_64bits(bytes.data() + cursor, size_t(size)) != hash)
                 return false;
@@ -98,6 +105,44 @@ public:
         for (unsigned i = 0; i < 8; ++i)
             checksum |= uint64_t(bytes[cursor + i]) << (8 * i);
         return checksum == XXH3_64bits(bytes.data(), cursor);
+    }
+
+    // Plan within the existing 75% preparation cap. Two thirds favors recent
+    // demand; one sixth reserves expensive cold effects. Co-use companions and
+    // density fill remaining space. No map names, effect IDs or GPU addresses.
+    static void order_preparation(std::vector<Record> &records, size_t cap) {
+        const auto payload = [](const Record &e) { return e.size + size_t(e.key.width) * e.key.height * 4; };
+        const auto density = [&](const Record &e) { return DecodedTextureCache::preparation_priority(e.decode_ns, e.uses, payload(e)); };
+        std::vector<size_t> indices(records.size());
+        for (size_t i = 0; i < indices.size(); ++i) indices[i] = i;
+        std::vector<bool> chosen(records.size());
+        std::vector<Record> ordered;
+        ordered.reserve(records.size());
+        std::unordered_set<uint64_t> cohorts;
+        size_t used = 0;
+        auto select = [&](size_t i, size_t limit) {
+            if (chosen[i] || payload(records[i]) > limit - std::min(limit, used)) return;
+            chosen[i] = true;
+            used += payload(records[i]);
+            if (records[i].cohort) cohorts.insert(records[i].cohort);
+            ordered.push_back(records[i]);
+        };
+        std::stable_sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+            const auto score = [&](size_t i) { return std::min<uint64_t>(records[i].decode_ns, 250000000) * records[i].recent * 1024 / std::max<size_t>(payload(records[i]), 4096); };
+            return score(a) > score(b);
+        });
+        for (auto i : indices) if (records[i].recent) select(i, cap - cap / 3);
+        const size_t cold_end = std::min(cap, used + cap / 6);
+        std::stable_sort(indices.begin(), indices.end(), [&](size_t a, size_t b) { return records[a].decode_ns > records[b].decode_ns; });
+        for (auto i : indices) if (records[i].decode_ns >= 2000000) select(i, cold_end);
+        std::stable_sort(indices.begin(), indices.end(), [&](size_t a, size_t b) { return density(records[a]) > density(records[b]); });
+        // Snapshot seeds so filling does not recursively grow the selected graph.
+        const auto seeds = cohorts;
+        for (auto i : indices) if (records[i].cohort && seeds.contains(records[i].cohort)) select(i, cap);
+        for (auto i : indices) select(i, cap);
+        // Keep skipped records for coverage accounting and small-entry fallbacks.
+        for (auto i : indices) if (!chosen[i]) ordered.push_back(records[i]);
+        records = std::move(ordered);
     }
 
     Report begin(const std::filesystem::path &root, const std::string &title, const std::string &id, Mode requested, const std::filesystem::path &report_path, const Decode &decode, std::chrono::milliseconds deadline = std::chrono::seconds(5)) {
@@ -158,17 +203,11 @@ public:
                         // cannot fit the decoded cache. No decoded pixels retained here.
                         if (mode == Mode::Automatic || mode == Mode::Learn)
                             for (const auto &record : records)
-                                cache.merge_learning(record.key, std::span(bytes.data() + record.offset, record.size), record.decode_ns, record.uses);
+                                cache.merge_learning(record.key, std::span(bytes.data() + record.offset, record.size), record.decode_ns, record.uses, record.recent, record.cohort);
                         report.preparation_budget_bytes = cache.preparation_budget();
                         // Registration and history merge preserve file order and
                         // fingerprint IDs. Only startup scheduling is re-ranked.
-                        std::stable_sort(records.begin(), records.end(), [](const Record &a, const Record &b) {
-                            const auto score = [](const Record &e) {
-                                const size_t payload = e.size + size_t(e.key.width) * e.key.height * 4;
-                                return DecodedTextureCache::preparation_priority(e.decode_ns, e.uses, payload);
-                            };
-                            return score(a) > score(b);
-                        });
+                        order_preparation(records, report.preparation_budget_bytes);
                         report.status = mode == Mode::Learn ? "learn-ready" : "preload-ready";
                         for (const auto &record : records) {
                             if (mode == Mode::Learn)
@@ -228,7 +267,7 @@ public:
                 TextureProfileStorage storage(profile.parent_path().parent_path());
                 uint64_t incoming = 28 + identity.size();
                 for (const auto &entry : entries)
-                    incoming += 40 + entry.compressed.size();
+                    incoming += DecodedTextureCache::profile_record_bytes + entry.compressed.size();
                 if (std::filesystem::is_symlink(profile.parent_path()) || std::filesystem::is_symlink(profile))
                     throw std::runtime_error("profile path is a symlink");
                 storage.reserve(profile, incoming);
@@ -262,7 +301,7 @@ public:
                     put_bytes(bytes, size);
                 };
                 put_bytes("V3KPVR1\0", 8);
-                put(1, 4);
+                put(2, 4);
                 put(identity.size(), 4);
                 put_bytes(identity.data(), identity.size());
                 put(entries.size(), 4);
@@ -274,6 +313,8 @@ public:
                     put(entry.compressed.size(), 4);
                     put(entry.decode_ns, 8);
                     put(entry.uses, 8);
+                    put(entry.recent, 8);
+                    put(entry.cohort, 8);
                     put_bytes(entry.compressed.data(), entry.compressed.size());
                 }
                 const auto checksum = XXH3_64bits_digest(hash);
