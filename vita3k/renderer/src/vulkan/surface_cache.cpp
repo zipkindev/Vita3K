@@ -3137,7 +3137,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         ? last_written_surface->copy_buffer->size
         : (tiled_layout
                   ? static_cast<vk::DeviceSize>(align(last_written_surface->original_width, 32)) * align(last_written_surface->original_height, 32) * vk::blockSize(sync_format)
-                  : static_cast<vk::DeviceSize>(pixel_stride) * last_written_surface->original_height * vk::blockSize(sync_format));
+                  : (static_cast<vk::DeviceSize>(pixel_stride) * (last_written_surface->original_height - 1) + last_written_surface->original_width) * vk::blockSize(sync_format));
     const vk::BufferMemoryBarrier destination_barrier{
         .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
         .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
