@@ -63,7 +63,7 @@ void merge(TextureWorkProfile::Stats &a, const TextureWorkProfile::Stats &b) noe
 void csv_stats(std::ostream &out, const TextureWorkProfile::Stats &s) {
     out << s.count << ',' << s.ticks << ',' << s.max_ticks << ',' << s.over_2ms << ',' << s.over_10ms << ',' << s.over_50ms << ',' << s.known_results << ',' << s.nonzero_results << ',' << s.source_bytes << ',' << s.decoded_bytes;
 }
-constexpr const char *names[] = { "source_snapshot_hash", "cache_total", "cache_lock_wait", "cache_validate", "cache_pixel_copy", "cache_bookkeeping", "decode", "cache_insert", "upload_total", "backend_upload", "staging_prepare", "staging_fence_wait", "staging_allocate", "staging_copy", "upload_commands" };
+constexpr const char *names[] = { "source_snapshot_hash", "cache_total", "cache_lock_wait", "cache_validate", "cache_pixel_copy", "cache_bookkeeping", "decode", "cache_insert", "upload_total", "backend_upload", "staging_prepare", "staging_fence_wait", "staging_allocate", "staging_copy", "upload_commands", "cache_direct_upload", "cache_prefetch", "cache_residency" };
 static_assert(std::size(names) == static_cast<size_t>(TextureWorkKind::Count));
 } // namespace
 uint64_t TextureWorkProfile::counter() noexcept {

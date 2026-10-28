@@ -32,6 +32,8 @@
 */
 #pragma once
 #include <stdint.h>
+#include <functional>
+#include <span>
 namespace pvr {
 
 /// <summary>Decompresses PVRTC to RGBA 8888.</summary>
@@ -43,6 +45,11 @@ namespace pvr {
 /// <param name="outResultImage">The decompressed texture data</param>
 /// <returns>Return the amount of data that was decompressed.</returns>
 uint32_t PVRTDecompressPVRTC(const void *compressedData, uint32_t do2bitMode, uint32_t xDim, uint32_t yDim, uint32_t doPvrtType, uint8_t *outResultImage);
+// CPU-only callback, consumed while cache storage is protected. The span must
+// not escape and the callback must not wait on GPU work or re-enter the cache.
+bool PVRTConsumeCachedPVRTC(const void *data, uint32_t two_bit, uint32_t width, uint32_t height, uint32_t type,
+    const std::function<bool()> &before_copy, const std::function<void(std::span<const uint8_t>)> &consume);
+
 
 /// <summary>Decompresses ETC to RGBA 8888.</summary>
 /// <param name="srcData">The ETC texture data to decompress</param>

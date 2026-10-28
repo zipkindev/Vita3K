@@ -98,6 +98,8 @@ struct VKTextureCache : public TextureCache {
     bool init(const bool hashless_texture_cache, const fs::path &texture_folder, const std::string_view game_id);
     void select(size_t index, const SceGxmTexture &texture) override;
     void configure_texture(const SceGxmTexture &texture) override;
+    bool upload_cached_pvrt(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride, uint32_t memory_height) override;
+    void record_staged_texture(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, uint32_t mip_index, int face, uint32_t pixels_per_stride, uint32_t buffer_height, vk::DeviceSize upload_size);
     void upload_texture_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride) override;
     void upload_done() override;
     void configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) override;

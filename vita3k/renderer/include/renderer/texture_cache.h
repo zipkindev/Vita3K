@@ -187,6 +187,7 @@ public:
 
     virtual void select(size_t index, const SceGxmTexture &texture) = 0;
     virtual void configure_texture(const SceGxmTexture &texture) = 0;
+    virtual bool upload_cached_pvrt(SceGxmTextureBaseFormat, uint32_t, uint32_t, uint32_t, const void *, int, uint32_t, uint32_t) { return false; }
     virtual void upload_texture_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride) = 0;
     virtual void upload_done() {}
 

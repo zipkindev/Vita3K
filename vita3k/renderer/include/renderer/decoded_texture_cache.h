@@ -184,7 +184,11 @@ public:
         return max_entries && compressed <= budget && decoded <= budget - compressed;
     }
 
-    bool copy(const Key &key, std::span<const uint8_t> compressed, std::span<uint8_t> output, uint32_t &result, Observation *observation = nullptr, CopyTiming *timing = nullptr) {
+private:
+    // Consumer runs under the cache lock: CPU-only, no re-entry, no GPU waits,
+    // no retained pointer. Eviction/clear cannot invalidate its pixel span.
+    template <typename Consumer>
+    bool read(const Key &key, std::span<const uint8_t> compressed, size_t output_size, uint32_t &result, Consumer consume, bool hit_only, Observation *observation, CopyTiming *timing) {
         if (timing && !timing->counter)
             timing = nullptr;
         if (timing) {
@@ -194,7 +198,6 @@ public:
         std::lock_guard lock(mutex);
         if (timing)
             timing->locked = timing->counter();
-        ++counts.requests;
         if (observation)
             *observation = {};
         uint64_t rejected_candidates = 0;
@@ -203,19 +206,20 @@ public:
         const auto [begin, end] = lookup.equal_range(key);
         for (auto it = begin; it != end; ++it) {
             auto entry = it->second;
-            if (entry->decoded.size() != output.size() || entry->compressed.size() != compressed.size()
+            if (entry->decoded.size() != output_size || entry->compressed.size() != compressed.size()
                 || !std::equal(compressed.begin(), compressed.end(), entry->compressed.begin())) {
                 if (coverage) {
                     ++rejected_candidates;
                     if (!first_rejected)
                         first_rejected = &*entry;
-                    rejected_flags |= entry->decoded.size() != output.size() || entry->compressed.size() != compressed.size() ? 16u : 8u;
+                    rejected_flags |= entry->decoded.size() != output_size || entry->compressed.size() != compressed.size() ? 16u : 8u;
                 }
                 continue;
             }
             if (timing)
                 timing->validated = timing->counter();
-            std::memcpy(output.data(), entry->decoded.data(), output.size());
+            consume(std::span<const uint8_t>(entry->decoded));
+            ++counts.requests;
             if (timing)
                 timing->copied = timing->counter();
             result = entry->result;
@@ -233,7 +237,7 @@ public:
             if (coverage)
                 coverage->request(key, true, 0);
             if (reuse) {
-                auto &slot = reuse_slot(key, compressed.size(), output.size());
+                auto &slot = reuse_slot(key, compressed.size(), output_size);
                 if (slot.state == ReuseState::Preloaded)
                     ++counts.reuse.preloaded_hits;
                 else
@@ -246,9 +250,15 @@ public:
         }
         if (timing)
             timing->validated = timing->counter();
+        if (hit_only) {
+            if (timing)
+                timing->done = timing->counter();
+            return false; // The normal decoder records this miss exactly once.
+        }
+        ++counts.requests;
         ++counts.misses;
         if (reuse) {
-            auto &slot = reuse_slot(key, compressed.size(), output.size());
+            auto &slot = reuse_slot(key, compressed.size(), output_size);
             const auto classification = slot.state == ReuseState::New ? MissClass::FirstObserved
                 : slot.state == ReuseState::CapacityEvicted           ? MissClass::CapacityEvicted
                 : slot.state == ReuseState::Cleared                   ? MissClass::Cleared
@@ -263,11 +273,35 @@ public:
         if (coverage) {
             Entry missed{ key, {}, {}, 0, 0, 0 };
             missed.trace_id = observation ? observation->coverage.id : coverage->identify(key);
-            missed.trace_bytes = compressed.size() + output.size();
+            missed.trace_bytes = compressed.size() + output_size;
             retention_event(TextureRetentionProfile::Kind::Miss, missed, first_rejected, TextureRetentionProfile::Cause::None, rejected_candidates, rejected_flags);
         }
         if (timing)
             timing->done = timing->counter();
+        return false;
+    }
+
+public:
+    bool copy(const Key &key, std::span<const uint8_t> compressed, std::span<uint8_t> output, uint32_t &result, Observation *observation = nullptr, CopyTiming *timing = nullptr) {
+        return read(key, compressed, output.size(), result, [&](auto pixels) { std::memcpy(output.data(), pixels.data(), pixels.size()); }, false, observation, timing);
+    }
+    template <typename Consumer>
+    bool consume_if_present(const Key &key, std::span<const uint8_t> compressed, size_t output_size, uint32_t &result, Consumer consume, CopyTiming *timing = nullptr) {
+        return read(key, compressed, output_size, result, consume, true, nullptr, timing);
+    }
+    // Inspection is deliberately neutral: prefetch is not a demand/cache hit.
+    template <typename Consumer>
+    bool inspect_if_present(const Key &key, std::span<const uint8_t> compressed, size_t output_size, Consumer inspect) const {
+        std::lock_guard lock(mutex);
+        const auto [begin, end] = lookup.equal_range(key);
+        for (auto it = begin; it != end; ++it) {
+            const auto &entry = *it->second;
+            if (entry.decoded.size() == output_size && entry.compressed.size() == compressed.size()
+                && std::equal(compressed.begin(), compressed.end(), entry.compressed.begin())) {
+                inspect(std::span<const uint8_t>(entry.decoded));
+                return true;
+            }
+        }
         return false;
     }
 

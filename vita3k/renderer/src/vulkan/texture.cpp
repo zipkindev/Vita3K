@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cpu/functions.h>
 #include <renderer/texture_work_profile.h>
+#include <renderer/pvrt-dec.h>
 #include <renderer/vulkan/functions.h>
 
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -681,6 +682,33 @@ static void *add_alpha_channel(const void *pixels, const uint32_t width, const u
     return data.data();
 }
 
+bool VKTextureCache::upload_cached_pvrt(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height,
+    uint32_t mip_index, const void *pixels, int face, uint32_t stride, uint32_t memory_height) {
+    const bool two_bit = base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP || base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP;
+    const bool type = base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP || base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP;
+    const vk::DeviceSize size = vk::DeviceSize(stride) * height * 4;
+    const TextureWorkContext context{ 0, size, width, height, static_cast<uint32_t>(base_format), mip_index, static_cast<uint32_t>(face) };
+    TextureWorkScope direct(TextureWorkKind::CacheDirectUpload, context);
+    const bool hit = pvr::PVRTConsumeCachedPVRTC(pixels, two_bit, stride, memory_height, type, [&] {
+        // Called outside cache protection, after the residency hint. All fence
+        // waits and staging allocations finish before the pixel consumer.
+        if (!is_texture_transfer_ready)
+            prepare_staging_buffer();
+        const auto &staging = staging_buffers[staging_idx];
+        return staging.used_so_far <= staging.buffer.size && size <= staging.buffer.size - staging.used_so_far;
+    }, [&](auto decoded) {
+        auto &staging = staging_buffers[staging_idx];
+        TextureWorkScope copy(TextureWorkKind::StagingCopy, context);
+        std::memcpy(static_cast<uint8_t *>(staging.buffer.mapped_data) + staging.used_so_far, decoded.data(), static_cast<size_t>(size));
+        copy.result(0);
+    });
+    direct.result(hit ? 0 : 1);
+    if (!hit)
+        return false;
+    record_staged_texture(SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8, width, height, mip_index, face > 0 ? face - 1 : face, stride, height, size);
+    return true;
+}
+
 void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height,
     uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride) {
     const renderer::TextureWorkContext work_context{ 0, 0, width, height, static_cast<uint32_t>(base_format), mip_index, static_cast<uint32_t>(face) };
@@ -733,6 +761,14 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
         memcpy(static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + staging_buffer.used_so_far, text_data, upload_size);
         copy.result(0);
     }
+    record_staged_texture(base_format, width, height, mip_index, face, pixels_per_stride, buffer_height, upload_size);
+    backend_upload.result(0);
+}
+
+void VKTextureCache::record_staged_texture(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, uint32_t mip_index, int face, uint32_t pixels_per_stride, uint32_t buffer_height, vk::DeviceSize upload_size) {
+    const TextureWorkContext work_context{ 0, upload_size, width, height, static_cast<uint32_t>(base_format), mip_index, static_cast<uint32_t>(face) };
+    auto &staging_buffer = staging_buffers[staging_idx];
+    auto &image = current_texture->texture;
     renderer::TextureWorkScope commands(renderer::TextureWorkKind::UploadCommands, work_context);
     commands.bytes(0, upload_size);
 
@@ -753,7 +789,6 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
     cmd_buffer.copyBufferToImage(staging_buffer.buffer.buffer, image.image, vk::ImageLayout::eTransferDstOptimal, region);
     staging_buffer.used_so_far += upload_size;
     commands.result(0);
-    backend_upload.result(0);
 }
 
 void VKTextureCache::upload_done() {

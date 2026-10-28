@@ -4,6 +4,7 @@
 #undef NDEBUG
 #endif
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <renderer/decoded_texture_cache.h>
 #include <thread>
@@ -38,6 +39,62 @@ int main() {
     cache.set_budget(16);
     cache.insert(a, input, pixels, 32);
     assert(cache.copy(a, input, output, result) && result == 32);
+    // A validated consumer copies to its final CPU destination without a
+    // temporary pixel buffer; inspection/missed probes do not invent demand.
+    {
+        Cache direct(16, 2);
+        assert(direct.insert(a, input, pixels, 32));
+        const auto before = direct.stats();
+        bool called = false;
+        assert(direct.inspect_if_present(a, input, pixels.size(), [&](auto view) { assert(view.data() && view.size() == pixels.size()); }));
+        assert(direct.stats().requests == before.requests);
+        assert(!direct.consume_if_present(a, changed, pixels.size(), result, [&](auto) { called = true; }));
+        assert(!called && direct.stats().requests == before.requests);
+        assert(direct.consume_if_present(a, input, pixels.size(), result, [&](auto view) {
+            std::copy(view.begin(), view.end(), output.begin());
+            called = true;
+        }));
+        assert(called && result == 32 && std::equal(output.begin(), output.end(), pixels.begin()));
+        assert(direct.stats().hits == 1 && direct.stats().resident_bytes <= 16);
+        direct.clear();
+        assert(!direct.consume_if_present(a, input, pixels.size(), result, [&](auto) { assert(false); }));
+        assert(direct.stats().requests == 1);
+        // A preparation lookup cannot be trusted after a possible staging wait.
+        assert(direct.insert(a, input, pixels, 32));
+        assert(direct.inspect_if_present(a, input, pixels.size(), [](auto) {}));
+        direct.set_budget(0);
+        assert(!direct.consume_if_present(a, input, pixels.size(), result, [&](auto) { assert(false); }));
+    }
+    // Concurrent eviction/clear must not invalidate a consumer's span. The
+    // consumer is CPU-only; the cache lock is released before GPU commands.
+    {
+        Cache guarded(8, 1);
+        assert(guarded.insert(a, input, pixels, 32));
+        std::atomic<bool> entered{ false }, release{ false }, clearing{ false };
+        std::thread consumer([&] {
+            uint32_t used = 0;
+            assert(guarded.consume_if_present(a, input, pixels.size(), used, [&](auto view) {
+                entered.store(true);
+                while (!release.load())
+                    std::this_thread::yield();
+                assert(std::equal(view.begin(), view.end(), pixels.begin()));
+            }));
+        });
+        while (!entered.load())
+            std::this_thread::yield();
+        std::thread evictor([&] {
+            clearing.store(true);
+            guarded.clear();
+            assert(guarded.insert(b, input, other, 64));
+        });
+        while (!clearing.load())
+            std::this_thread::yield();
+        release.store(true);
+        consumer.join();
+        evictor.join();
+        assert(guarded.stats().resident_bytes <= 8);
+        assert(guarded.copy(b, input, output, result) && result == 64);
+    }
     Cache disabled(0);
     assert(!disabled.eligible(1, 1));
     disabled.insert(a, input, pixels, 1);

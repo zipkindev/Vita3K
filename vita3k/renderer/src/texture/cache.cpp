@@ -641,6 +641,7 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
             }
         }
 
+        bool cached_upload = false;
         // perform all needed conversions (formats not supported by modern GPUs)
         switch (base_format) {
         case SCE_GXM_TEXTURE_BASE_FORMAT_P4:
@@ -669,6 +670,12 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
             if (!is_swizzled)
                 LOG_ERROR_ONCE("Unhandled non-swizzled PVRT format, please report it to the developers");
 
+            // The backend's hit consumer copies directly to staging; misses and
+            // texture export retain the existing scratch/decode path.
+            if (!export_textures && upload_cached_pvrt(base_format, width, height, mip_index, pixels, upload_type, pixels_per_stride, memory_height)) {
+                cached_upload = true;
+                break;
+            }
             texture_data_decompressed.resize(pixels_per_stride * memory_height * 4);
             // this actually also unswizzles the texture
             decompress_compressed_texture(base_format, texture_data_decompressed.data(), pixels, pixels_per_stride, memory_height);
@@ -775,7 +782,8 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
             upload_format = get_matching_decompressed_format(base_format);
         }
 
-        upload_texture_impl(upload_format, width, height, mip_index, pixels, upload_type, pixels_per_stride);
+        if (!cached_upload)
+            upload_texture_impl(upload_format, width, height, mip_index, pixels, upload_type, pixels_per_stride);
         if (export_textures)
             export_texture_impl(upload_format, width, height, mip_index, pixels, upload_type, pixels_per_stride);
 

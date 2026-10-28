@@ -27,6 +27,9 @@ enum class TextureWorkKind : uint32_t {
     StagingAllocate,
     StagingCopy,
     UploadCommands,
+    CacheDirectUpload,
+    CachePrefetch,
+    CacheResidency,
     Count
 };
 struct TextureWorkContext {

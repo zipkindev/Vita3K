@@ -49,6 +49,12 @@
 #include <renderer/pvrtc-cache.h>
 #include <renderer/texture_work_profile.h>
 #include <xxhash.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace pvr {
 enum {
@@ -993,6 +999,8 @@ renderer::DecodedTextureCache::Stats PVRTCDecodeCacheStats() {
     return decoded_cache().stats();
 }
 
+static std::atomic<bool> cache_page_preparation{ false };
+
 static renderer::LearnedTextureProfile &texture_profile() {
     static renderer::LearnedTextureProfile profile(decoded_cache());
     return profile;
@@ -1003,6 +1011,8 @@ std::string PVRTCStartTextureProfile(const std::string &root, const std::string 
     const char *text = std::getenv("VITA3K_DIAG_PVRTC_PROFILE_MODE");
     const std::string mode = text && *text ? text : automatic ? "auto"
                                                               : "off";
+    const char *hint = std::getenv("VITA3K_DIAG_TEXTURE_PREFETCH");
+    cache_page_preparation.store((mode == "auto" || mode == "preload") && !(hint && std::strcmp(hint, "0") == 0));
     const char *output = std::getenv("VITA3K_DIAG_PVRTC_PRELOAD_REPORT");
     const auto path = [](const std::string &s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); };
     try {
@@ -1035,6 +1045,7 @@ bool PVRTCClearTextureProfiles(const std::string &root, const std::string &title
 }
 
 std::string PVRTCFinishTextureProfile() {
+    cache_page_preparation.store(false);
     try {
         const auto report = texture_profile().finish();
         return report.status + ", saved=" + std::to_string(report.saved_entries);
@@ -1042,6 +1053,98 @@ std::string PVRTCFinishTextureProfile() {
         texture_profile().fail();
         return "profile save error; prior completed profile preserved";
     }
+}
+
+namespace {
+// Windows-only hint, not a lock/pin or a promise of residency. Fixed per-thread
+// rate and request-size bounds prevent unbounded cache scans or cache growth.
+void prepare_cached_pages(std::span<const uint8_t> pixels, const renderer::TextureWorkContext &context) {
+#ifdef _WIN32
+    if (!cache_page_preparation.load(std::memory_order_relaxed))
+        return;
+    if (pixels.size() < 256u * 1024 || pixels.size() > 8u * 1024 * 1024)
+        return;
+    using Clock = std::chrono::steady_clock;
+    thread_local auto epoch = Clock::now();
+    thread_local size_t requested = 0;
+    const auto now = Clock::now();
+    if (now - epoch >= std::chrono::seconds(1)) {
+        epoch = now;
+        requested = 0;
+    }
+    constexpr size_t limit = 64u * 1024 * 1024;
+    if (pixels.size() > limit - requested)
+        return;
+    requested += pixels.size();
+    struct WorkingSetPage { void *address; ULONG_PTR attributes; };
+    using Query = BOOL(WINAPI *)(HANDLE, void *, DWORD);
+    static const auto query = reinterpret_cast<Query>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32QueryWorkingSetEx"));
+    if (query) {
+        renderer::TextureWorkScope residency(renderer::TextureWorkKind::CacheResidency, context);
+        std::array<WorkingSetPage, 64> pages{};
+        const size_t page_count = (pixels.size() + 4095) / 4096;
+        const size_t samples = std::min(page_count, pages.size());
+        for (size_t n = 0; n < samples; ++n)
+            pages[n].address = const_cast<uint8_t *>(pixels.data()) + (n * page_count / samples) * 4096;
+        if (query(GetCurrentProcess(), pages.data(), static_cast<DWORD>(samples * sizeof(WorkingSetPage)))) {
+            int nonresident = 0;
+            for (size_t n = 0; n < samples; ++n)
+                nonresident += !(pages[n].attributes & 1); // PSAPI_WORKING_SET_EX_BLOCK.Valid
+            residency.result(nonresident);
+        } else {
+            residency.result(-1);
+        }
+    }
+    struct Range { void *address; SIZE_T bytes; };
+    using Prefetch = BOOL(WINAPI *)(HANDLE, ULONG_PTR, Range *, ULONG);
+    static const auto prefetch = reinterpret_cast<Prefetch>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory"));
+    if (prefetch) {
+        renderer::TextureWorkScope hint(renderer::TextureWorkKind::CachePrefetch, context);
+        Range range{ const_cast<uint8_t *>(pixels.data()), pixels.size() };
+        hint.result(prefetch(GetCurrentProcess(), 1, &range, 0) ? 0 : static_cast<int32_t>(GetLastError()));
+    }
+#endif
+}
+} // namespace
+
+bool PVRTConsumeCachedPVRTC(const void *data, uint32_t two_bit, uint32_t width, uint32_t height, uint32_t type,
+    const std::function<bool()> &before_copy, const std::function<void(std::span<const uint8_t>)> &consume) {
+    auto &cache = decoded_cache();
+    const uint64_t w = std::max(width, two_bit ? 16u : 8u), h = std::max(height, 8u);
+    const uint64_t input_bytes = w * h / (two_bit ? 4 : 2), output_bytes = uint64_t(width) * height * 4;
+    if (!width || !height || two_bit > 1 || type > 1 || (w & (w - 1)) || (h & (h - 1))
+        || !cache.eligible(static_cast<size_t>(input_bytes), static_cast<size_t>(output_bytes)))
+        return false;
+    const renderer::TextureWorkContext context{ input_bytes, output_bytes, width, height, two_bit | (type << 1) };
+    std::vector<uint8_t> compressed;
+    renderer::DecodedTextureCache::Key key{};
+    {
+        renderer::TextureWorkScope snapshot(renderer::TextureWorkKind::SourceSnapshotHash, context);
+        const auto *source = static_cast<const uint8_t *>(data);
+        compressed.assign(source, source + static_cast<size_t>(input_bytes));
+        key = { XXH3_64bits(compressed.data(), compressed.size()), width, height, two_bit | (type << 1) };
+        snapshot.result(0);
+    }
+    // Inspection neither changes demand policy nor counts a miss. The fallback
+    // decoder remains the sole miss observer. Revalidate after staging waits.
+    if (!cache.inspect_if_present(key, compressed, static_cast<size_t>(output_bytes), [&](auto pixels) { prepare_cached_pages(pixels, context); }))
+        return false;
+    if (!before_copy())
+        return false;
+    renderer::TextureWorkScope total(renderer::TextureWorkKind::CacheTotal, context);
+    renderer::DecodedTextureCache::CopyTiming timing{ renderer::TextureWorkProfile::counter };
+    uint32_t result = 0;
+    const bool hit = cache.consume_if_present(key, compressed, static_cast<size_t>(output_bytes), result, consume, total.active() ? &timing : nullptr);
+    total.result(0);
+    total.flags(hit ? 1 : 2);
+    if (total.active()) {
+        total.bounds(timing.start, timing.done);
+        total.record(renderer::TextureWorkKind::CacheLockWait, timing.start, timing.locked);
+        total.record(renderer::TextureWorkKind::CacheValidate, timing.locked, timing.validated);
+        // Direct consumer time is StagingCopy, not the removed scratch copy.
+        total.record(renderer::TextureWorkKind::CacheBookkeeping, hit ? timing.copied : timing.validated, timing.done);
+    }
+    return hit;
 }
 
 uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width, uint32_t height, uint32_t type, uint8_t *output) {
