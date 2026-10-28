@@ -162,6 +162,27 @@ experiments. The `.37` Windows build passed 34/34 tests and the same EXE/PDB pai
 was verified on the Legion Go. Killzone Mercenary 1.12 also reached rendered UI
 after its existing license was copied; no gameplay/performance claim follows.
 
+## October 28 queue synchronization preview
+
+The `.38` preview ports mainline b89272d3 queue synchronization to the additional
+Go/Plus submission paths, without changing the .37 texture/pipeline policies.
+A fresh-process Chenghou Rapier four-lap run used the latest .37 learning at
+512 MiB, Vulkan 2×/AF4/Bilinear, automatic preparation/two-way decoding and async
+off. The 120.072-second start-input window includes countdown and uncertain death
+timing near its end; it is not a confirmed uninterrupted gameplay interval.
+
+The 3,601 wholly contained presentation intervals had median 33.3432 ms, p99
+35.2757 ms, p99.9 36.4560 ms and maximum 60.8090 ms; 2 intervals were ≥50 ms and
+none ≥100 ms. Feedback reported no noticeable stutter. Different profiles,
+encounters and capture protocols prevent a controlled .37/.38 speedup claim.
+
+Whole-session exact preparation loaded 191 recipes, prepared 27 and reused 18.
+The specific .37 costly recipe was prepared, but its flags do not show exact
+reuse in this race. Performance captures ran without Vulkan validation; the
+Khronos layer is not installed/registered on the Go yet. Native tests and a
+smooth race do not replace validation-enabled API/synchronization checks.
+[Full settings, provenance and limitations](releases/v1.3.3-win11merge.38.md).
+
 ## Next questions and reproducing results
 
 Useful follow-ups are controlled fresh-process repeats, new tracks/games, profile admission when archives exceed decoded RAM, mixed size/cost/frequency ranking, long sessions near storage/history limits and attribution of the remaining initial JIT gap. An off-by-default bounded compile-only main-thread JIT preparation prototype exists; no independent gameplay gain has been established. Diagnostic read fingerprints alone are not a safe replay-validation scheme. More CPU threads alone do not make arbitrary guest compilation or texture prediction safe.

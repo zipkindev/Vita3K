@@ -2,9 +2,11 @@
 
 Performance and diagnostic development focused on **Windows on the Lenovo Legion Go**, with WipEout 2048 as the primary test workload. The changes use shared emulator paths and automatic per-game learning, so other games with compatible textures can benefit without game-specific profiles or track lists. Benefits depend on the game's actual bottleneck. Steam Deck, ROG Ally and other devices require their own validation.
 
-[Windows .37 prerelease preview](https://github.com/zipkindev/Vita3K-Go/releases/tag/v1.3.3-win11merge.37) · [All downloads](https://github.com/zipkindev/Vita3K-Go/releases) · [Community findings and measurements](docs/performance-findings.md) · [Setup and dependencies](docs/windows-setup.md) · [Using matching symbols](docs/windows-symbols.md)
+[Windows .38 prerelease preview](https://github.com/zipkindev/Vita3K-Go/releases/tag/v1.3.3-win11merge.38) · [All downloads](https://github.com/zipkindev/Vita3K-Go/releases) · [Community findings and measurements](docs/performance-findings.md) · [Setup and dependencies](docs/windows-setup.md) · [Using matching symbols](docs/windows-symbols.md)
 
-**Windows x64 downloads:** [Runtime ZIP](https://github.com/zipkindev/Vita3K-Go/releases/download/v1.3.3-win11merge.37/Vita3K-v1.3.3-win11merge.37-runtime.zip) · [Matching symbols ZIP](https://github.com/zipkindev/Vita3K-Go/releases/download/v1.3.3-win11merge.37/Vita3K-v1.3.3-win11merge.37-diagnostics.zip) · [Checksums](https://github.com/zipkindev/Vita3K-Go/releases/download/v1.3.3-win11merge.37/SHA256SUMS). [Changes and remaining limits](docs/releases/v1.3.3-win11merge.37.md).
+**Windows x64 downloads:** [Runtime ZIP](https://github.com/zipkindev/Vita3K-Go/releases/download/v1.3.3-win11merge.38/Vita3K-v1.3.3-win11merge.38-runtime.zip) · [Matching symbols ZIP](https://github.com/zipkindev/Vita3K-Go/releases/download/v1.3.3-win11merge.38/Vita3K-v1.3.3-win11merge.38-diagnostics.zip) · [Checksums](https://github.com/zipkindev/Vita3K-Go/releases/download/v1.3.3-win11merge.38/SHA256SUMS). [Changes and remaining limits](docs/releases/v1.3.3-win11merge.38.md).
+
+The `.38` preview adds mainline Vulkan queue synchronization to the existing texture and pipeline work. A fresh-process Chenghou Rapier capture recorded median **33.34 ms**, p99 **35.28 ms**, maximum **60.81 ms** and no intervals ≥100 ms. The start-to-stop window includes the countdown; a death was reported near the end with uncertain boundary. This is a promising compatibility/performance observation, **not a controlled .37/.38 speedup or completed Vulkan validation pass**. See [the .38 notes](docs/releases/v1.3.3-win11merge.38.md).
 
 ## Credits and source origins
 
