@@ -508,6 +508,13 @@ void VKSurfaceCache::cleanup() {
             info.reinterpret_store_view = nullptr;
         }
 
+        if (info.linear_storage_view) {
+            state.device.destroy(info.linear_storage_view);
+            info.linear_storage_view = nullptr;
+        }
+        if (info.raw_image)
+            info.raw_image->destroy();
+
         if (info.blit_image)
             info.blit_image->destroy();
         if (info.copy_buffer)

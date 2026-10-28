@@ -179,7 +179,9 @@ VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &p
     base_width = width;
     base_height = height;
 
-    vk::ImageUsageFlags color_usage = vk::ImageUsageFlagBits::eColorAttachment;
+    // The standard render pass declares this fallback image as an input
+    // attachment even when the interlock path can also use it as storage.
+    vk::ImageUsageFlags color_usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eInputAttachment;
     if (state.features.support_shader_interlock)
         color_usage |= vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eStorage;
     else
