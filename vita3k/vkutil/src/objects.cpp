@@ -81,10 +81,26 @@ Image::~Image() {
     destroy();
 }
 
+vk::ImageViewUsageCreateInfo Image::view_usage(vk::Format view_format) const {
+    auto view_usage = usage;
+    // The sRGB view is for sampling/rendering. Storage access uses a compatible
+    // linear view; inheriting STORAGE here requires unsupported sRGB features.
+    if (view_format == vk::Format::eR8G8B8A8Srgb || view_format == vk::Format::eB8G8R8A8Srgb)
+        view_usage &= ~vk::ImageUsageFlagBits::eStorage;
+    return vk::ImageViewUsageCreateInfo{ .usage = view_usage };
+}
+
 void Image::init_image(vk::ImageUsageFlags usage, vk::ComponentMapping mapping, const vk::ImageCreateFlags image_create_flags, const void *pNext) {
+    this->usage = usage;
+    auto flags = image_create_flags;
+    if ((format == vk::Format::eR8G8B8A8Srgb || format == vk::Format::eB8G8R8A8Srgb)
+        && (usage & vk::ImageUsageFlagBits::eStorage) && (flags & vk::ImageCreateFlagBits::eMutableFormat)) {
+        // A compatible linear view provides STORAGE support for this mutable image.
+        flags |= vk::ImageCreateFlagBits::eExtendedUsage;
+    }
     vk::ImageCreateInfo image_info{
         .pNext = pNext,
-        .flags = image_create_flags,
+        .flags = flags,
         .imageType = vk::ImageType::e2D,
         .format = format,
         .extent = vk::Extent3D{
@@ -116,7 +132,9 @@ void Image::init_image(vk::ImageUsageFlags usage, vk::ComponentMapping mapping, 
         range = vkutil::color_subresource_range;
     }
 
+    const auto intended_usage = view_usage(format);
     vk::ImageViewCreateInfo view_info{
+        .pNext = &intended_usage,
         .image = image,
         .viewType = vk::ImageViewType::e2D,
         .format = format,

@@ -809,7 +809,9 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
             } else {
                 // using both srgb/linear
                 if (!info.alternate_view) {
+                    const auto intended_usage = info.texture.view_usage(vk_format);
                     vk::ImageViewCreateInfo view_info{
+                        .pNext = &intended_usage,
                         .image = info.texture.image,
                         .viewType = vk::ImageViewType::e2D,
                         .format = vk_format,
@@ -1125,7 +1127,9 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         if (!info.alternate_view) {
             vk::ComponentMapping resulting_mapping = vkutil::color_to_texture_swizzle(info.swizzle, swizzle);
 
+            const auto intended_usage = info.texture.view_usage(vk_format);
             vk::ImageViewCreateInfo view_info{
+                .pNext = &intended_usage,
                 .image = info.texture.image,
                 .viewType = vk::ImageViewType::e2D,
                 .format = vk_format,
@@ -1276,7 +1280,9 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             }
 
             if (casted_is_rgba8) {
+                const auto intended_usage = casted->texture.view_usage((casted->texture.format == vk::Format::eR8G8B8A8Srgb) ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR8G8B8A8Srgb);
                 vk::ImageViewCreateInfo alt_view_info{
+                    .pNext = &intended_usage,
                     .image = casted->texture.image,
                     .viewType = vk::ImageViewType::e2D,
                     .format = (casted->texture.format == vk::Format::eR8G8B8A8Srgb) ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR8G8B8A8Srgb,
@@ -1551,7 +1557,9 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         if (!info.alternate_view) {
             vk::ComponentMapping resulting_mapping = vkutil::color_to_texture_swizzle(info.swizzle, swizzle);
 
+            const auto intended_usage = info.texture.view_usage(vk_format);
             vk::ImageViewCreateInfo view_info{
+                .pNext = &intended_usage,
                 .image = info.texture.image,
                 .viewType = vk::ImageViewType::e2D,
                 .format = vk_format,
@@ -2458,7 +2466,9 @@ vk::ImageView VKSurfaceCache::color_storage_view(ColorSurfaceCacheInfo &info) {
 
     if (!info.linear_storage_view) {
         // a storage image must use an identity component mapping, which is what the surface view uses too
+        const auto intended_usage = info.texture.view_usage(vk::Format::eR8G8B8A8Unorm);
         const vk::ImageViewCreateInfo view_info{
+            .pNext = &intended_usage,
             .image = info.texture.image,
             .viewType = vk::ImageViewType::e2D,
             .format = vk::Format::eR8G8B8A8Unorm,
@@ -3410,7 +3420,9 @@ vk::ImageView VKSurfaceCache::sourcing_color_surface_for_presentation(Ptr<const 
 
             if (!info.alternate_view) {
                 // create a view with the right swizzle and without gamma correction
+                const auto intended_usage = info.texture.view_usage(vk::Format::eR8G8B8A8Unorm);
                 vk::ImageViewCreateInfo view_info{
+                    .pNext = &intended_usage,
                     .image = info.texture.image,
                     .viewType = vk::ImageViewType::e2D,
                     .format = vk::Format::eR8G8B8A8Unorm,

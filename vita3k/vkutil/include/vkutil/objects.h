@@ -30,6 +30,7 @@ struct Image {
     vma::Allocation allocation;
     vk::Image image{};
     vk::ImageView view{};
+    vk::ImageUsageFlags usage{};
     vk::Sampler sampler{};
 
     uint32_t width;
@@ -53,6 +54,7 @@ struct Image {
     Image &operator=(Image const &) = delete;
 
     void init_image(vk::ImageUsageFlags usage, vk::ComponentMapping mapping = default_comp_mapping, const vk::ImageCreateFlags image_create_flags = vk::ImageCreateFlags(), const void *pNext = nullptr);
+    vk::ImageViewUsageCreateInfo view_usage(vk::Format view_format) const;
     // called by ~Image
     void destroy();
 
