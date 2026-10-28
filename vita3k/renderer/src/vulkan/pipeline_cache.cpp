@@ -1046,9 +1046,11 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool depth
     dependencies[1] = {
         .srcSubpass = VK_SUBPASS_EXTERNAL,
         .dstSubpass = 0,
-        .srcStageMask = vk::PipelineStageFlagBits::eFragmentShader,
+        // Surface readback can blit the attachment before the next scene.
+        // Include that transfer read in the dependency before rendering writes it.
+        .srcStageMask = vk::PipelineStageFlagBits::eFragmentShader | vk::PipelineStageFlagBits::eTransfer,
         .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eLateFragmentTests,
-        .srcAccessMask = vk::AccessFlagBits::eShaderRead,
+        .srcAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eTransferRead,
         .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite
     };
 

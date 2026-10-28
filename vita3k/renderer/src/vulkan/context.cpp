@@ -525,15 +525,17 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
         rendered_rect_y1 = std::max(rendered_rect_y1, area.offset.y + static_cast<int32_t>(area.extent.height));
     }
 
-    // only the depth-stencil attachment may be clear if not force loaded. It can sit at attachment index 1 or 2 (raw u16 attachment present) so provide the value at both
+    // The normal pass has color, optional raw color, then depth/stencil.
+    // Supply a clear value through the actual depth index, not past the last attachment.
     std::array<vk::ClearValue, 3> curr_clear_values{};
     const vk::ClearDepthStencilValue ds_clear{
         .depth = record.depth_stencil_surface.background_depth,
         .stencil = record.depth_stencil_surface.stencil
     };
-    curr_clear_values[1].depthStencil = ds_clear;
-    curr_clear_values[2].depthStencil = ds_clear;
+    const uint32_t depth_attachment = current_color_raw_image ? 2U : 1U;
+    curr_clear_values[depth_attachment].depthStencil = ds_clear;
     curr_renderpass_info.setClearValues(curr_clear_values);
+    curr_renderpass_info.clearValueCount = depth_attachment + 1;
     render_cmd.beginRenderPass(curr_renderpass_info, vk::SubpassContents::eInline);
 
     // set the renderpass info ready in case we need to switch between classic and framebuffer fetch usage

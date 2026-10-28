@@ -3129,6 +3129,26 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         copy.imageExtent = { sync_w, sync_h, 1 };
     }
 
+    // Different scenes (and immediate readbacks) can write overlapping guest
+    // memory through the same mapped buffer. Queue submission order alone does
+    // not order transfer writes. Cover this surface's destination span without
+    // stalling unrelated resources or waiting for the queue/device to become idle.
+    const vk::DeviceSize writeback_bytes = needs_copy_buffer
+        ? last_written_surface->copy_buffer->size
+        : (tiled_layout
+                  ? static_cast<vk::DeviceSize>(align(last_written_surface->original_width, 32)) * align(last_written_surface->original_height, 32) * vk::blockSize(sync_format)
+                  : static_cast<vk::DeviceSize>(pixel_stride) * last_written_surface->original_height * vk::blockSize(sync_format));
+    const vk::BufferMemoryBarrier destination_barrier{
+        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+        .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = buffer,
+        .offset = offset,
+        .size = writeback_bytes
+    };
+    cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, {}, destination_barrier, {});
+
     if (tiled_layout) {
         // tiled memory holds 32x32 tiles one after another so every tile is copied straight into its own place
         const uint32_t texel_bytes = static_cast<uint32_t>(vk::blockSize(sync_format));
