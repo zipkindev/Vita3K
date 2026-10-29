@@ -3,6 +3,7 @@
 #pragma once
 #include <renderer/exact_pipeline_recipes.h>
 #include <deque>
+#include <map>
 #include <unordered_set>
 
 namespace renderer {
@@ -18,7 +19,7 @@ public:
     };
     static constexpr size_t limit = 64, pair_limit = 8, drawn_limit = 4096;
     uint64_t generation() const { return revision; }
-    void clear() { states.clear(); drawn_keys.clear(); drawn_order.clear(); revision = 0; }
+    void clear() { states.clear(); drawn_keys.clear(); drawn_order.clear(); stages.clear(); revision = 0; }
     size_t size() const { return states.size(); }
     void observe(const ExactPipelineRecipe &recipe, Pass pass, bool interlock) {
         // Mirrors the render cache's pipeline-key identity. Remember more drawn keys
@@ -33,6 +34,19 @@ public:
         const auto same = [&](const auto &e) { return e.interlock == interlock && e.recipe == recipe; };
         const auto old = std::find_if(states.begin(), states.end(), same);
         const uint64_t state_revision = old == states.end() ? ++revision : old->revision;
+        if (old == states.end()) {
+            // Forgetting a template isn't positive progress. Restoring one is:
+            // a deferred pair may never have tried it while it was available.
+            // Completed candidate knowledge is kept separately by the worker.
+            for (const auto *hash : { &recipe.vertex, &recipe.fragment }) {
+                const auto stage = std::pair{*hash, interlock};
+                if (!stages.contains(stage) && stages.size() == 2 * drawn_limit) {
+                    const auto oldest = std::min_element(stages.begin(), stages.end(), [](const auto &a, const auto &b) { return a.second < b.second; });
+                    stages.erase(oldest);
+                }
+                stages[stage] = revision;
+            }
+        }
         std::erase_if(states, same);
         // Preserve different shader associations for identical fixed state. Bound each
         // pair as well as total history so a busy effect cannot consume every slot.
@@ -50,9 +64,11 @@ public:
     }
     uint64_t relevant_generation(const std::array<uint8_t, 32> &vertex, const std::array<uint8_t, 32> &fragment, bool interlock = false) const {
         uint64_t result = 0;
-        for (const auto &e : states)
-            if (e.interlock == interlock && (e.recipe.vertex == vertex || e.recipe.fragment == fragment))
-                result = std::max(result, e.revision);
+        for (const auto *hash : { &vertex, &fragment }) {
+            const auto found = stages.find({*hash, interlock});
+            if (found != stages.end())
+                result = std::max(result, found->second);
+        }
         return result;
     }
     auto candidates(const std::array<uint8_t, 32> &vertex, const std::array<uint8_t, 32> &fragment, bool interlock) const {
@@ -70,5 +86,6 @@ private:
     uint64_t revision = 0;
     std::unordered_set<uint64_t> drawn_keys;
     std::deque<uint64_t> drawn_order;
+    std::map<std::pair<std::array<uint8_t, 32>, bool>, uint64_t> stages;
 };
 } // namespace renderer

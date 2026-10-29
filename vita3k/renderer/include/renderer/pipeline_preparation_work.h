@@ -2,14 +2,38 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <renderer/pipeline_recovery_policy.h>
+#include <renderer/exact_pipeline_recipes.h>
 #include <array>
 #include <cstddef>
 #include <iterator>
 #include <list>
 #include <map>
 #include <unordered_map>
+#include <deque>
 
 namespace renderer {
+// Successful speculative creation is knowledge, even after its unused object
+// is reclaimed. Only suppress another prediction; required draws still compile
+// or reuse normally. Full identities avoid conflating different fixed states.
+class PipelineCompletedPredictions {
+    std::map<ExactPipelineRecipe, bool> entries;
+    std::deque<decltype(entries)::iterator> order;
+public:
+    static constexpr size_t limit = 2048;
+    uint64_t evictions = 0;
+    bool contains(const ExactPipelineRecipe &recipe) const { return entries.contains(recipe); }
+    void complete(const ExactPipelineRecipe &recipe) {
+        if (entries.contains(recipe)) return;
+        if (entries.size() == limit) {
+            entries.erase(order.front());
+            order.pop_front();
+            ++evictions;
+        }
+        order.push_back(entries.emplace(recipe, true).first);
+    }
+    size_t size() const { return entries.size(); }
+    void clear() { order.clear(); entries.clear(); evictions = 0; }
+};
 // Compact negative decisions outlive heavyweight queue owners. Caller locks.
 class PipelineRecoveryCache {
     struct Entry { PipelineRecoveryPolicy policy; std::list<uint64_t>::iterator position; };

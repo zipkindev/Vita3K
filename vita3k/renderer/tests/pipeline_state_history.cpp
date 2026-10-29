@@ -53,6 +53,23 @@ int main() {
     assert(!h.observed(a) && h.observed(b)); // key history is independently bounded
     h.clear(); assert(h.size() == 0 && h.generation() == 0);
     h.observe(a, 1, false);
+    const auto available = h.relevant_generation(a.vertex, a.fragment);
+    for (unsigned i = 0; i < 65; ++i) {
+        auto different = b; different.vertex = {}; different.fragment = {};
+        different.vertex[0] = 50; different.vertex[1] = i;
+        different.fragment[0] = 51; different.fragment[1] = i;
+        different.pipeline_key = 60000 + i;
+        h.observe(different, i, false);
+    }
+    assert(h.candidates(a.vertex, a.fragment, false).empty());
+    assert(h.relevant_generation(a.vertex, a.fragment) == available); // template loss isn't new work
+    h.observe(a, 2, false);
+    assert(h.relevant_generation(a.vertex, a.fragment) > available); // a returning candidate can unblock an untried pair
+    auto restored = h.relevant_generation(a.vertex, a.fragment);
+    h.observe(a, 3, false);
+    assert(h.relevant_generation(a.vertex, a.fragment) == restored);
+    h.clear();
+    h.observe(a, 1, false);
     const auto relevant = h.relevant_generation(a.vertex, a.fragment);
     assert(relevant != 0);
     unsigned changes = 0;
@@ -69,6 +86,6 @@ int main() {
         previous = g;
         assert(h.candidates(a.vertex, a.fragment, false).size() <= 1);
     }
-    assert(changes == 1 && previous == 0); // only the actual related-state eviction changes it
+    assert(changes == 1 && previous == 0); // only bounded dependency-registry eviction changes it
 
 }

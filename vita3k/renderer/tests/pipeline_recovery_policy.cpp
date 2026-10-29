@@ -9,11 +9,11 @@ int main() {
     renderer::PipelineRecoveryPolicy p;
     p.complete(100, 1, 1, 1024); // no related state: don't poll or spin
     assert(!p.eligible(10000000000ULL, 1, 1));
-    assert(!p.eligible(101, 2, 1)); // new knowledge must not bypass the cooldown
+    assert(p.eligible(101, 2, 1)); // new knowledge is not a retry of unchanged pressure
     assert(p.eligible(p.retry_at, 2, 1));
     p.complete(101, 2, 1, 256); // exact object already owned
     assert(!p.eligible(10000000000ULL, 2, 1));
-    assert(!p.eligible(102, 2, 2));
+    assert(p.eligible(102, 2, 2));
     assert(p.eligible(p.retry_at, 2, 2));
     p.complete(102, 2, 2, 512); // temporary busy pressure
     assert(!p.eligible(101, 2, 2)); // clock regression must not bypass backoff
@@ -29,6 +29,7 @@ int main() {
     }
     p.complete(now, 3, 3, 32);
     assert(!p.eligible(now + 10000000000ULL, 3, 3)); // ready stays quiet
-    assert(!p.eligible(now + 1, 4, 3));
-    assert(p.eligible(p.retry_at, 4, 3)); // new scenes recover after bounded backoff
+    assert(p.eligible(now + 1, 4, 3));
+    assert(p.eligible(p.retry_at, 4, 3)); // new scenes recover on dependency progress
+    assert(!p.eligible(now + 10000000000ULL, 2, 2)); // forgetting is not progress
 }

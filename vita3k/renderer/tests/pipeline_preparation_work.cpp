@@ -11,12 +11,13 @@ int main() {
     cache.complete(7, 100, 1, 1, 1024);
     // Recreating or evicting a queue owner does not reset this compact decision.
     for (unsigned i = 0; i < 10000; ++i)
-        assert(!cache.eligible(7, 101 + i, 1 + i, 1));
+        assert(!cache.eligible(7, 101 + i, 1, 1));
+    assert(cache.eligible(7, 101, 2, 1)); // a new dependency can proceed before cooldown
     assert(cache.eligible(7, 250000100, 2, 1));
     assert(!cache.eligible(7, 10000000000ULL, 1, 1));
     for (unsigned i = 0; i < 1000; ++i)
         cache.complete(100 + i, i, 1, 1, 256);
-    assert(!cache.eligible(7, 200, 2, 2));
+    assert(cache.eligible(7, 200, 2, 2));
     for (unsigned i = 0; i < 10000; ++i) {
         cache.complete(10000 + i, i, 1, 1, 1024);
         assert(cache.size() <= cache.limit);
@@ -69,4 +70,22 @@ int main() {
         ready.ready(unrelated); assert(ready.size() <= ready.limit);
     }
     ready.clear(); assert(ready.size() == 0);
+    PipelineCompletedPredictions completed;
+    ExactPipelineRecipe recipe; recipe.pipeline_key = 42;
+    completed.complete(recipe);
+    for (unsigned i = 0; i < 10000; ++i) {
+        assert(completed.contains(recipe)); // unused object reclamation doesn't forget completed work
+        completed.complete(recipe);
+    }
+    assert(completed.size() == 1);
+    auto other = recipe; other.words[7] = 1;
+    assert(!completed.contains(other)); // don't conflate states with the same opaque key
+    completed.complete(other);
+    for (unsigned i = 0; i < completed.limit; ++i) {
+        other.pipeline_key = 1000 + i;
+        completed.complete(other);
+        assert(completed.size() <= completed.limit);
+    }
+    assert(!completed.contains(recipe) && completed.evictions == 2);
+    completed.clear(); assert(completed.size() == 0 && completed.evictions == 0);
 }

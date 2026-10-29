@@ -12,13 +12,15 @@ struct PipelineRecoveryPolicy {
     uint64_t history = 0, registry = 0, retry_at = 0;
     uint32_t outcome = 0, attempts = 0;
     bool eligible(uint64_t now, uint64_t h, uint64_t r) const {
-        return now >= retry_at && (h != history || r != registry || (outcome & transient));
+        // Positive dependency progress is not a retry of unchanged pressure. A
+        // bounded registry forgetting an entry must not count as new knowledge.
+        return h > history || r > registry || (now >= retry_at && (outcome & transient));
     }
     void complete(uint64_t now, uint64_t h, uint64_t r, uint32_t result) {
-        if (h != history || r != registry)
+        if (h > history || r > registry)
             attempts = 0;
-        history = h;
-        registry = r;
+        history = std::max(history, h);
+        registry = std::max(registry, r);
         outcome = result;
         attempts = std::min<uint32_t>(attempts + 1, 4);
         retry_at = now + (250000000ULL << (attempts - 1));

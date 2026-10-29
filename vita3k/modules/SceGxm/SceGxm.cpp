@@ -1078,7 +1078,8 @@ struct SceGxmContext {
             return;
         early_vertex = vertex;
         early_fragment = fragment;
-        util::PipelineScope early(util::PipelineKind::EarlyPair);
+        // The renderer aggregates unchanged notifications; timing every pair
+        // switch would add millions of observer events in a long session.
         renderer::warm_pipeline(renderer_state, vertex, fragment, true);
     }
 

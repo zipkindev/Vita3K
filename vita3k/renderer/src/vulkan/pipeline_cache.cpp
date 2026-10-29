@@ -712,6 +712,7 @@ void PipelineCache::cleanup() {
             LOG_INFO("[PIPECOVER] pair variant={} pair={} queued_qpc={} completed_qpc={} outcome={} first_queued_qpc={} outcomes={} attempts={} sources={}", variant, row.pair, row.queued_qpc, row.completed_qpc, row.outcome, row.first_queued_qpc, row.outcomes, row.attempts, row.sources);
         LOG_INFO("[PIPERECOVERY] requeued={} evicted={} history_limit={} deferred_limit={}", recovery_requeued, recovery_evicted, decltype(warm_state_history)::limit, warm_pending_limit);
         LOG_INFO("[PIPEWORK] attempts={} suppressed={} decisions={} decision_evictions={} learned_predictions={} attempt_burst={} refill_ns={} scan_limit={}", recovery_attempts, recovery_suppressed, recovery_decisions.size(), recovery_decisions.evictions, recovery_learned, PipelinePreparationWorkBudget::burst, PipelinePreparationWorkBudget::interval_ns, PipelinePreparationWorkBudget::scan_limit);
+        LOG_INFO("[PIPEPROGRESS] pair_calls={} unchanged_suppressed={} completed_candidates={} completed_skips={} completed_evictions={} generation={}", early_pair_calls, early_pair_suppressed, completed_predictions.size(), completed_prediction_skips, completed_predictions.evictions, warm_progress_generation);
         exact_coverage.clear();
         pair_coverage.clear();
         LOG_INFO("[PIPEEXACT] session recipes={} queued={} prepared={} reused={} draw_claimed={}",
@@ -736,6 +737,8 @@ void PipelineCache::cleanup() {
         recovery_requeued = recovery_evicted = recovery_cursor = 0;
         warm_shader_readiness.clear();
         recovery_decisions.clear();
+        completed_predictions.clear();
+        warm_progress_generation = early_pair_calls = early_pair_suppressed = completed_prediction_skips = 0;
         preparation_work_budget = {};
         recovery_suppressed = recovery_attempts = recovery_learned = 0;
         warm_state_history.clear();
@@ -2170,8 +2173,12 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     if (recipe && warm_enabled) {
         const bool interlock = state.features.support_shader_interlock && fragment_program_binding->program()->is_frag_color_used();
         std::lock_guard<std::mutex> guard(warm_mutex);
+        const auto before = warm_state_history.generation();
         warm_state_history.observe(*recipe, interlock ? context.current_shader_interlock_pass : context.current_render_pass, interlock);
-        warm_work_ready.notify_all();
+        if (warm_state_history.generation() != before) {
+            ++warm_progress_generation;
+            warm_work_ready.notify_all();
+        }
     }
     if (recipe && (it == pipelines.end() || it->second == nullptr)) {
         if (auto prepared = reuse_exact_pipeline(*recipe)) {
@@ -2465,6 +2472,11 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
         const uint64_t identity = warm_pair_key(vertex->vertex_program->hash, fragment->fragment_program->hash, fragment->fragment_program->output_register_format);
         const uint64_t variant = identity ^ std::rotl(vertex->key_hash, 17) ^ std::rotl(static_cast<const VKFragmentProgram &>(*fragment->fragment_program).blending_hash, 31);
         const bool first_binding = early_pairs.observe(variant, vertex, fragment);
+        ++early_pair_calls;
+        if (!early_pairs.notify(variant, warm_progress_generation) && early_pairs.size() < PipelineBindingEpochs<ProgramBinding>::limit) {
+            ++early_pair_suppressed;
+            return;
+        }
         // A full epoch cache must not suppress registration in later levels.
         register_bindings = first_binding || early_pairs.size() >= PipelineBindingEpochs<ProgramBinding>::limit;
         if (first_binding && early_pairs.size() <= 128)
@@ -2528,6 +2540,7 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
 void PipelineCache::note_shader_ready(const Sha256Hash &base_hash) {
     std::lock_guard<std::mutex> guard(warm_mutex);
     warm_shader_readiness.ready(base_hash);
+    ++warm_progress_generation;
     warm_work_ready.notify_all();
 }
 
@@ -2561,10 +2574,13 @@ void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &verte
     }
     const auto parked = deferred_pair_requests.find(request_key);
     if (parked != deferred_pair_requests.end()) {
+        const bool upgraded = actual_pair && !parked->second->actual_pair;
         parked->second->actual_pair |= actual_pair;
         parked->second->sources |= actual_pair ? 2u : 1u;
-        // The worker reopens this request on new knowledge or recovered capacity.
-        warm_work_ready.notify_all();
+        // Knowledge publication already wakes the workers; repeated bindings do
+        // not. Timed recovery and actual upgrades still make forward progress.
+        if (upgraded)
+            warm_work_ready.notify_all();
         return;
     }
     if (warm_pairs_requested.contains(request_key)) {
@@ -2729,6 +2745,9 @@ void PipelineCache::warm_thread(MemState &mem) {
                     request = nullptr;
                 }
             }
+            // A previously dropped notification can now enter a saturated queue.
+            if (warm_pending == warm_pending_limit)
+                ++warm_progress_generation;
             --warm_pending;
             --warm_running;
             schedule_exact_locked();
@@ -2810,7 +2829,8 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
     // Outcome bits: drawn=1, missing vertex=2, missing fragment=4,
     // no observed state=8, compile failed=16, prepared=32, exception=64,
     // admission unavailable=128, exact owner=256, render busy=512,
-    // unrelated state=1024, invalid recipe=2048, stopped=4096, candidate-probe bound=8192.
+    // unrelated state=1024, invalid recipe=2048, stopped=4096, candidate-probe bound=8192,
+    // completed prediction=16384 (object reclamation must not restart speculation).
     outcome = 0;
     util::PipelineScope total(util::PipelineKind::WarmTotal, { 0, request.pair_key, request.actual_pair ? 1u : 0u });
     const ProgramBinding &vertex_binding = *request.vertex;
@@ -2890,6 +2910,11 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
                 outcome |= 1;
                 continue;
             }
+            if (completed_predictions.contains(recipe)) {
+                ++completed_prediction_skips;
+                outcome |= 16384;
+                continue;
+            }
         }
         shader::Hints hints{};
         hints.attributes = &vertex_binding.attributes;
@@ -2922,6 +2947,11 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
             // Actual draw states are never guessed as new predictions for themselves.
             if (warm_state_history.observed(recipe)) {
                 outcome |= 1;
+                continue;
+            }
+            if (completed_predictions.contains(recipe)) {
+                ++completed_prediction_skips;
+                outcome |= 16384;
                 continue;
             }
             const auto now = pipeline_clock_ns();
@@ -3191,6 +3221,8 @@ bool PipelineCache::warm_exact_pipeline(const WarmRequest &request, MemState &me
         job->pipeline = pipeline;
         if (pipeline)
             ++exact_prepared_count;
+        if (pipeline && job->predicted)
+            completed_predictions.complete(job->recipe);
         job->status = pipeline ? ExactWarmJob::Ready : ExactWarmJob::Failed;
         job->completed_ns = pipeline_clock_ns();
         note_exact_coverage_locked(job->recipe.pipeline_key, request.pair_key, pipeline ? Prepared : Failed);

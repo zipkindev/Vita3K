@@ -234,7 +234,9 @@ private:
     PipelineBindingEpochs<ProgramBinding> early_pairs;
     PipelineStageReadiness warm_shader_readiness;
     PipelineRecoveryCache recovery_decisions;
+    PipelineCompletedPredictions completed_predictions;
     PipelinePreparationWorkBudget preparation_work_budget;
+    uint64_t warm_progress_generation = 0, early_pair_calls = 0, early_pair_suppressed = 0, completed_prediction_skips = 0;
     uint64_t recovery_suppressed = 0, recovery_attempts = 0, recovery_learned = 0;
     void note_shader_ready(const Sha256Hash &base_hash);
     uint64_t knowledge_generation_locked(const WarmRequest &request) const;
