@@ -999,8 +999,6 @@ renderer::DecodedTextureCache::Stats PVRTCDecodeCacheStats() {
     return decoded_cache().stats();
 }
 
-static std::atomic<bool> cache_page_preparation{ false };
-
 static renderer::LearnedTextureProfile &texture_profile() {
     static renderer::LearnedTextureProfile profile(decoded_cache());
     return profile;
@@ -1011,8 +1009,6 @@ std::string PVRTCStartTextureProfile(const std::string &root, const std::string 
     const char *text = std::getenv("VITA3K_DIAG_PVRTC_PROFILE_MODE");
     const std::string mode = text && *text ? text : automatic ? "auto"
                                                               : "off";
-    const char *hint = std::getenv("VITA3K_DIAG_TEXTURE_PREFETCH");
-    cache_page_preparation.store((mode == "auto" || mode == "preload") && !(hint && std::strcmp(hint, "0") == 0));
     const char *output = std::getenv("VITA3K_DIAG_PVRTC_PRELOAD_REPORT");
     const auto path = [](const std::string &s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); };
     try {
@@ -1045,7 +1041,6 @@ bool PVRTCClearTextureProfiles(const std::string &root, const std::string &title
 }
 
 std::string PVRTCFinishTextureProfile() {
-    cache_page_preparation.store(false);
     try {
         const auto report = texture_profile().finish();
         return report.status + ", saved=" + std::to_string(report.saved_entries);
@@ -1054,58 +1049,6 @@ std::string PVRTCFinishTextureProfile() {
         return "profile save error; prior completed profile preserved";
     }
 }
-
-namespace {
-// Windows-only hint, not a lock/pin or a promise of residency. Fixed per-thread
-// rate and request-size bounds prevent unbounded cache scans or cache growth.
-void prepare_cached_pages(std::span<const uint8_t> pixels, const renderer::TextureWorkContext &context) {
-#ifdef _WIN32
-    if (!cache_page_preparation.load(std::memory_order_relaxed))
-        return;
-    if (pixels.size() < 256u * 1024 || pixels.size() > 8u * 1024 * 1024)
-        return;
-    using Clock = std::chrono::steady_clock;
-    thread_local auto epoch = Clock::now();
-    thread_local size_t requested = 0;
-    const auto now = Clock::now();
-    if (now - epoch >= std::chrono::seconds(1)) {
-        epoch = now;
-        requested = 0;
-    }
-    constexpr size_t limit = 64u * 1024 * 1024;
-    if (pixels.size() > limit - requested)
-        return;
-    requested += pixels.size();
-    struct WorkingSetPage { void *address; ULONG_PTR attributes; };
-    using Query = BOOL(WINAPI *)(HANDLE, void *, DWORD);
-    static const auto query = reinterpret_cast<Query>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32QueryWorkingSetEx"));
-    if (query) {
-        renderer::TextureWorkScope residency(renderer::TextureWorkKind::CacheResidency, context);
-        std::array<WorkingSetPage, 64> pages{};
-        const size_t page_count = (pixels.size() + 4095) / 4096;
-        const size_t samples = std::min(page_count, pages.size());
-        for (size_t n = 0; n < samples; ++n)
-            pages[n].address = const_cast<uint8_t *>(pixels.data()) + (n * page_count / samples) * 4096;
-        if (query(GetCurrentProcess(), pages.data(), static_cast<DWORD>(samples * sizeof(WorkingSetPage)))) {
-            int nonresident = 0;
-            for (size_t n = 0; n < samples; ++n)
-                nonresident += !(pages[n].attributes & 1); // PSAPI_WORKING_SET_EX_BLOCK.Valid
-            residency.result(nonresident);
-        } else {
-            residency.result(-1);
-        }
-    }
-    struct Range { void *address; SIZE_T bytes; };
-    using Prefetch = BOOL(WINAPI *)(HANDLE, ULONG_PTR, Range *, ULONG);
-    static const auto prefetch = reinterpret_cast<Prefetch>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory"));
-    if (prefetch) {
-        renderer::TextureWorkScope hint(renderer::TextureWorkKind::CachePrefetch, context);
-        Range range{ const_cast<uint8_t *>(pixels.data()), pixels.size() };
-        hint.result(prefetch(GetCurrentProcess(), 1, &range, 0) ? 0 : static_cast<int32_t>(GetLastError()));
-    }
-#endif
-}
-} // namespace
 
 bool PVRTConsumeCachedPVRTC(const void *data, uint32_t two_bit, uint32_t width, uint32_t height, uint32_t type,
     const std::function<bool()> &before_copy, const std::function<void(std::span<const uint8_t>)> &consume) {
@@ -1127,7 +1070,9 @@ bool PVRTConsumeCachedPVRTC(const void *data, uint32_t two_bit, uint32_t width, 
     }
     // Inspection neither changes demand policy nor counts a miss. The fallback
     // decoder remains the sole miss observer. Revalidate after staging waits.
-    if (!cache.inspect_if_present(key, compressed, static_cast<size_t>(output_bytes), [&](auto pixels) { prepare_cached_pages(pixels, context); }))
+    // Loading already writes prepared pixels. Do not issue potentially blocking OS
+    // page-prefetch/residency requests on the required render-thread cache-hit path.
+    if (!cache.inspect_if_present(key, compressed, static_cast<size_t>(output_bytes), [](auto) {}))
         return false;
     if (!before_copy())
         return false;

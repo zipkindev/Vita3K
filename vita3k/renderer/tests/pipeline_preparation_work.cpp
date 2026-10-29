@@ -49,6 +49,14 @@ int main() {
     for (unsigned i = 0; i < 1000; ++i) admitted += budget.acquire(100000000000ULL);
     assert(admitted == budget.burst); // long idle time never creates a catch-up burst
 
+    budget = {};
+    for (unsigned i = 0; i < budget.burst - 1; ++i) assert(budget.acquire_background(0));
+    for (unsigned i = 0; i < 10000; ++i) assert(!budget.acquire_background(0));
+    assert(budget.acquire(0)); // reserved existing token serves a fresh actual pair
+    assert(!budget.acquire(0));
+    assert(!budget.acquire_background(budget.interval_ns));
+    assert(budget.acquire(budget.interval_ns)); // no extra refill/catch-up credit
+
     PipelineStageReadiness ready;
     std::array<uint8_t, 32> a{}, b{}, unrelated{};
     a[0] = 1; b[0] = 2; unrelated[0] = 3;

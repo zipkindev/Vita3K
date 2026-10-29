@@ -2620,7 +2620,7 @@ void PipelineCache::retry_deferred_locked(uint64_t now) {
     const auto count = deferred_pair_requests.size();
     auto it = deferred_pair_requests.upper_bound(recovery_cursor);
     size_t queued = 0;
-    for (size_t scanned = 0; scanned < std::min(count, PipelinePreparationWorkBudget::scan_limit) && !deferred_pair_requests.empty() && queued < 4 && warm_pending < warm_pending_limit; ++scanned) {
+    for (size_t scanned = 0; scanned < std::min(count, PipelinePreparationWorkBudget::scan_limit) && !deferred_pair_requests.empty() && queued < 4 && warm_pending < warm_pending_limit - 8; ++scanned) {
         if (it == deferred_pair_requests.end())
             it = deferred_pair_requests.begin();
         auto *request = it->second;
@@ -2631,7 +2631,7 @@ void PipelineCache::retry_deferred_locked(uint64_t now) {
             ++it;
             continue;
         }
-        if (!warm_queue.push(request, false, request->actual_pair))
+        if (!warm_queue.push(request, false, request->actual_pair, true))
             break;
         request->telemetry_queued = util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0;
         pending_pair_requests.emplace(request->request_key, request);
@@ -2659,18 +2659,20 @@ void PipelineCache::warm_thread(MemState &mem) {
             // Completion and registration wake this loop. The timeout also reopens quiet-time capacity.
             warm_work_ready.wait_for(lock, std::chrono::milliseconds(25), [&] {
                 const auto now = pipeline_clock_ns();
-                return warm_stopping || (!warm_queue.empty() && (warm_queue.has_exact() || preparation_work_budget.available(now))
+                return warm_stopping || (!warm_queue.empty() && (warm_queue.has_exact() || (warm_queue.has_urgent() ? preparation_work_budget.available(now) : preparation_work_budget.background_available(now)))
                     && warm_running < PipelinePreparationQueue<WarmRequest *>::concurrency(now, last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)));
             });
             if (warm_stopping)
                 break;
             retry_deferred_locked(pipeline_clock_ns());
-            if (warm_queue.empty() || (!warm_queue.has_exact() && !preparation_work_budget.available(pipeline_clock_ns()))
+            if (warm_queue.empty() || (!warm_queue.has_exact() && !(warm_queue.has_urgent() ? preparation_work_budget.available(pipeline_clock_ns()) : preparation_work_budget.background_available(pipeline_clock_ns())))
                 || warm_running >= PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)))
                 continue;
+            const bool urgent = warm_queue.has_urgent();
             request = warm_queue.pop();
             if (!request->exact) {
-                const bool admitted = preparation_work_budget.acquire(pipeline_clock_ns());
+                const auto now = pipeline_clock_ns();
+                const bool admitted = urgent ? preparation_work_budget.acquire(now) : preparation_work_budget.acquire_background(now);
                 assert(admitted); // availability and claim share warm_mutex
                 (void)admitted;
                 ++recovery_attempts;

@@ -64,6 +64,14 @@ public:
         --tokens;
         return true;
     }
+    // Keep one existing token available for newly announced actual pairs. This
+    // does not mint tokens or increase the shared 40/s refill rate.
+    bool background_available(uint64_t now) { return available(now) && tokens > 1; }
+    bool acquire_background(uint64_t now) {
+        if (!background_available(now)) return false;
+        --tokens;
+        return true;
+    }
     bool scan(uint64_t now) {
         if (scanned && now < next_scan)
             return false;

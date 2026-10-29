@@ -9,17 +9,18 @@ namespace renderer {
 // Caller owns synchronization. Exact learned work takes priority over guessed pairs.
 template <typename T>
 class PipelinePreparationQueue {
-    std::deque<T> exact, actual, speculative;
+    std::deque<T> exact, actual, recovery, speculative;
 
 public:
     static constexpr size_t limit = 64;
-    size_t size() const { return exact.size() + actual.size() + speculative.size(); }
+    size_t size() const { return exact.size() + actual.size() + recovery.size() + speculative.size(); }
     bool empty() const { return size() == 0; }
     bool has_exact() const { return !exact.empty(); }
-    bool push(T item, bool learned_exact, bool actual_pair = false) {
+    bool has_urgent() const { return !actual.empty(); }
+    bool push(T item, bool learned_exact, bool actual_pair = false, bool retry = false) {
         if (size() >= limit)
             return false;
-        (learned_exact ? exact : actual_pair ? actual : speculative).push_back(item);
+        (learned_exact ? exact : actual_pair ? retry ? recovery : actual : speculative).push_back(item);
         return true;
     }
     bool promote(T item) {
@@ -33,7 +34,7 @@ public:
         return false;
     }
     T pop() {
-        auto &queue = !exact.empty() ? exact : !actual.empty() ? actual : speculative;
+        auto &queue = !exact.empty() ? exact : !actual.empty() ? actual : !recovery.empty() ? recovery : speculative;
         auto item = queue.front();
         queue.pop_front();
         return item;
