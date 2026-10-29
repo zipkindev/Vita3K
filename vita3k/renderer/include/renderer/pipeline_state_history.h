@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <renderer/exact_pipeline_recipes.h>
+#include <deque>
+#include <unordered_set>
 
 namespace renderer {
 // Caller owns synchronization. Keep complete observed states, not a shader cross-product.
@@ -13,11 +15,20 @@ public:
         Pass pass;
         bool interlock;
     };
-    static constexpr size_t limit = 64, pair_limit = 8;
+    static constexpr size_t limit = 64, pair_limit = 8, drawn_limit = 4096;
     uint64_t generation() const { return revision; }
-    void clear() { states.clear(); revision = 0; }
+    void clear() { states.clear(); drawn_keys.clear(); drawn_order.clear(); revision = 0; }
     size_t size() const { return states.size(); }
     void observe(const ExactPipelineRecipe &recipe, Pass pass, bool interlock) {
+        // Mirrors the render cache's pipeline-key identity. Remember more drawn keys
+        // than full templates to avoid recompiling an old pipeline after history eviction.
+        if (drawn_keys.insert(recipe.pipeline_key).second) {
+            if (drawn_order.size() == drawn_limit) {
+                drawn_keys.erase(drawn_order.front());
+                drawn_order.pop_front();
+            }
+            drawn_order.push_back(recipe.pipeline_key);
+        }
         const auto same = [&](const auto &e) { return e.interlock == interlock && e.recipe == recipe; };
         const bool known = std::any_of(states.begin(), states.end(), same);
         std::erase_if(states, same);
@@ -35,7 +46,7 @@ public:
             ++revision;
     }
     bool observed(const ExactPipelineRecipe &recipe) const {
-        return std::any_of(states.begin(), states.end(), [&](const auto &e) { return e.recipe == recipe; });
+        return drawn_keys.contains(recipe.pipeline_key);
     }
     auto candidates(const std::array<uint8_t, 32> &vertex, const std::array<uint8_t, 32> &fragment, bool interlock) const {
         std::vector<Entry> result;
@@ -50,5 +61,7 @@ public:
 private:
     std::vector<Entry> states;
     uint64_t revision = 0;
+    std::unordered_set<uint64_t> drawn_keys;
+    std::deque<uint64_t> drawn_order;
 };
 } // namespace renderer
