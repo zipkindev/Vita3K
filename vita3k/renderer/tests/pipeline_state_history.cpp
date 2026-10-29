@@ -5,43 +5,43 @@
 #endif
 #include <cassert>
 #include <renderer/pipeline_state_history.h>
-
 int main() {
-    renderer::PipelineStateHistory<unsigned> history;
+    renderer::PipelineStateHistory<unsigned> h;
     renderer::ExactPipelineRecipe a;
-    a.vertex[0] = 1;
-    a.fragment[0] = 2;
-    a.words[7] = 1; // culling
-    a.words[20] = 12582912; // depth function
-    a.words[46] = 2197815296; // a non-default texture hint
-    history.observe(a, 10, false);
-    auto b = a;
-    b.fragment[0] = 3;
-    b.words[46] = 2264924160;
-    history.observe(b, 20, false);
-    // Prefer matching fragment state over recency; preserve fixed state and hints.
-    auto found = history.candidates(a.vertex, a.fragment, false);
-    assert(found.size() == 2 && found[0].pass == 10);
-    assert(found[0].recipe.words == a.words);
-    // Refresh an existing scalar state, replacing its binding identities and pass.
-    a.vertex[0] = 9;
-    history.observe(a, 30, false);
-    assert(history.size() == 2);
-    found = history.candidates({}, {}, false);
-    assert(found[0].pass == 30 && found[0].recipe.vertex[0] == 9);
-    // Interlock passes must never be predicted for a non-interlock shader, or vice versa.
-    history.observe(a, 40, true);
-    assert(history.candidates({}, {}, true).size() == 1);
-    assert(history.candidates({}, {}, true)[0].pass == 40);
-    assert(history.candidates({}, {}, false).size() == 2);
-    // Bounded recency across arbitrary later maps; no growth with session length.
+    a.vertex[0] = 1; a.fragment[0] = 2; a.words[7] = 1;
+    a.words[20] = 12582912; a.words[46] = 2197815296;
+    h.observe(a, 10, false);
+    auto b = a; b.vertex[0] = 3; b.fragment[0] = 4;
+    h.observe(b, 20, false);
+    assert(h.size() == 2); // identical state must retain both shader associations
+    auto found = h.candidates(a.vertex, a.fragment, false);
+    assert(found[0].recipe == a && found[0].pass == 10);
+    auto generation = h.generation();
+    h.observe(a, 30, false);
+    assert(h.generation() == generation && h.size() == 2);
+    found = h.candidates({}, {}, false);
+    assert(found[0].pass == 30 && h.observed(a));
+    h.observe(a, 40, true);
+    assert(h.candidates({}, {}, true).size() == 1);
     for (unsigned i = 0; i < 1000; ++i) {
         b.words[46] = i;
-        history.observe(b, i, false);
-        assert(history.size() <= history.limit);
+        h.observe(b, i, false);
     }
-    found = history.candidates({}, {}, false);
-    assert(found.size() == history.limit && found.front().pass == 999 && found.back().pass == 992);
-    history.clear();
-    assert(history.size() == 0 && history.candidates({}, {}, false).empty());
+    found = h.candidates(b.vertex, b.fragment, false);
+    size_t same_pair = 0;
+    for (auto &e : found)
+        if (e.recipe.vertex == b.vertex && e.recipe.fragment == b.fragment)
+            ++same_pair;
+    assert(same_pair == h.pair_limit && found.front().pass == 999);
+    assert(h.observed(a)); // a busy unrelated pair didn't evict this association
+    for (unsigned i = 0; i < 1000; ++i) {
+        b.vertex[0] = i & 255; b.vertex[1] = i >> 8;
+        b.fragment = b.vertex;
+        h.observe(b, i, false);
+        assert(h.size() <= h.limit);
+    }
+    assert(h.size() == h.limit);
+    found = h.candidates({}, {}, false);
+    assert(found.front().pass == 999 && found.back().pass == 936);
+    h.clear(); assert(h.size() == 0 && h.generation() == 0);
 }

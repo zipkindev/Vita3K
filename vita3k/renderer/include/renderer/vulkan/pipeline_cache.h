@@ -25,6 +25,7 @@
 #include <renderer/pipeline_preparation_queue.h>
 #include <renderer/pipeline_prediction_admission.h>
 #include <renderer/pipeline_state_history.h>
+#include <renderer/pipeline_recovery_policy.h>
 #include <renderer/protected_pipeline_pairs.h>
 #include <util/containers.h>
 #include <vkutil/vkutil.h>
@@ -193,8 +194,8 @@ private:
     };
     bool note_exact_coverage_locked(uint64_t key, uint64_t pair, uint32_t event);
     struct PairCoverage {
-        uint64_t pair = 0, queued_qpc = 0, completed_qpc = 0;
-        uint32_t outcome = 0;
+        uint64_t pair = 0, queued_qpc = 0, completed_qpc = 0, first_queued_qpc = 0;
+        uint32_t outcome = 0, outcomes = 0, attempts = 0, sources = 0;
     };
     std::map<uint64_t, PairCoverage> pair_coverage;
     void schedule_exact_locked();
@@ -213,6 +214,9 @@ private:
         bool learned = false;
         std::shared_ptr<ExactWarmJob> exact;
         bool actual_pair = false;
+        PipelineRecoveryPolicy recovery;
+        uint64_t history_at_start = 0, registry_at_start = 0;
+        uint32_t sources = 0;
     };
     PipelinePreparationQueue<WarmRequest *> warm_queue;
     std::condition_variable warm_work_ready;
@@ -227,7 +231,12 @@ private:
     std::unordered_set<uint64_t> warm_pairs_requested;
     std::map<uint64_t, WarmRequest *> pending_pair_requests;
     PipelineBindingEpochs<ProgramBinding> early_pairs;
-    std::map<uint64_t, unsigned> warm_attempts;
+    std::atomic<uint64_t> warm_shader_generation{ 0 };
+    uint64_t knowledge_generation_locked() const { return warm_registry_generation + warm_shader_generation.load(std::memory_order_relaxed); }
+    std::map<uint64_t, WarmRequest *> deferred_pair_requests;
+    uint64_t recovery_requeued = 0, recovery_evicted = 0, recovery_cursor = 0;
+    void retry_deferred_locked(uint64_t now);
+    void park_request_locked(WarmRequest *request);
     static constexpr size_t warm_pending_limit = 64, warm_program_limit = 2048;
     size_t warm_pending = 0, warm_registered = 0;
     std::map<Sha256Hash, std::vector<std::weak_ptr<ProgramBinding>>> warm_vertices, warm_fragments;
@@ -235,8 +244,6 @@ private:
     std::vector<ProtectedPipelinePair> loaded_protected_pairs;
     void queue_warm_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair);
     void learn_protected_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment);
-    // pairs a draw created a pipeline for before their warm compile started
-    std::unordered_set<uint64_t> pairs_drawn;
     vk::RenderPass warm_render_pass;
     vk::RenderPass warm_interlock_render_pass;
 

@@ -13,14 +13,29 @@ public:
         Pass pass;
         bool interlock;
     };
-    static constexpr size_t limit = 8;
-    void clear() { states.clear(); }
+    static constexpr size_t limit = 64, pair_limit = 8;
+    uint64_t generation() const { return revision; }
+    void clear() { states.clear(); revision = 0; }
     size_t size() const { return states.size(); }
     void observe(const ExactPipelineRecipe &recipe, Pass pass, bool interlock) {
-        std::erase_if(states, [&](const auto &e) { return e.interlock == interlock && e.recipe.words == recipe.words; });
+        const auto same = [&](const auto &e) { return e.interlock == interlock && e.recipe == recipe; };
+        const bool known = std::any_of(states.begin(), states.end(), same);
+        std::erase_if(states, same);
+        // Preserve different shader associations for identical fixed state. Bound each
+        // pair as well as total history so a busy effect cannot consume every slot.
+        size_t count = 0;
+        std::erase_if(states, [&](const auto &e) {
+            return e.interlock == interlock && e.recipe.vertex == recipe.vertex && e.recipe.fragment == recipe.fragment
+                && ++count >= pair_limit;
+        });
         if (states.size() == limit)
             states.pop_back();
         states.insert(states.begin(), { recipe, pass, interlock });
+        if (!known)
+            ++revision;
+    }
+    bool observed(const ExactPipelineRecipe &recipe) const {
+        return std::any_of(states.begin(), states.end(), [&](const auto &e) { return e.recipe == recipe; });
     }
     auto candidates(const std::array<uint8_t, 32> &vertex, const std::array<uint8_t, 32> &fragment, bool interlock) const {
         std::vector<Entry> result;
@@ -34,5 +49,6 @@ public:
 
 private:
     std::vector<Entry> states;
+    uint64_t revision = 0;
 };
 } // namespace renderer

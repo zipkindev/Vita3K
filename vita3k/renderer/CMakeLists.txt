@@ -174,3 +174,7 @@ add_executable(pipeline-library-keys-tests tests/pipeline_library_keys.cpp)
 target_include_directories(pipeline-library-keys-tests PRIVATE include)
 target_link_libraries(pipeline-library-keys-tests PRIVATE vulkan)
 add_test(NAME pipeline-library-keys COMMAND pipeline-library-keys-tests)
+
+add_executable(pipeline-recovery-policy-tests tests/pipeline_recovery_policy.cpp)
+target_include_directories(pipeline-recovery-policy-tests PRIVATE include)
+add_test(NAME pipeline-recovery-policy COMMAND pipeline-recovery-policy-tests)
