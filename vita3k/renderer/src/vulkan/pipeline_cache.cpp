@@ -2566,16 +2566,18 @@ void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &verte
     warm_work_ready.notify_all();
 }
 
-void PipelineCache::park_request_locked(WarmRequest *request) {
+PipelineCache::WarmRequest *PipelineCache::park_request_locked(WarmRequest *request) {
+    WarmRequest *retired = nullptr;
     if (deferred_pair_requests.size() >= warm_pending_limit) {
         auto oldest = std::min_element(deferred_pair_requests.begin(), deferred_pair_requests.end(), [](const auto &a, const auto &b) {
             return a.second->recovery.retry_at < b.second->recovery.retry_at;
         });
-        delete oldest->second;
+        retired = oldest->second;
         deferred_pair_requests.erase(oldest);
         ++recovery_evicted;
     }
     deferred_pair_requests.emplace(request->request_key, request);
+    return retired;
 }
 
 void PipelineCache::retry_deferred_locked(uint64_t now) {
@@ -2661,6 +2663,7 @@ void PipelineCache::warm_thread(MemState &mem) {
         // A render-thread wait may have promoted this job. Only this worker restores its priority.
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 #endif
+        WarmRequest *retired_request = nullptr;
         {
             std::lock_guard<std::mutex> guard(warm_mutex);
             if (!request->exact) {
@@ -2679,7 +2682,7 @@ void PipelineCache::warm_thread(MemState &mem) {
                 }
                 request->recovery.complete(pipeline_clock_ns(), request->history_at_start, request->registry_at_start, outcome);
                 if (!warm_stopping) {
-                    park_request_locked(request);
+                    retired_request = park_request_locked(request);
                     request = nullptr;
                 }
             }
@@ -2687,6 +2690,7 @@ void PipelineCache::warm_thread(MemState &mem) {
             --warm_running;
             schedule_exact_locked();
         }
+        delete retired_request;
         delete request;
     }
 }
@@ -2763,7 +2767,7 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
     // Outcome bits: drawn=1, missing vertex=2, missing fragment=4,
     // no observed state=8, compile failed=16, prepared=32, exception=64,
     // admission unavailable=128, exact owner=256, render busy=512,
-    // unrelated state=1024, invalid recipe=2048, stopped=4096.
+    // unrelated state=1024, invalid recipe=2048, stopped=4096, candidate-probe bound=8192.
     outcome = 0;
     util::PipelineScope total(util::PipelineKind::WarmTotal, { 0, request.pair_key, request.actual_pair ? 1u : 0u });
     const ProgramBinding &vertex_binding = *request.vertex;
@@ -2797,6 +2801,7 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
         return false;
     }
     bool prepared = false;
+    size_t considered = 0;
     for (const auto &observed : states) {
         if (warm_stopping)
             break;
@@ -2805,6 +2810,10 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
             ++prediction_unrelated;
             outcome |= 1024; // no shared shader in this observed state
             continue;
+        }
+        if (++considered > 8) {
+            outcome |= 8192; // cap shader probing/conversion per recovery attempt
+            break;
         }
         auto recipe = observed.recipe;
         recipe.vertex = vertex_binding.vertex_program->hash;

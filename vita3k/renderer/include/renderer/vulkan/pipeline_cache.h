@@ -236,7 +236,7 @@ private:
     std::map<uint64_t, WarmRequest *> deferred_pair_requests;
     uint64_t recovery_requeued = 0, recovery_evicted = 0, recovery_cursor = 0;
     void retry_deferred_locked(uint64_t now);
-    void park_request_locked(WarmRequest *request);
+    WarmRequest *park_request_locked(WarmRequest *request);
     static constexpr size_t warm_pending_limit = 64, warm_program_limit = 2048;
     size_t warm_pending = 0, warm_registered = 0;
     std::map<Sha256Hash, std::vector<std::weak_ptr<ProgramBinding>>> warm_vertices, warm_fragments;
