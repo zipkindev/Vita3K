@@ -2965,7 +2965,6 @@ void PipelineCache::prune_predictions_locked(uint64_t now, bool actual_pair) {
     --exact_live_jobs;
     ++prediction_reclaimed;
     note_exact_coverage_locked(job->recipe.pipeline_key, 0, Reclaimed);
-    warm_pairs_requested.erase(job->prediction_request_key);
     exact_jobs.erase(oldest);
     // The object was never submitted or transferred to a draw. The driver's cache entry remains.
 }
