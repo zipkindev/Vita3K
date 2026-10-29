@@ -2583,6 +2583,11 @@ PipelineCache::WarmRequest *PipelineCache::park_request_locked(WarmRequest *requ
 void PipelineCache::retry_deferred_locked(uint64_t now) {
     if (pipeline_draw_busy.load(std::memory_order_acquire))
         return;
+    if (deferred_pair_requests.empty())
+        return;
+    // Recovery must be able to reopen a full pool without waiting for a new bind.
+    prune_predictions_locked(now, true);
+    prune_predictions_locked(now, false);
     // Rotate a bounded scan; a busy low-key pair must not starve later maps.
     const auto count = deferred_pair_requests.size();
     auto it = deferred_pair_requests.upper_bound(recovery_cursor);
