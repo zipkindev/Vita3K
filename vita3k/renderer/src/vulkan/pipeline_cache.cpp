@@ -712,7 +712,9 @@ void PipelineCache::cleanup() {
         pair_coverage.clear();
         LOG_INFO("[PIPEEXACT] session recipes={} queued={} prepared={} reused={} draw_claimed={}",
             exact_recipes.entries().size(), exact_jobs.size(), exact_prepared_count, exact_reused_count, exact_draw_claimed_count);
-        LOG_INFO("[PIPESTATE] dynamic_jobs={} limit={}", dynamic_exact_jobs, dynamic_exact_limit);
+        LOG_INFO("[PIPESTATE] dynamic_jobs={} live={} live_hints={} live_limit={} hint_limit={} rate_rejected={} full_rejected={} reclaimed={} unrelated={}",
+            dynamic_exact_jobs, prediction_admission.live(), prediction_admission.hints(), PipelinePredictionAdmission::live_limit,
+            PipelinePredictionAdmission::hint_limit, prediction_rate_rejected, prediction_full_rejected, prediction_reclaimed, prediction_unrelated);
         LOG_INFO("[PIPESCHED] misses={} waits={} refills={} active_limit=1 quiet_limit=2", exact_miss_count, exact_wait_count, exact_refill_count);
         exact_prepared_count = exact_reused_count = exact_draw_claimed_count = 0;
         exact_miss_count = exact_wait_count = exact_refill_count = 0;
@@ -720,6 +722,9 @@ void PipelineCache::cleanup() {
             if (job->pipeline)
                 state.device.destroyPipeline(job->pipeline);
         exact_jobs.clear();
+        for (auto pipeline : retired_predictions)
+            state.device.destroyPipeline(pipeline);
+        retired_predictions.clear();
         loaded_exact_recipes.clear();
         exact_recipes = {};
         protected_pairs = {};
@@ -727,6 +732,8 @@ void PipelineCache::cleanup() {
         pairs_drawn.clear();
         warm_state_history.clear();
         dynamic_exact_jobs = 0;
+        prediction_admission = {};
+        prediction_rate_rejected = prediction_full_rejected = prediction_reclaimed = prediction_unrelated = 0;
     }
     render_pass_recipes.clear();
 
@@ -2451,7 +2458,6 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
     }
     if (!warm_enabled)
         return;
-    std::vector<std::pair<std::shared_ptr<ProgramBinding>, std::shared_ptr<ProgramBinding>>> ready;
     {
         std::lock_guard<std::mutex> guard(warm_mutex);
         const auto register_stage = [&](const auto &binding, bool is_vertex) {
@@ -2498,45 +2504,38 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
         register_stage(vertex, true);
         register_stage(fragment, false);
         schedule_exact_locked();
-        // Match only previously observed protected pairs, never a guessed stage cross-product.
-        for (const auto &pair : loaded_protected_pairs) {
-            if ((!vertex || !vertex->vertex_program || vertex->vertex_program->hash != pair.vertex)
-                && (!fragment || !fragment->fragment_program || fragment->fragment_program->hash != pair.fragment))
-                continue;
-            const auto vs = warm_vertices.find(pair.vertex), fs = warm_fragments.find(pair.fragment);
-            if (vs == warm_vertices.end() || fs == warm_fragments.end())
-                continue;
-            for (const auto &v : vs->second) {
-                auto vp = v.lock();
-                if (!vp)
-                    continue;
-                for (const auto &f : fs->second) {
-                    auto fp = f.lock();
-                    if (fp && fp->fragment_program && static_cast<uint32_t>(fp->fragment_program->output_register_format) == pair.output_format) {
-                        if (ready.size() < warm_pending_limit)
-                            ready.emplace_back(vp, fp);
-                        else {
-                            util::PipelineScope bounded(util::PipelineKind::WarmBounded);
-                        }
-                    }
-                }
-            }
-        }
+        // Exact persisted states are scheduled above. Historical stage combinations do
+        // not authorize new state guesses; direct creation hints and actual bindings do.
     }
-    for (const auto &[vp, fp] : ready)
-        queue_warm_pair(vp, fp, true);
     if (vertex && fragment)
-        queue_warm_pair(vertex, fragment, false);
+        queue_warm_pair(vertex, fragment, actual_pair);
 }
 
-void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool learned) {
+void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair) {
     if (!vertex || !fragment || !vertex->vertex_program || !fragment->fragment_program || fragment->is_maskupdate)
         return;
     const uint64_t pair = warm_pair_key(vertex->vertex_program->hash, fragment->fragment_program->hash, fragment->fragment_program->output_register_format);
     const auto &fp = static_cast<const VKFragmentProgram &>(*fragment->fragment_program);
     const uint64_t request_key = pair ^ std::rotl(vertex->key_hash, 17) ^ std::rotl(fp.blending_hash, 31);
     std::lock_guard<std::mutex> guard(warm_mutex);
-    if (!warm_enabled)
+    if (!warm_enabled || warm_stopping)
+        return;
+    // Upgrade queued hints before rate checks; no request is modified after a worker takes it.
+    if (actual_pair) {
+        const auto pending = pending_pair_requests.find(request_key);
+        if (pending != pending_pair_requests.end() && warm_queue.promote(pending->second)) {
+            pending->second->actual_pair = true;
+            warm_work_ready.notify_all();
+            return;
+        }
+    }
+    // No Vulkan destruction or expensive shader checks on the guest thread.
+    // A full object pool may have an old unused object; workers reclaim it safely.
+    if (!prediction_admission.has_token(pipeline_clock_ns(), actual_pair)) {
+        ++prediction_rate_rejected;
+        return;
+    }
+    if (pairs_drawn.contains(pair))
         return;
     for (const auto &[recipe, job] : exact_jobs) {
         if (job->status != ExactWarmJob::Failed && recipe.vertex == vertex->vertex_program->hash
@@ -2549,18 +2548,19 @@ void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &verte
         return;
     }
     const auto attempt = warm_attempts.find(request_key);
-    if (warm_pending >= warm_pending_limit
+    if (warm_pending >= warm_pending_limit || (!actual_pair && warm_queue.size() >= warm_pending_limit - 8)
         || (attempt == warm_attempts.end() && warm_attempts.size() >= ProtectedPipelinePairs::limit)
         || (attempt != warm_attempts.end() && attempt->second >= 2)) {
         util::PipelineScope bounded(util::PipelineKind::WarmBounded, { 0, pair });
         return;
     }
     auto *request = new WarmRequest{ vertex, fragment, pair,
-        util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0, request_key, learned };
-    if (!warm_queue.push(request, false)) {
+        util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0, request_key, false, {}, actual_pair };
+    if (!warm_queue.push(request, false, actual_pair)) {
         delete request;
         return;
     }
+    pending_pair_requests.emplace(request_key, request);
     warm_pairs_requested.insert(request_key);
     ++warm_attempts[request_key];
     ++warm_pending;
@@ -2589,6 +2589,8 @@ void PipelineCache::warm_thread(MemState &mem) {
             if (warm_queue.empty() || warm_running >= PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)))
                 continue;
             request = warm_queue.pop();
+            if (!request->exact)
+                pending_pair_requests.erase(request->request_key);
             ++warm_running;
         }
         if (request->telemetry_queued) {
@@ -2596,6 +2598,14 @@ void PipelineCache::warm_thread(MemState &mem) {
         }
         uint32_t outcome = 0;
         const bool ready = !warm_stopping && (request->exact ? warm_exact_pipeline(*request, mem) : warm_pair(*request, mem, outcome));
+        std::vector<vk::Pipeline> retired;
+        {
+            std::lock_guard<std::mutex> guard(warm_mutex);
+            retired.swap(retired_predictions);
+        }
+        // Never hold the prepared-object mutex or a guest thread in driver destruction.
+        for (auto pipeline : retired)
+            state.device.destroyPipeline(pipeline);
 #if defined(_WIN32)
         // A render-thread wait may have promoted this job. Only this worker restores its priority.
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -2631,6 +2641,7 @@ void PipelineCache::stop_warm_threads() {
     std::lock_guard<std::mutex> guard(warm_mutex);
     while (!warm_queue.empty())
         delete warm_queue.pop();
+    pending_pair_requests.clear();
     warm_pending = warm_running = 0;
     warm_stopping = false;
 }
@@ -2682,9 +2693,10 @@ bool PipelineCache::shader_available(const SceGxmProgram &program, const Sha256H
 
 bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_t &outcome) try {
     // Outcome bits: drawn=1, missing vertex=2, missing fragment=4,
-    // missing pass=8, compile failed=16, prepared=32, exception=64.
+    // no observed state=8, compile failed=16, prepared=32, exception=64,
+    // admission unavailable=128, render busy=512.
     outcome = 0;
-    util::PipelineScope total(util::PipelineKind::WarmTotal, { 0, request.pair_key });
+    util::PipelineScope total(util::PipelineKind::WarmTotal, { 0, request.pair_key, request.actual_pair ? 1u : 0u });
     const ProgramBinding &vertex_binding = *request.vertex;
     const ProgramBinding &fragment_binding = *request.fragment;
     const SceGxmProgram &vertex_gxp = *vertex_binding.program();
@@ -2699,6 +2711,20 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
             util::PipelineScope skipped(util::PipelineKind::WarmSkipDrawn, { 0, request.pair_key });
             return false;
         }
+        const auto now = pipeline_clock_ns();
+        prune_predictions_locked(now, request.actual_pair);
+        if (!prediction_admission.available(now, request.actual_pair)) {
+            if (prediction_admission.full(request.actual_pair))
+                ++prediction_full_rejected;
+            else
+                ++prediction_rate_rejected;
+            outcome |= 128;
+            return false;
+        }
+        if (pipeline_draw_busy.load(std::memory_order_acquire)) {
+            outcome |= 512;
+            return false;
+        }
         states = warm_state_history.candidates(vertex_binding.vertex_program->hash, fragment_binding.fragment_program->hash, interlock);
     }
     // No observed state is better than an expensive, unrelated zero-filled pipeline.
@@ -2710,6 +2736,11 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
     for (const auto &observed : states) {
         if (warm_stopping)
             break;
+        if (observed.recipe.vertex != vertex_binding.vertex_program->hash && observed.recipe.fragment != fragment_binding.fragment_program->hash) {
+            std::lock_guard<std::mutex> guard(warm_mutex);
+            ++prediction_unrelated;
+            continue;
+        }
         auto recipe = observed.recipe;
         recipe.vertex = vertex_binding.vertex_program->hash;
         recipe.fragment = fragment_binding.fragment_program->hash;
@@ -2763,14 +2794,27 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
             }
             if (exact_jobs.contains(recipe))
                 return false;
-            if (warm_stopping || dynamic_exact_jobs >= dynamic_exact_limit || exact_live_jobs >= exact_ready_limit)
+            const auto now = pipeline_clock_ns();
+            prune_predictions_locked(now, request.actual_pair);
+            if (warm_stopping || pipeline_draw_busy.load(std::memory_order_acquire) || exact_live_jobs >= exact_ready_limit)
                 break;
+            if (!prediction_admission.acquire(now, request.actual_pair)) {
+                if (prediction_admission.full(request.actual_pair))
+                    ++prediction_full_rejected;
+                else
+                    ++prediction_rate_rejected;
+                break;
+            }
+            job->predicted = job->prediction_slot = true;
+            job->actual_pair = request.actual_pair;
+            job->prediction_request_key = request.request_key;
             exact_jobs.emplace(recipe, job);
             ++exact_live_jobs;
             ++dynamic_exact_jobs;
             note_exact_coverage_locked(recipe.pipeline_key, request.pair_key, Queued);
-            LOG_INFO("[PIPESTATE] prepare key={} pair={} source_key={} ordinal={}",
-                recipe.pipeline_key, request.pair_key, observed.recipe.pipeline_key, dynamic_exact_jobs);
+            if (dynamic_exact_jobs <= 256)
+                LOG_INFO("[PIPESTATE] prepare key={} pair={} source_key={} ordinal={} actual={} live={}",
+                    recipe.pipeline_key, request.pair_key, observed.recipe.pipeline_key, dynamic_exact_jobs, request.actual_pair, prediction_admission.live());
         }
         auto exact_request = request;
         exact_request.exact = job;
@@ -2784,6 +2828,48 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
     outcome |= 64;
     LOG_WARN("[PIPEWARM] background compile failed: {}", error.what());
     return false;
+}
+
+void PipelineCache::release_prediction_locked(ExactWarmJob &job) {
+    if (job.prediction_slot) {
+        if (!prediction_admission.release(job.actual_pair))
+            LOG_ERROR("[PIPESTATE] prediction slot accounting mismatch");
+        job.prediction_slot = false;
+    }
+}
+
+void PipelineCache::prune_predictions_locked(uint64_t now, bool actual_pair) {
+    for (auto it = exact_jobs.begin(); it != exact_jobs.end();) {
+        const auto &job = it->second;
+        if (job->predicted && (job->status == ExactWarmJob::Taken || job->status == ExactWarmJob::Failed))
+            it = exact_jobs.erase(it);
+        else
+            ++it;
+    }
+    if (!prediction_admission.has_token(now, actual_pair) || !prediction_admission.full(actual_pair))
+        return;
+    auto oldest = exact_jobs.end();
+    const bool need_hint_slot = !actual_pair && prediction_admission.hints() >= PipelinePredictionAdmission::hint_limit;
+    for (auto it = exact_jobs.begin(); it != exact_jobs.end(); ++it) {
+        const auto &job = it->second;
+        if (!job->predicted || !job->prediction_slot || (need_hint_slot && job->actual_pair)
+            || !PipelinePredictionAdmission::reclaimable(now, job->completed_ns, job->status == ExactWarmJob::Ready, job->draw_waiting))
+            continue;
+        if (oldest == exact_jobs.end() || job->completed_ns < oldest->second->completed_ns)
+            oldest = it;
+    }
+    if (oldest == exact_jobs.end())
+        return;
+    const auto &job = oldest->second;
+    retired_predictions.push_back(job->pipeline);
+    job->pipeline = nullptr;
+    release_prediction_locked(*job);
+    --exact_live_jobs;
+    ++prediction_reclaimed;
+    note_exact_coverage_locked(job->recipe.pipeline_key, 0, Reclaimed);
+    warm_pairs_requested.erase(job->prediction_request_key);
+    exact_jobs.erase(oldest);
+    // The object was never submitted or transferred to a draw. The driver's cache entry remains.
 }
 
 bool PipelineCache::note_exact_coverage_locked(uint64_t key, uint64_t pair, uint32_t event) {
@@ -2889,17 +2975,19 @@ vk::Pipeline PipelineCache::reuse_exact_pipeline(const ExactPipelineRecipe &reci
         ++exact_miss_count;
         return nullptr;
     }
-    const auto &job = found->second;
+    const auto job = found->second;
     if (job->status == ExactWarmJob::Queued) {
         // A draw must not wait behind speculative queue work. It claims this recipe instead.
         job->status = ExactWarmJob::Taken;
         note_exact_coverage_locked(recipe.pipeline_key, 0, DrawClaimed);
         ++exact_draw_claimed_count;
         --exact_live_jobs;
+        release_prediction_locked(*job);
         warm_work_ready.notify_all();
         return nullptr;
     }
     if (job->status == ExactWarmJob::Running) {
+        job->draw_waiting = true;
         note_exact_coverage_locked(recipe.pipeline_key, 0, DrawWaited);
         ++exact_wait_count;
 #if defined(_WIN32)
@@ -2920,6 +3008,7 @@ vk::Pipeline PipelineCache::reuse_exact_pipeline(const ExactPipelineRecipe &reci
     job->pipeline = nullptr;
     job->status = ExactWarmJob::Taken;
     --exact_live_jobs;
+    release_prediction_locked(*job);
     schedule_exact_locked();
     note_exact_coverage_locked(recipe.pipeline_key, 0, Reused);
     ++exact_reused_count;
@@ -2966,9 +3055,12 @@ bool PipelineCache::warm_exact_pipeline(const WarmRequest &request, MemState &me
         if (pipeline)
             ++exact_prepared_count;
         job->status = pipeline ? ExactWarmJob::Ready : ExactWarmJob::Failed;
+        job->completed_ns = pipeline_clock_ns();
         note_exact_coverage_locked(job->recipe.pipeline_key, request.pair_key, pipeline ? Prepared : Failed);
-        if (!pipeline)
+        if (!pipeline) {
             --exact_live_jobs;
+            release_prediction_locked(*job);
+        }
     }
     exact_ready.notify_all();
     return bool(pipeline);

@@ -23,6 +23,7 @@
 #include <renderer/exact_pipeline_recipes.h>
 #include <renderer/pipeline_binding_epochs.h>
 #include <renderer/pipeline_preparation_queue.h>
+#include <renderer/pipeline_prediction_admission.h>
 #include <renderer/pipeline_state_history.h>
 #include <renderer/protected_pipeline_pairs.h>
 #include <util/containers.h>
@@ -156,6 +157,8 @@ private:
             = Queued;
         vk::Pipeline pipeline;
         uint32_t worker_id = 0;
+        bool predicted = false, actual_pair = false, prediction_slot = false, draw_waiting = false;
+        uint64_t completed_ns = 0, prediction_request_key = 0;
     };
     ExactPipelineRecipes exact_recipes;
     std::vector<std::pair<ExactPipelineRecipe, vk::RenderPass>> loaded_exact_recipes;
@@ -185,7 +188,8 @@ private:
         Queued = 512,
         Started = 1024,
         Prepared = 2048,
-        Failed = 4096
+        Failed = 4096,
+        Reclaimed = 8192
     };
     bool note_exact_coverage_locked(uint64_t key, uint64_t pair, uint32_t event);
     struct PairCoverage {
@@ -208,6 +212,7 @@ private:
         uint64_t request_key = 0;
         bool learned = false;
         std::shared_ptr<ExactWarmJob> exact;
+        bool actual_pair = false;
     };
     PipelinePreparationQueue<WarmRequest *> warm_queue;
     std::condition_variable warm_work_ready;
@@ -220,6 +225,7 @@ private:
     std::atomic<bool> warm_stopping{ false };
     std::mutex warm_mutex;
     std::unordered_set<uint64_t> warm_pairs_requested;
+    std::map<uint64_t, WarmRequest *> pending_pair_requests;
     PipelineBindingEpochs<ProgramBinding> early_pairs;
     std::map<uint64_t, unsigned> warm_attempts;
     static constexpr size_t warm_pending_limit = 64, warm_program_limit = 2048;
@@ -227,7 +233,7 @@ private:
     std::map<Sha256Hash, std::vector<std::weak_ptr<ProgramBinding>>> warm_vertices, warm_fragments;
     ProtectedPipelinePairs protected_pairs;
     std::vector<ProtectedPipelinePair> loaded_protected_pairs;
-    void queue_warm_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool learned);
+    void queue_warm_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair);
     void learn_protected_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment);
     // pairs a draw created a pipeline for before their warm compile started
     std::unordered_set<uint64_t> pairs_drawn;
@@ -237,7 +243,11 @@ private:
     // Recent complete draw states replace the old zero-filled speculative state.
     PipelineStateHistory<vk::RenderPass> warm_state_history;
     size_t dynamic_exact_jobs = 0;
-    static constexpr size_t dynamic_exact_limit = 128;
+    PipelinePredictionAdmission prediction_admission;
+    std::vector<vk::Pipeline> retired_predictions;
+    uint64_t prediction_rate_rejected = 0, prediction_full_rejected = 0, prediction_reclaimed = 0, prediction_unrelated = 0;
+    void release_prediction_locked(ExactWarmJob &job);
+    void prune_predictions_locked(uint64_t now, bool actual_pair);
     void warm_thread(MemState &mem);
     bool warm_pair(const WarmRequest &request, MemState &mem, uint32_t &outcome);
     void stop_warm_threads();

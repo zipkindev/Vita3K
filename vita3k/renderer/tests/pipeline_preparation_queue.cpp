@@ -16,6 +16,17 @@ int main() {
     assert(queue.pop() == 3);
     assert(queue.pop() == 1);
     assert(queue.empty());
+    assert(queue.push(10, false));
+    assert(queue.push(20, false));
+    assert(queue.push(30, false, true));
+    assert(queue.promote(20));
+    assert(!queue.promote(20));
+    assert(queue.push(40, true));
+    assert(queue.pop() == 40); // learned exact still outranks actual pairs
+    assert(queue.pop() == 30);
+    assert(queue.pop() == 20); // upgraded hint retains one owner
+    assert(queue.pop() == 10);
+    assert(!queue.promote(99));
     for (int i = 0; i < 64; ++i)
         assert(queue.push(i, true));
     assert(!queue.push(99, true));
