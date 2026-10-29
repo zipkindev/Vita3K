@@ -188,3 +188,34 @@ smooth race do not replace validation-enabled API/synchronization checks.
 Useful follow-ups are controlled fresh-process repeats, new tracks/games, profile admission when archives exceed decoded RAM, mixed size/cost/frequency ranking, long sessions near storage/history limits and attribution of the remaining initial JIT gap. An off-by-default bounded compile-only main-thread JIT preparation prototype exists; no independent gameplay gain has been established. Diagnostic read fingerprints alone are not a safe replay-validation scheme. More CPU threads alone do not make arbitrary guest compilation or texture prediction safe.
 
 To contribute, report hardware/OS/driver, game and version, exact build/EXE identity, graphics settings, cache budget and preparation report. State whether it is the first race/fight after a fresh launch, a same-session repeat, or a new disk-cache state. Keep the event and settings comparable, confirm continuous gameplay and separate interrupted captures. Reproduce both improvements and regressions. Submit numeric summaries and reviewed traces where appropriate, with game-derived data and personal information removed. No game files, saves, learned texture payloads or credentials are published in this report.
+
+
+## .46 progress-driven recovery candidate — 2026-10-29
+
+Since .38, Vulkan attachment/readback/view correctness fixes and bounded dynamic
+pipeline scheduling/recovery changes were added. The .46 step suppresses unchanged
+pair notifications, retains bounded progress across template eviction, reopens
+work on useful new readiness and remembers completed speculative recipes after
+unused objects are reclaimed. This avoids redundant work; it does not retain
+unlimited Vulkan objects or predict unseen effects.
+
+A fresh-process Sol 2 Rapier, four-lap capture at 512 MiB, async OFF and validation
+OFF was confirmed as continuous driving with traffic/weapons and some stutters.
+Across 3,569 positive presentation intervals: median 33.3391 ms, p99 36.1886 ms,
+p99.9 63.9249 ms, maximum 525.0769 ms; five intervals ≥50 ms, two ≥100 ms.
+The largest interval overlapped a 510.07 ms driver creation inside synchronous
+compilation. Its recipe was absent from the 236 launch recipes; none shared its
+vertex or fragment shader identity. Closure saved all prior recipes plus five,
+reaching 241. Another 90.85 ms gap overlapped texture staging/work spans, which
+cannot be added together as independent CPU costs. Three other ≥50 ms intervals
+lack a retained pipeline/texture span ≥5 ms; their causes remain unresolved.
+Manual click-to-driving alignment is not instrumented. These are presentation
+intervals, not input latency; they do not establish a controlled .45/.46 speedup.
+
+An earlier accidental solo time trial in .46 had a 227.94 ms maximum and no
+traffic/weapons. It is separate from combat evidence. The .45 four-track tournament
+was reported smooth overall, but differing learned input and unsegmented loading
+prevent a causal comparison. All 38 native Windows tests and .46 package/symbol
+checks passed; menu-only pinned synchronization validation had zero error categories
+and 13 unused-output warnings. Full race/effect validation and consistent sub-100 ms
+play remain open. See [the .46 release notes](releases/v1.3.3-win11merge.46.md).
