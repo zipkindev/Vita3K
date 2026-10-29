@@ -178,3 +178,7 @@ add_test(NAME pipeline-library-keys COMMAND pipeline-library-keys-tests)
 add_executable(pipeline-recovery-policy-tests tests/pipeline_recovery_policy.cpp)
 target_include_directories(pipeline-recovery-policy-tests PRIVATE include)
 add_test(NAME pipeline-recovery-policy COMMAND pipeline-recovery-policy-tests)
+
+add_executable(pipeline-preparation-work-tests tests/pipeline_preparation_work.cpp)
+target_include_directories(pipeline-preparation-work-tests PRIVATE include)
+add_test(NAME pipeline-preparation-work COMMAND pipeline-preparation-work-tests)

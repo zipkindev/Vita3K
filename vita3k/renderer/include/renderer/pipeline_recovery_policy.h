@@ -12,9 +12,7 @@ struct PipelineRecoveryPolicy {
     uint64_t history = 0, registry = 0, retry_at = 0;
     uint32_t outcome = 0, attempts = 0;
     bool eligible(uint64_t now, uint64_t h, uint64_t r) const {
-        if (h != history || r != registry)
-            return true;
-        return now >= retry_at && (outcome & transient);
+        return now >= retry_at && (h != history || r != registry || (outcome & transient));
     }
     void complete(uint64_t now, uint64_t h, uint64_t r, uint32_t result) {
         if (h != history || r != registry)

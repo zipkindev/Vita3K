@@ -19,10 +19,10 @@ int main() {
     auto generation = h.generation();
     h.observe(a, 30, false);
     assert(h.generation() == generation && h.size() == 2);
-    found = h.candidates({}, {}, false);
+    found = h.candidates(a.vertex, a.fragment, false);
     assert(found[0].pass == 30 && h.observed(a));
     h.observe(a, 40, true);
-    assert(h.candidates({}, {}, true).size() == 1);
+    assert(h.candidates(a.vertex, a.fragment, true).size() == 1);
     for (unsigned i = 0; i < 1000; ++i) {
         b.pipeline_key = i + 10;
         b.words[46] = i;
@@ -43,8 +43,8 @@ int main() {
         assert(h.size() <= h.limit);
     }
     assert(h.size() == h.limit);
-    found = h.candidates({}, {}, false);
-    assert(found.front().pass == 999 && found.back().pass == 936);
+    found = h.candidates(b.vertex, b.fragment, false);
+    assert(found.size() == 1 && found.front().pass == 999);
     assert(h.observed(a)); // template eviction must not forget a recently drawn pipeline
     for (unsigned i = 0; i < h.drawn_limit + 1; ++i) {
         b.pipeline_key = 10000 + i;
@@ -52,4 +52,23 @@ int main() {
     }
     assert(!h.observed(a) && h.observed(b)); // key history is independently bounded
     h.clear(); assert(h.size() == 0 && h.generation() == 0);
+    h.observe(a, 1, false);
+    const auto relevant = h.relevant_generation(a.vertex, a.fragment);
+    assert(relevant != 0);
+    unsigned changes = 0;
+    auto previous = relevant;
+    for (unsigned i = 0; i < 10000; ++i) {
+        b.vertex = {}; b.fragment = {};
+        b.vertex[0] = 99; b.fragment[0] = 98;
+        b.vertex[1] = i & 255; b.vertex[2] = i >> 8;
+        b.fragment[1] = i & 255; b.fragment[2] = i >> 8;
+        b.pipeline_key = i + 50000;
+        h.observe(b, i, false);
+        auto g = h.relevant_generation(a.vertex, a.fragment);
+        changes += g != previous;
+        previous = g;
+        assert(h.candidates(a.vertex, a.fragment, false).size() <= 1);
+    }
+    assert(changes == 1 && previous == 0); // only the actual related-state eviction changes it
+
 }

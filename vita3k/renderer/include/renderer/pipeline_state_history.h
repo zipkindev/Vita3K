@@ -14,6 +14,7 @@ public:
         ExactPipelineRecipe recipe;
         Pass pass;
         bool interlock;
+        uint64_t revision;
     };
     static constexpr size_t limit = 64, pair_limit = 8, drawn_limit = 4096;
     uint64_t generation() const { return revision; }
@@ -30,7 +31,8 @@ public:
             drawn_order.push_back(recipe.pipeline_key);
         }
         const auto same = [&](const auto &e) { return e.interlock == interlock && e.recipe == recipe; };
-        const bool known = std::any_of(states.begin(), states.end(), same);
+        const auto old = std::find_if(states.begin(), states.end(), same);
+        const uint64_t state_revision = old == states.end() ? ++revision : old->revision;
         std::erase_if(states, same);
         // Preserve different shader associations for identical fixed state. Bound each
         // pair as well as total history so a busy effect cannot consume every slot.
@@ -41,17 +43,22 @@ public:
         });
         if (states.size() == limit)
             states.pop_back();
-        states.insert(states.begin(), { recipe, pass, interlock });
-        if (!known)
-            ++revision;
+        states.insert(states.begin(), { recipe, pass, interlock, state_revision });
     }
     bool observed(const ExactPipelineRecipe &recipe) const {
         return drawn_keys.contains(recipe.pipeline_key);
     }
+    uint64_t relevant_generation(const std::array<uint8_t, 32> &vertex, const std::array<uint8_t, 32> &fragment, bool interlock = false) const {
+        uint64_t result = 0;
+        for (const auto &e : states)
+            if (e.interlock == interlock && (e.recipe.vertex == vertex || e.recipe.fragment == fragment))
+                result = std::max(result, e.revision);
+        return result;
+    }
     auto candidates(const std::array<uint8_t, 32> &vertex, const std::array<uint8_t, 32> &fragment, bool interlock) const {
         std::vector<Entry> result;
         for (const auto &e : states)
-            if (e.interlock == interlock)
+            if (e.interlock == interlock && (e.recipe.vertex == vertex || e.recipe.fragment == fragment))
                 result.push_back(e);
         const auto score = [&](const auto &e) { return (e.recipe.fragment == fragment ? 4 : 0) + (e.recipe.vertex == vertex ? 2 : 0); };
         std::stable_sort(result.begin(), result.end(), [&](const auto &a, const auto &b) { return score(a) > score(b); });

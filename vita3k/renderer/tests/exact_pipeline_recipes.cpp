@@ -7,6 +7,21 @@
 #include <renderer/exact_pipeline_recipes.h>
 #include <sstream>
 int main() {
+    renderer::ExactPipelineRecipes used;
+    renderer::ExactPipelineRecipe predicted;
+    predicted.pipeline_key = 7945641812617116360ULL;
+    assert(!used.learn_used_prediction(predicted, true, false, 138000000)); // unused/failed
+    assert(!used.learn_used_prediction(predicted, false, true, 138000000));
+    assert(!used.learn_used_prediction(predicted, true, true, 1999999));
+    assert(used.entries().empty());
+    assert(used.learn_used_prediction(predicted, true, true, 138000000));
+    assert(!used.learn_used_prediction(predicted, true, true, 138000000)); // one owner/use
+    std::ostringstream learned_out(std::ios::binary);
+    assert(used.write(learned_out));
+    renderer::ExactPipelineRecipes next_launch;
+    std::istringstream learned_in(learned_out.str(), std::ios::binary);
+    assert(next_launch.read(learned_in));
+    assert(next_launch.entries().size() == 1 && next_launch.entries()[0] == predicted);
     renderer::ExactPipelineRecipes p;
     renderer::ExactPipelineRecipe a;
     a.vertex[31] = 255;

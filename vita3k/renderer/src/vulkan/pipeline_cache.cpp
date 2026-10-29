@@ -711,6 +711,7 @@ void PipelineCache::cleanup() {
         for (const auto &[variant, row] : pair_coverage)
             LOG_INFO("[PIPECOVER] pair variant={} pair={} queued_qpc={} completed_qpc={} outcome={} first_queued_qpc={} outcomes={} attempts={} sources={}", variant, row.pair, row.queued_qpc, row.completed_qpc, row.outcome, row.first_queued_qpc, row.outcomes, row.attempts, row.sources);
         LOG_INFO("[PIPERECOVERY] requeued={} evicted={} history_limit={} deferred_limit={}", recovery_requeued, recovery_evicted, decltype(warm_state_history)::limit, warm_pending_limit);
+        LOG_INFO("[PIPEWORK] attempts={} suppressed={} decisions={} decision_evictions={} learned_predictions={} attempt_burst={} refill_ns={} scan_limit={}", recovery_attempts, recovery_suppressed, recovery_decisions.size(), recovery_decisions.evictions, recovery_learned, PipelinePreparationWorkBudget::burst, PipelinePreparationWorkBudget::interval_ns, PipelinePreparationWorkBudget::scan_limit);
         exact_coverage.clear();
         pair_coverage.clear();
         LOG_INFO("[PIPEEXACT] session recipes={} queued={} prepared={} reused={} draw_claimed={}",
@@ -733,7 +734,10 @@ void PipelineCache::cleanup() {
         protected_pairs = {};
         loaded_protected_pairs.clear();
         recovery_requeued = recovery_evicted = recovery_cursor = 0;
-        warm_shader_generation = 0;
+        warm_shader_readiness.clear();
+        recovery_decisions.clear();
+        preparation_work_budget = {};
+        recovery_suppressed = recovery_attempts = recovery_learned = 0;
         warm_state_history.clear();
         dynamic_exact_jobs = 0;
         prediction_admission = {};
@@ -900,7 +904,7 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
 
     if (!module) {
         // This thread owns the slot. A variant load publishes under shaders_mutex.
-        module = load_cached_shader(hash, fmt::format("vk{}{}-{}.spv", shader::CURRENT_VERSION, version_suffix, hex_string(base_hash)));
+        module = load_cached_shader(hash, fmt::format("vk{}{}-{}.spv", shader::CURRENT_VERSION, version_suffix, hex_string(base_hash)), base_hash);
     }
     if (module) {
         return vk::PipelineShaderStageCreateInfo{
@@ -932,7 +936,7 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
             std::lock_guard<std::mutex> guard(shaders_mutex);
             *shader_module = module;
         }
-        warm_shader_generation.fetch_add(1, std::memory_order_relaxed);
+        note_shader_ready(base_hash);
         shaders_ready.notify_all();
     } catch (...) {
         {
@@ -2349,13 +2353,13 @@ vk::ShaderModule PipelineCache::precompile_shader(const Sha256Hash &hash, bool s
     if (!fs::exists(state.shaders_path) || fs::is_empty(state.shaders_path))
         return nullptr;
 
-    return load_cached_shader(hash, fmt::format("vk{}-{}.spv", shader::CURRENT_VERSION, hex_string(hash)));
+    return load_cached_shader(hash, fmt::format("vk{}-{}.spv", shader::CURRENT_VERSION, hex_string(hash)), hash);
 } catch (const std::exception &error) {
     LOG_ERROR("Could not load cached shader {}: {}", hex_string(hash), error.what());
     return nullptr;
 }
 
-vk::ShaderModule PipelineCache::load_cached_shader(const Sha256Hash &hash, const std::string &shader_file_name) try {
+vk::ShaderModule PipelineCache::load_cached_shader(const Sha256Hash &hash, const std::string &shader_file_name, const Sha256Hash &base_hash) try {
     const std::vector<uint32_t> source = renderer::pre_load_shader_spirv(state.shaders_path / shader_file_name);
 
     if (source.empty())
@@ -2371,7 +2375,7 @@ vk::ShaderModule PipelineCache::load_cached_shader(const Sha256Hash &hash, const
         std::lock_guard<std::mutex> guard(shaders_mutex);
         shaders[hash] = shader;
     }
-    warm_shader_generation.fetch_add(1, std::memory_order_relaxed);
+    note_shader_ready(base_hash);
     shaders_ready.notify_all();
 
     return shader;
@@ -2453,6 +2457,7 @@ void PipelineCache::schedule_exact_locked() {
 }
 
 void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair) {
+    bool register_bindings = true;
     if (actual_pair && vertex && fragment && vertex->vertex_program && fragment->fragment_program) {
         std::lock_guard<std::mutex> guard(warm_mutex);
         if (!warm_enabled || warm_stopping)
@@ -2460,12 +2465,14 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
         const uint64_t identity = warm_pair_key(vertex->vertex_program->hash, fragment->fragment_program->hash, fragment->fragment_program->output_register_format);
         const uint64_t variant = identity ^ std::rotl(vertex->key_hash, 17) ^ std::rotl(static_cast<const VKFragmentProgram &>(*fragment->fragment_program).blending_hash, 31);
         const bool first_binding = early_pairs.observe(variant, vertex, fragment);
+        // A full epoch cache must not suppress registration in later levels.
+        register_bindings = first_binding || early_pairs.size() >= PipelineBindingEpochs<ProgramBinding>::limit;
         if (first_binding && early_pairs.size() <= 128)
             LOG_INFO("[PIPEEARLY] actual_pair={} variant={} vertex={} fragment={} qpc={}", identity, variant, hex_string(vertex->vertex_program->hash), hex_string(fragment->fragment_program->hash), util::PipelineProfile::counter());
     }
     if (!warm_enabled)
         return;
-    {
+    if (register_bindings) {
         std::lock_guard<std::mutex> guard(warm_mutex);
         const auto register_stage = [&](const auto &binding, bool is_vertex) {
             if (!binding || (is_vertex ? !binding->vertex_program : !binding->fragment_program) || binding->is_maskupdate)
@@ -2518,6 +2525,21 @@ void PipelineCache::warm_program_pair(const std::shared_ptr<ProgramBinding> &ver
         queue_warm_pair(vertex, fragment, actual_pair);
 }
 
+void PipelineCache::note_shader_ready(const Sha256Hash &base_hash) {
+    std::lock_guard<std::mutex> guard(warm_mutex);
+    warm_shader_readiness.ready(base_hash);
+    warm_work_ready.notify_all();
+}
+
+uint64_t PipelineCache::knowledge_generation_locked(const WarmRequest &request) const {
+    return warm_shader_readiness.generation(request.vertex->vertex_program->hash, request.fragment->fragment_program->hash);
+}
+
+uint64_t PipelineCache::history_generation_locked(const WarmRequest &request) const {
+    return warm_state_history.relevant_generation(request.vertex->vertex_program->hash, request.fragment->fragment_program->hash,
+        state.features.support_shader_interlock && request.fragment->program()->is_frag_color_used());
+}
+
 void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair) {
     if (!vertex || !fragment || !vertex->vertex_program || !fragment->fragment_program || fragment->is_maskupdate)
         return;
@@ -2553,6 +2575,14 @@ void PipelineCache::queue_warm_pair(const std::shared_ptr<ProgramBinding> &verte
         util::PipelineScope bounded(util::PipelineKind::WarmBounded, { 0, pair });
         return;
     }
+    const auto now = pipeline_clock_ns();
+    const auto h = warm_state_history.relevant_generation(vertex->vertex_program->hash, fragment->fragment_program->hash,
+        state.features.support_shader_interlock && fragment->program()->is_frag_color_used());
+    const auto ready = warm_shader_readiness.generation(vertex->vertex_program->hash, fragment->fragment_program->hash);
+    if (!recovery_decisions.eligible(request_key, now, h, ready)) {
+        ++recovery_suppressed;
+        return;
+    }
     auto *request = new WarmRequest{ vertex, fragment, pair,
         util::pipeline_profile_enabled() ? util::PipelineProfile::counter() : 0, request_key, false, {}, actual_pair };
     request->sources = actual_pair ? 2u : 1u;
@@ -2570,12 +2600,13 @@ PipelineCache::WarmRequest *PipelineCache::park_request_locked(WarmRequest *requ
     WarmRequest *retired = nullptr;
     if (deferred_pair_requests.size() >= warm_pending_limit) {
         auto oldest = std::min_element(deferred_pair_requests.begin(), deferred_pair_requests.end(), [](const auto &a, const auto &b) {
-            return a.second->recovery.retry_at < b.second->recovery.retry_at;
+            return a.second->parked_ns < b.second->parked_ns;
         });
         retired = oldest->second;
         deferred_pair_requests.erase(oldest);
         ++recovery_evicted;
     }
+    request->parked_ns = pipeline_clock_ns();
     deferred_pair_requests.emplace(request->request_key, request);
     return retired;
 }
@@ -2583,22 +2614,19 @@ PipelineCache::WarmRequest *PipelineCache::park_request_locked(WarmRequest *requ
 void PipelineCache::retry_deferred_locked(uint64_t now) {
     if (pipeline_draw_busy.load(std::memory_order_acquire))
         return;
-    if (deferred_pair_requests.empty())
+    if (deferred_pair_requests.empty() || !preparation_work_budget.scan(now))
         return;
-    // Recovery must be able to reopen a full pool without waiting for a new bind.
-    prune_predictions_locked(now, true);
-    prune_predictions_locked(now, false);
     // Rotate a bounded scan; a busy low-key pair must not starve later maps.
     const auto count = deferred_pair_requests.size();
     auto it = deferred_pair_requests.upper_bound(recovery_cursor);
     size_t queued = 0;
-    for (size_t scanned = 0; scanned < count && !deferred_pair_requests.empty() && queued < 4 && warm_pending < warm_pending_limit; ++scanned) {
+    for (size_t scanned = 0; scanned < std::min(count, PipelinePreparationWorkBudget::scan_limit) && !deferred_pair_requests.empty() && queued < 4 && warm_pending < warm_pending_limit; ++scanned) {
         if (it == deferred_pair_requests.end())
             it = deferred_pair_requests.begin();
         auto *request = it->second;
         recovery_cursor = it->first;
-        if (!request->recovery.eligible(now, warm_state_history.generation(), knowledge_generation_locked())
-            || !prediction_admission.available(now, request->actual_pair)
+        if (!recovery_decisions.eligible(request->request_key, now, history_generation_locked(*request), knowledge_generation_locked(*request))
+            || !prediction_admission.has_token(now, request->actual_pair)
             || (!request->actual_pair && warm_queue.size() >= warm_pending_limit - 8)) {
             ++it;
             continue;
@@ -2630,18 +2658,26 @@ void PipelineCache::warm_thread(MemState &mem) {
             std::unique_lock<std::mutex> lock(warm_mutex);
             // Completion and registration wake this loop. The timeout also reopens quiet-time capacity.
             warm_work_ready.wait_for(lock, std::chrono::milliseconds(25), [&] {
-                return warm_stopping || (!warm_queue.empty() && warm_running < PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)));
+                const auto now = pipeline_clock_ns();
+                return warm_stopping || (!warm_queue.empty() && (warm_queue.has_exact() || preparation_work_budget.available(now))
+                    && warm_running < PipelinePreparationQueue<WarmRequest *>::concurrency(now, last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)));
             });
             if (warm_stopping)
                 break;
             retry_deferred_locked(pipeline_clock_ns());
-            if (warm_queue.empty() || warm_running >= PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)))
+            if (warm_queue.empty() || (!warm_queue.has_exact() && !preparation_work_budget.available(pipeline_clock_ns()))
+                || warm_running >= PipelinePreparationQueue<WarmRequest *>::concurrency(pipeline_clock_ns(), last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)))
                 continue;
             request = warm_queue.pop();
-            if (!request->exact)
+            if (!request->exact) {
+                const bool admitted = preparation_work_budget.acquire(pipeline_clock_ns());
+                assert(admitted); // availability and claim share warm_mutex
+                (void)admitted;
+                ++recovery_attempts;
                 pending_pair_requests.erase(request->request_key);
-            request->history_at_start = warm_state_history.generation();
-            request->registry_at_start = knowledge_generation_locked();
+            }
+            request->history_at_start = history_generation_locked(*request);
+            request->registry_at_start = knowledge_generation_locked(*request);
             ++warm_running;
         }
         if (request->telemetry_queued) {
@@ -2685,7 +2721,7 @@ void PipelineCache::warm_thread(MemState &mem) {
                     ++row.attempts;
                     row.sources |= request->sources;
                 }
-                request->recovery.complete(pipeline_clock_ns(), request->history_at_start, request->registry_at_start, outcome);
+                recovery_decisions.complete(request->request_key, pipeline_clock_ns(), request->history_at_start, request->registry_at_start, outcome);
                 if (!warm_stopping) {
                     retired_request = park_request_locked(request);
                     request = nullptr;
@@ -2785,12 +2821,8 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
     {
         std::lock_guard<std::mutex> guard(warm_mutex);
         const auto now = pipeline_clock_ns();
-        prune_predictions_locked(now, request.actual_pair);
-        if (!prediction_admission.available(now, request.actual_pair)) {
-            if (prediction_admission.full(request.actual_pair))
-                ++prediction_full_rejected;
-            else
-                ++prediction_rate_rejected;
+        if (!prediction_admission.has_token(now, request.actual_pair)) {
+            ++prediction_rate_rejected;
             outcome |= 128;
             return false;
         }
@@ -2802,7 +2834,8 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
     }
     // No observed state is better than an expensive, unrelated zero-filled pipeline.
     if (states.empty()) {
-        outcome |= 8;
+        std::lock_guard<std::mutex> guard(warm_mutex);
+        outcome |= warm_state_history.size() ? 1024 : 8;
         return false;
     }
     bool prepared = false;
@@ -3102,6 +3135,8 @@ vk::Pipeline PipelineCache::reuse_exact_pipeline(const ExactPipelineRecipe &reci
         return nullptr;
     }
     const auto pipeline = job->pipeline;
+    if (exact_recipes.learn_used_prediction(recipe, job->predicted, bool(pipeline), job->compile_ns))
+        ++recovery_learned;
     job->pipeline = nullptr;
     job->status = ExactWarmJob::Taken;
     --exact_live_jobs;
@@ -3126,6 +3161,7 @@ bool PipelineCache::warm_exact_pipeline(const WarmRequest &request, MemState &me
         job->worker_id = GetCurrentThreadId();
 #endif
     }
+    const auto compile_started_ns = pipeline_clock_ns();
     vk::Pipeline pipeline;
     try {
         const auto &r = job->recipe;
@@ -3146,8 +3182,10 @@ bool PipelineCache::warm_exact_pipeline(const WarmRequest &request, MemState &me
     } catch (const std::exception &error) {
         LOG_WARN("[PIPEEXACT] exact preparation failed: {}", error.what());
     }
+    const auto compiled_ns = pipeline_clock_ns() - compile_started_ns;
     {
         std::lock_guard<std::mutex> guard(warm_mutex);
+        job->compile_ns = compiled_ns;
         job->pipeline = pipeline;
         if (pipeline)
             ++exact_prepared_count;

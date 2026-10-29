@@ -26,6 +26,7 @@
 #include <renderer/pipeline_prediction_admission.h>
 #include <renderer/pipeline_state_history.h>
 #include <renderer/pipeline_recovery_policy.h>
+#include <renderer/pipeline_preparation_work.h>
 #include <renderer/protected_pipeline_pairs.h>
 #include <util/containers.h>
 #include <vkutil/vkutil.h>
@@ -159,7 +160,7 @@ private:
         vk::Pipeline pipeline;
         uint32_t worker_id = 0;
         bool predicted = false, actual_pair = false, prediction_slot = false, draw_waiting = false;
-        uint64_t completed_ns = 0, prediction_request_key = 0;
+        uint64_t completed_ns = 0, prediction_request_key = 0, compile_ns = 0;
     };
     ExactPipelineRecipes exact_recipes;
     std::vector<std::pair<ExactPipelineRecipe, vk::RenderPass>> loaded_exact_recipes;
@@ -214,9 +215,9 @@ private:
         bool learned = false;
         std::shared_ptr<ExactWarmJob> exact;
         bool actual_pair = false;
-        PipelineRecoveryPolicy recovery;
         uint64_t history_at_start = 0, registry_at_start = 0;
         uint32_t sources = 0;
+        uint64_t parked_ns = 0;
     };
     PipelinePreparationQueue<WarmRequest *> warm_queue;
     std::condition_variable warm_work_ready;
@@ -231,8 +232,13 @@ private:
     std::unordered_set<uint64_t> warm_pairs_requested;
     std::map<uint64_t, WarmRequest *> pending_pair_requests;
     PipelineBindingEpochs<ProgramBinding> early_pairs;
-    std::atomic<uint64_t> warm_shader_generation{ 0 };
-    uint64_t knowledge_generation_locked() const { return warm_registry_generation + warm_shader_generation.load(std::memory_order_relaxed); }
+    PipelineStageReadiness warm_shader_readiness;
+    PipelineRecoveryCache recovery_decisions;
+    PipelinePreparationWorkBudget preparation_work_budget;
+    uint64_t recovery_suppressed = 0, recovery_attempts = 0, recovery_learned = 0;
+    void note_shader_ready(const Sha256Hash &base_hash);
+    uint64_t knowledge_generation_locked(const WarmRequest &request) const;
+    uint64_t history_generation_locked(const WarmRequest &request) const;
     std::map<uint64_t, WarmRequest *> deferred_pair_requests;
     uint64_t recovery_requeued = 0, recovery_evicted = 0, recovery_cursor = 0;
     void retry_deferred_locked(uint64_t now);
@@ -292,7 +298,7 @@ private:
     void bisect_pipeline_failure(const vk::GraphicsPipelineCreateInfo &failing_info);
 
     // ready_only: return an empty stage instead of loading or translating a shader that has no module yet
-    vk::ShaderModule load_cached_shader(const Sha256Hash &hash, const std::string &filename);
+    vk::ShaderModule load_cached_shader(const Sha256Hash &hash, const std::string &filename, const Sha256Hash &base_hash);
     vk::PipelineShaderStageCreateInfo retrieve_shader(const SceGxmProgram *program, const Sha256Hash &hash, bool is_vertex, bool maskupdate, MemState &mem, const shader::Hints &hints, bool is_srgb = false, bool has_casts = false, bool ready_only = false);
     vk::PipelineVertexInputStateCreateInfo get_vertex_input_state(const ProgramBinding &vertex_program);
 

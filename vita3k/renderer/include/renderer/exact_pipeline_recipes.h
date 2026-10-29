@@ -51,6 +51,9 @@ public:
         recipes.push_back(recipe);
         return true;
     }
+    bool learn_used_prediction(const ExactPipelineRecipe &recipe, bool predicted, bool actual_use, uint64_t compile_ns) {
+        return predicted && actual_use && compile_ns >= 2000000ULL && learn(recipe);
+    }
     bool write(std::ostream &out) const {
         std::vector<uint8_t> bytes;
         const auto append = [&](uint64_t v, unsigned n) { for (unsigned i = 0; i < n; ++i) bytes.push_back(uint8_t(v >> (8 * i))); };

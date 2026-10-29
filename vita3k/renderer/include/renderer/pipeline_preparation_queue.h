@@ -15,6 +15,7 @@ public:
     static constexpr size_t limit = 64;
     size_t size() const { return exact.size() + actual.size() + speculative.size(); }
     bool empty() const { return size() == 0; }
+    bool has_exact() const { return !exact.empty(); }
     bool push(T item, bool learned_exact, bool actual_pair = false) {
         if (size() >= limit)
             return false;
