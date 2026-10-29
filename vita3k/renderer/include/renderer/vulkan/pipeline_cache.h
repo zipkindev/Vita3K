@@ -23,6 +23,7 @@
 #include <renderer/exact_pipeline_recipes.h>
 #include <renderer/pipeline_binding_epochs.h>
 #include <renderer/pipeline_preparation_queue.h>
+#include <renderer/pipeline_state_history.h>
 #include <renderer/protected_pipeline_pairs.h>
 #include <util/containers.h>
 #include <vkutil/vkutil.h>
@@ -233,24 +234,10 @@ private:
     vk::RenderPass warm_render_pass;
     vk::RenderPass warm_interlock_render_pass;
 
-    // the draw state that changes what the driver compiles for a shader pair: the surface format, the raw F16
-    // attachment and surface casts. The warm threads use the states draws use most, learned while the game runs.
-    struct WarmState {
-        uint32_t color_format = 0;
-        bool raw = false;
-        bool casts = false;
-        vk::RenderPass render_pass;
-        vk::RenderPass interlock_render_pass;
-        uint64_t key() const {
-            return (static_cast<uint64_t>(color_format) << 2) | (raw ? 2 : 0) | (casts ? 1 : 0);
-        }
-    };
-    // every pipeline the render thread creates counts its draw state (render thread only)
-    std::map<uint64_t, std::pair<WarmState, uint32_t>> draw_states;
-    uint32_t draw_states_total = 0;
-    // the states the warm threads use, guarded by warm_mutex
-    std::vector<WarmState> warm_states;
-    void note_draw_state(const WarmState &draw_state);
+    // Recent complete draw states replace the old zero-filled speculative state.
+    PipelineStateHistory<vk::RenderPass> warm_state_history;
+    size_t dynamic_exact_jobs = 0;
+    static constexpr size_t dynamic_exact_limit = 128;
     void warm_thread(MemState &mem);
     bool warm_pair(const WarmRequest &request, MemState &mem, uint32_t &outcome);
     void stop_warm_threads();

@@ -712,6 +712,7 @@ void PipelineCache::cleanup() {
         pair_coverage.clear();
         LOG_INFO("[PIPEEXACT] session recipes={} queued={} prepared={} reused={} draw_claimed={}",
             exact_recipes.entries().size(), exact_jobs.size(), exact_prepared_count, exact_reused_count, exact_draw_claimed_count);
+        LOG_INFO("[PIPESTATE] dynamic_jobs={} limit={}", dynamic_exact_jobs, dynamic_exact_limit);
         LOG_INFO("[PIPESCHED] misses={} waits={} refills={} active_limit=1 quiet_limit=2", exact_miss_count, exact_wait_count, exact_refill_count);
         exact_prepared_count = exact_reused_count = exact_draw_claimed_count = 0;
         exact_miss_count = exact_wait_count = exact_refill_count = 0;
@@ -724,11 +725,10 @@ void PipelineCache::cleanup() {
         protected_pairs = {};
         loaded_protected_pairs.clear();
         pairs_drawn.clear();
-        warm_states.clear();
+        warm_state_history.clear();
+        dynamic_exact_jobs = 0;
     }
     render_pass_recipes.clear();
-    draw_states.clear();
-    draw_states_total = 0;
 
     // stop threads (queued requests are abandoned at shutdown)
     if (use_async_compilation) {
@@ -2189,15 +2189,11 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     const bool use_shader_interlock = state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
     const vk::RenderPass render_pass = use_shader_interlock ? context.current_shader_interlock_pass : context.current_render_pass;
 
-    // the warm threads learn from it which draw states new pipelines use
-    const WarmState draw_state{
-        .color_format = static_cast<uint32_t>(record.color_surface.colorFormat),
-        .raw = state.features.preserve_f16_nan_as_u16 && !use_shader_interlock && record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16 && static_cast<bool>(record.color_surface.data),
-        .casts = has_casts,
-        .render_pass = context.current_render_pass,
-        .interlock_render_pass = context.current_shader_interlock_pass,
-    };
-    note_draw_state(draw_state);
+    // Capture real fixed state and texture hints before any generic preparation can guess them.
+    if (recipe && warm_enabled) {
+        std::lock_guard<std::mutex> guard(warm_mutex);
+        warm_state_history.observe(*recipe, render_pass, use_shader_interlock);
+    }
     const uint64_t draw_pair = warm_pair_key(vertex_program_binding->vertex_program->hash, fragment_program.hash, fragment_program.output_register_format);
     {
         std::lock_guard<std::mutex> guard(warm_mutex);
@@ -2694,107 +2690,100 @@ bool PipelineCache::warm_pair(const WarmRequest &request, MemState &mem, uint32_
     const SceGxmProgram &vertex_gxp = *vertex_binding.program();
     const SceGxmProgram &fragment_gxp = *fragment_binding.program();
 
-    std::vector<WarmState> states;
+    std::vector<PipelineStateHistory<vk::RenderPass>::Entry> states;
+    const bool interlock = state.features.support_shader_interlock && fragment_gxp.is_frag_color_used();
     {
         std::lock_guard<std::mutex> guard(warm_mutex);
-        // a draw already created a pipeline for it, so the driver cache holds that draw's state
         if (!request.learned && pairs_drawn.contains(request.pair_key)) {
             outcome |= 1;
             util::PipelineScope skipped(util::PipelineKind::WarmSkipDrawn, { 0, request.pair_key });
             return false;
         }
-        states = warm_states;
+        states = warm_state_history.candidates(vertex_binding.vertex_program->hash, fragment_binding.fragment_program->hash, interlock);
     }
+    // No observed state is better than an expensive, unrelated zero-filled pipeline.
     if (states.empty()) {
-        // nothing drawn yet: an RGBA8 surface without casts
-        states.push_back(WarmState{
-            .color_format = static_cast<uint32_t>(SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR),
-            .render_pass = warm_render_pass,
-            .interlock_render_pass = warm_interlock_render_pass,
-        });
-    }
-
-    shader::Hints hints{
-        .attributes = &vertex_binding.attributes,
-        .color_format = SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR,
-    };
-    std::fill_n(hints.vertex_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
-    std::fill_n(hints.fragment_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
-    hints.output_register_format = fragment_binding.fragment_program->output_register_format;
-
-    // a stage with no cached module is only generated here when the draw would generate the same module
-    if (!shader_available(vertex_gxp, vertex_binding.vertex_program->hash, true, hints) && !codegen_ignores_draw_hints(vertex_gxp, true, hints)) {
-        outcome |= 2;
-        util::PipelineScope skipped(util::PipelineKind::WarmMissingShader, { 0, request.pair_key });
+        outcome |= 8;
         return false;
     }
-
     bool prepared = false;
-    const bool interlock = state.features.support_shader_interlock && fragment_gxp.is_frag_color_used();
-    for (const WarmState &warm_state : states) {
-        hints.color_format = static_cast<SceGxmColorFormat>(warm_state.color_format);
-        if (!shader_available(fragment_gxp, fragment_binding.fragment_program->hash, false, hints) && !codegen_ignores_draw_hints(fragment_gxp, false, hints)) {
+    for (const auto &observed : states) {
+        if (warm_stopping)
+            break;
+        auto recipe = observed.recipe;
+        recipe.vertex = vertex_binding.vertex_program->hash;
+        recipe.fragment = fragment_binding.fragment_program->hash;
+        recipe.layout = vertex_binding.key_hash;
+        recipe.blend = static_cast<const VKFragmentProgram &>(*fragment_binding.fragment_program).blending_hash;
+        auto &w = recipe.words;
+        w[28] = static_cast<uint32_t>(fragment_binding.fragment_program->output_register_format);
+        const bool raw = state.features.preserve_f16_nan_as_u16 && !interlock
+            && w[6] == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16 && w[2];
+        w[29] = raw && state.features.direct_fragcolor && fragment_gxp.is_frag_color_used();
+        canonicalize_exact_pipeline(recipe, vertex_binding.vertex_program->textures_used.to_ulong(),
+            fragment_binding.fragment_program->textures_used.to_ulong(), SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
+        const auto record = exact_record(recipe);
+        recipe.pipeline_key = hash_pipeline_record(record) ^ recipe.layout ^ recipe.blend ^ w[0];
+        if (fragment_gxp.is_native_color() && w[28] != SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED)
+            recipe.pipeline_key ^= uint64_t(w[28]) << 56;
+        const int channel = gxm::one_channel_source_component(static_cast<SceGxmColorFormat>(w[1]));
+        if (channel > 0)
+            recipe.pipeline_key ^= uint64_t(channel) << 48;
+        if (w[3])
+            recipe.pipeline_key ^= 0xC2B2AE3D27D4EB4FULL;
+        if (!valid_exact_recipe(recipe))
+            continue;
+        shader::Hints hints{};
+        hints.attributes = &vertex_binding.attributes;
+        hints.color_format = static_cast<SceGxmColorFormat>(w[1]);
+        hints.output_register_format = static_cast<SceGxmOutputRegisterFormat>(w[28]);
+        hints.raw_color_attachment_input = w[29];
+        for (size_t i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; ++i) {
+            hints.vertex_textures[i] = static_cast<SceGxmTextureFormat>(w[30 + i]);
+            hints.fragment_textures[i] = static_cast<SceGxmTextureFormat>(w[46 + i]);
+        }
+        // Do not generate a speculative shader variant unless its code ignores draw hints.
+        if (!shader_available(vertex_gxp, recipe.vertex, true, hints) && !codegen_ignores_draw_hints(vertex_gxp, true, hints)) {
+            outcome |= 2;
+            continue;
+        }
+        if (!shader_available(fragment_gxp, recipe.fragment, false, hints) && !codegen_ignores_draw_hints(fragment_gxp, false, hints)) {
             outcome |= 4;
-            util::PipelineScope skipped(util::PipelineKind::WarmMissingShader, { 0, request.pair_key });
             continue;
         }
-        const vk::RenderPass render_pass = interlock ? warm_state.interlock_render_pass : warm_state.render_pass;
-        if (!render_pass) {
-            outcome |= 8;
-            continue;
+        auto job = std::make_shared<ExactWarmJob>();
+        job->recipe = recipe;
+        job->render_pass = observed.pass;
+        {
+            std::lock_guard<std::mutex> guard(warm_mutex);
+            // Exact loaded recipes retain priority and share the same publication/ownership path.
+            if (pairs_drawn.contains(request.pair_key)) {
+                outcome |= 1;
+                return false;
+            }
+            if (exact_jobs.contains(recipe))
+                return false;
+            if (warm_stopping || dynamic_exact_jobs >= dynamic_exact_limit || exact_live_jobs >= exact_ready_limit)
+                break;
+            exact_jobs.emplace(recipe, job);
+            ++exact_live_jobs;
+            ++dynamic_exact_jobs;
+            note_exact_coverage_locked(recipe.pipeline_key, request.pair_key, Queued);
+            LOG_INFO("[PIPESTATE] prepare key={} pair={} source_key={} ordinal={}",
+                recipe.pipeline_key, request.pair_key, observed.recipe.pipeline_key, dynamic_exact_jobs);
         }
-        GxmRecordState record{};
-        record.color_base_format = gxm::get_base_format(hints.color_format);
-        const bool has_color_surface_data = warm_state.raw || record.color_base_format != SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16;
-
-        vk::Pipeline pipeline;
-        if (support_cache_only_creation) {
-            util::PipelineScope probe(util::PipelineKind::WarmProbe, { 0, request.pair_key });
-            pipeline = compile_pipeline(SCE_GXM_PRIMITIVE_TRIANGLES, render_pass, vertex_binding, fragment_binding, record, has_color_surface_data, hints, warm_state.casts, mem, true);
-            probe.result(bool(pipeline));
-        }
-        if (!pipeline) {
-            util::PipelineScope compile(util::PipelineKind::WarmCompile, { 0, request.pair_key });
-            pipeline = compile_pipeline(SCE_GXM_PRIMITIVE_TRIANGLES, render_pass, vertex_binding, fragment_binding, record, has_color_surface_data, hints, warm_state.casts, mem);
-            compile.result(bool(pipeline));
-        }
-        if (!pipeline) {
-            outcome |= 16;
-            continue;
-        }
-        outcome |= 32;
-        // only the driver cache entry is wanted: the draw creates its own pipeline from it
-        state.device.destroyPipeline(pipeline);
-        prepared = true;
+        auto exact_request = request;
+        exact_request.exact = job;
+        prepared = warm_exact_pipeline(exact_request, mem);
+        outcome |= prepared ? 32 : 16;
+        // At most one predicted state per pair request. Keep render-thread/driver contention bounded.
+        break;
     }
     return prepared;
 } catch (const std::exception &error) {
     outcome |= 64;
     LOG_WARN("[PIPEWARM] background compile failed: {}", error.what());
     return false;
-}
-
-void PipelineCache::note_draw_state(const WarmState &draw_state) {
-    auto &entry = draw_states[draw_state.key()];
-    if (entry.second == 0)
-        entry.first = draw_state;
-    entry.second++;
-    draw_states_total++;
-
-    // the most common state
-    std::vector<std::pair<uint32_t, const WarmState *>> ranked;
-    for (const auto &[state_key, value] : draw_states)
-        ranked.push_back({ value.second, &value.first });
-    std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-    std::vector<WarmState> top;
-    for (size_t i = 0; i < ranked.size() && top.size() < 2; i++) {
-        if (i > 0 && ranked[i].first * 4 < draw_states_total)
-            break;
-        top.push_back(*ranked[i].second);
-    }
-    std::lock_guard<std::mutex> guard(warm_mutex);
-    if (top.size() != warm_states.size() || !std::equal(top.begin(), top.end(), warm_states.begin(), [](const WarmState &a, const WarmState &b) { return a.key() == b.key(); }))
-        warm_states = top;
 }
 
 bool PipelineCache::note_exact_coverage_locked(uint64_t key, uint64_t pair, uint32_t event) {

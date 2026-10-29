@@ -154,6 +154,10 @@ add_executable(exact-pipeline-recipes-tests tests/exact_pipeline_recipes.cpp)
 target_include_directories(exact-pipeline-recipes-tests PRIVATE include)
 add_test(NAME exact-pipeline-recipes COMMAND exact-pipeline-recipes-tests)
 
+add_executable(pipeline-state-history-tests tests/pipeline_state_history.cpp)
+target_include_directories(pipeline-state-history-tests PRIVATE include)
+add_test(NAME pipeline-state-history COMMAND pipeline-state-history-tests)
+
 add_executable(pipeline-preparation-queue-tests tests/pipeline_preparation_queue.cpp)
 target_include_directories(pipeline-preparation-queue-tests PRIVATE include)
 add_test(NAME pipeline-preparation-queue COMMAND pipeline-preparation-queue-tests)
