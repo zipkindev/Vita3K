@@ -47,6 +47,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply source-pinned dependency patches
+        run: python3 tools/windows-build/ApplyDependencyPatches.py --source .
+
       - name: Set up build environment
         run: bash ./.ci/setup-linux.sh x86_64 without-appimage
 
