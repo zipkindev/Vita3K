@@ -59,10 +59,12 @@ if($LASTEXITCODE){throw 'Pinned submodule checkout failed'}
 & $python "$PSScriptRoot\ApplyDependencyPatches.py" --source $source
 if($LASTEXITCODE){throw 'Source-pinned dependency patch failed'}
 if((Get-Content "$source\vita3k\ngs\src\modules\atrac9.cpp" -Raw) -notmatch 'superframe_bytes_left'){throw 'Selected source lacks the corrected bounded NGS audio caller'}
-foreach($name in @('diagnostic-identity.patch','diagnostic-build-support.patch','atrac9-input-span.patch')){
+foreach($name in @('diagnostic-identity.patch','diagnostic-build-support.patch')){
  & git -C $source apply "$PSScriptRoot\patches\$name"
  if($LASTEXITCODE){throw "Source support patch failed: $name"}
 }
+& $python "$PSScriptRoot\ApplySourcePatch.py" --source $source --patch "$PSScriptRoot\patches\atrac9-input-span.patch" --allow-applied
+if($LASTEXITCODE){throw 'ATRAC9 input-span source support patch failed'}
 & git -C "$source\external\LibAtrac9" apply "$PSScriptRoot\patches\libatrac9-bounded.patch"
 if($LASTEXITCODE){throw 'Missing bounded decoder support patch failed'}
 # These support patches target the separately sourced Plus baseline; unrelated sources fail closed.
