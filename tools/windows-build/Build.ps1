@@ -35,7 +35,7 @@ if($PreflightOnly){
  Set-Location $dir
  '#include <windows.h>'+"`n"+'int main(){return GetCurrentProcessId()==0;}' | Set-Content probe.cpp -Encoding ascii
  $ErrorActionPreference='Continue'
- & cl.exe /nologo /O2 /Z7 probe.cpp /Fe:probe.exe /link /DEBUG:FULL /PDB:probe.pdb
+ & cl.exe /nologo /O2 /Z7 probe.cpp /Fe:probe.exe /link /DEBUG:FULL /PDB:probe.pdb /PDBALTPATH:probe.pdb
  if($LASTEXITCODE){throw 'Compiler/linker probe failed'}
  & .\probe.exe
  if($LASTEXITCODE){throw 'Native executable probe failed'}
@@ -79,17 +79,24 @@ $text=$text.Replace('#define FORK_BUILD_SEQ 1',('#define FORK_BUILD_SEQ '+$seque
 [IO.File]::WriteAllText($header,$text,(New-Object Text.UTF8Encoding($false)))
 & git -C $source add -N vita3k/util/include/util/fork_build.h
 $build=Join-Path $env:GITHUB_WORKSPACE 'native-build'
+# Keep linker/LTCG temporary object names out of user profile directories in PDBs.
+$env:TEMP=Join-Path $build 'link-temp'
+$env:TMP=$env:TEMP
+New-Item -ItemType Directory -Force $env:TEMP | Out-Null
 $evidence=Join-Path $env:GITHUB_WORKSPACE 'build-evidence'
 New-Item -ItemType Directory -Force $evidence | Out-Null
 Set-Location $source
 $ErrorActionPreference='Continue'
-& $cmake -S $source -B $build -G 'Ninja Multi-Config' "-DCMAKE_MAKE_PROGRAM=$ninja" "-DCMAKE_TOOLCHAIN_FILE=$tools/vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DCMAKE_CONFIGURATION_TYPES=RelWithDebInfo -DCMAKE_AUTOGEN_PARALLEL=4 -DUSE_LTO=ALWAYS -DTRACY_ENABLE_ON_CORE_COMPONENTS=OFF '-DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=/DEBUG:FULL /OPT:REF /OPT:ICF /INCREMENTAL:NO' 2>&1 | Tee-Object "$evidence\configure.log"
-if($LASTEXITCODE){throw 'Configure failed'}
-& $cmake --build $build --config RelWithDebInfo --parallel $Parallel 2>&1 | Tee-Object "$evidence\build.log"
-if($LASTEXITCODE){throw 'Build failed'}
+& $cmake -S $source -B $build -G 'Ninja Multi-Config' "-DCMAKE_MAKE_PROGRAM=$ninja" "-DCMAKE_TOOLCHAIN_FILE=$tools/vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DCMAKE_CONFIGURATION_TYPES=RelWithDebInfo -DCMAKE_AUTOGEN_PARALLEL=4 -DUSE_LTO=ALWAYS -DTRACY_ENABLE_ON_CORE_COMPONENTS=OFF '-DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=/DEBUG:FULL /OPT:REF /OPT:ICF /INCREMENTAL:NO /PDBALTPATH:Vita3K.pdb' 2>&1 | Out-File "$evidence\configure.log"
+if($LASTEXITCODE){throw 'Configure failed; inspect private build evidence'}
+'Configure passed.'
+& $cmake --build $build --config RelWithDebInfo --parallel $Parallel 2>&1 | Out-File "$evidence\build.log"
+if($LASTEXITCODE){throw 'Build failed; inspect private build evidence'}
+'Build passed.'
 $env:PATH="$build\bin\RelWithDebInfo;$env:PATH"
-& (Join-Path (Split-Path $cmake) 'ctest.exe') --test-dir $build -C RelWithDebInfo --output-on-failure 2>&1 | Tee-Object "$evidence\tests.log"
-if($LASTEXITCODE){throw 'Tests failed'}
+& (Join-Path (Split-Path $cmake) 'ctest.exe') --test-dir $build -C RelWithDebInfo --output-on-failure 2>&1 | Out-File "$evidence\tests.log"
+if($LASTEXITCODE){throw 'Tests failed; inspect private build evidence'}
+'Native tests passed.'
 & git diff --binary | Set-Content "$evidence\source.patch"
 & git -C external/LibAtrac9 diff --binary | Set-Content "$evidence\libatrac9.patch"
 & git -C external/dynarmic diff --binary | Set-Content "$evidence\dynarmic.patch"
