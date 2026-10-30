@@ -1,6 +1,6 @@
 # Texture reuse telemetry
 
-Enable **Settings → Texture Decoding (Perf. Tweaks) → Texture Cache and Reuse Telemetry** before launching a game. This extends the existing saved `decoded-texture-telemetry` switch; it remains off by default and works globally or per game. Reports use `cache/diagnostics/texture-cache/` (or the existing explicit `VITA3K_DIAG_PVRTC_TELEMETRY` path). Close normally for a final sample. This instrumentation measures behavior; it does not change cache admission, preload ranking, eviction policy, budget or worker count.
+Enable **Settings → Texture Decoding → Texture Cache and Reuse Telemetry** before launching a game. This extends the existing saved `decoded-texture-telemetry` switch; it remains off by default and works globally or per game. Reports use `cache/diagnostics/texture-cache/` (or the existing explicit `VITA3K_DIAG_PVRTC_TELEMETRY` path). Close normally for a final sample. This instrumentation measures behavior; it does not change cache admission, preload ranking, eviction policy, budget or worker count.
 
 Schema 2 retains the original 26 CSV columns and appends cumulative reuse counters. One snapshot per second, up to 14,401 rows / less than 16 MiB per writer. No per-request file IO, unbounded queue, texture contents, addresses or fingerprints are exported. Existing scripts consuming named original columns continue to work; consumers that validate the schema or column count must accept the new version deliberately. Old diagnostic files are not pruned automatically.
 

@@ -15,6 +15,11 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <atomic>
+#include <chrono>
+#include <exception>
+#include <typeinfo>
+#include <util/fork_build.h>
 #include <util/log.h>
 
 #ifdef _WIN32
@@ -44,6 +49,9 @@ static const char *LOG_PATTERN = "%^[%H:%M:%S.%e] |%L| [%!]: %v%$";
 static constexpr size_t ASYNC_LOG_QUEUE_SIZE = 65536;
 static std::vector<spdlog::sink_ptr> sinks;
 static std::once_flag s_async_logging_once;
+#ifdef __ANDROID__
+static std::shared_ptr<spdlog::sinks::android_sink_mt> s_logcat_sink;
+#endif
 
 static std::function<void(std::string, int)> s_log_callback;
 static std::mutex s_log_callback_mutex;
@@ -51,7 +59,7 @@ static std::mutex s_log_callback_mutex;
 static void register_log_exception_handler();
 static void rebuild_default_logger();
 
-static void flush() {
+void flush() {
     spdlog::details::registry::instance().flush_all();
 }
 
@@ -83,12 +91,24 @@ void set_log_callback(std::function<void(std::string, int)> cb) {
     s_log_callback = std::move(cb);
 }
 
+#ifdef __ANDROID__
+// flushing every line and copying it to logcat only pay for themselves at debug or trace level
+static void apply_android_log_policy(const spdlog::level::level_enum log_level) {
+    const bool verbose = log_level <= spdlog::level::debug;
+    spdlog::flush_on(verbose ? spdlog::level::trace : spdlog::level::err);
+    if (s_logcat_sink)
+        s_logcat_sink->set_level(verbose ? spdlog::level::trace : spdlog::level::off);
+}
+#endif
+
 ExitCode init(const Root &root_paths, bool use_stdout) {
     sinks.clear();
-    if (use_stdout)
 #ifdef __ANDROID__
-        sinks.push_back(std::make_shared<spdlog::sinks::android_sink_mt>("Vita3K"));
+    s_logcat_sink = use_stdout ? std::make_shared<spdlog::sinks::android_sink_mt>() : nullptr;
+    if (s_logcat_sink)
+        sinks.push_back(s_logcat_sink);
 #else
+    if (use_stdout)
         sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
 #endif
 
@@ -96,8 +116,28 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
     sinks.push_back(std::make_shared<callback_sink_mt>());
 #endif
 
+    constexpr bool RELEASE_VERSION = true; // Nick
+
     if (add_sink(root_paths.get_log_path() / LOG_FILE_NAME) != Success)
         return InitConfigFailed;
+    LOG_INFO("================= Vita3K session start =================");
+    LOG_INFO("FORK BUILD seq {} compiled {} {} | {}", FORK_BUILD_SEQ, __DATE__, __TIME__, RELEASE_VERSION ? "Release Version" : FORK_BUILD_CHANGES);
+
+    std::set_terminate([]() {
+        if (const std::exception_ptr eptr = std::current_exception()) {
+            try {
+                std::rethrow_exception(eptr);
+            } catch (const std::exception &ex) {
+                LOG_CRITICAL("[CRASH] std::terminate: uncaught exception {}: {}", typeid(ex).name(), ex.what());
+            } catch (...) {
+                LOG_CRITICAL("[CRASH] std::terminate: uncaught non-std exception");
+            }
+        } else {
+            LOG_CRITICAL("[CRASH] std::terminate called with no active exception");
+        }
+        spdlog::default_logger()->flush();
+        std::abort();
+    });
 
     spdlog::set_error_handler([](const std::string &msg) {
         std::cerr << "spdlog error: " << msg << std::endl;
@@ -111,8 +151,9 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
 #endif
 
 #ifdef __ANDROID__
-    // needed, otherwise the log file contains nothing
-    spdlog::flush_on(spdlog::level::trace);
+    // the app is usually killed rather than exited, so buffered lines go out every second; set_level picks the per-line policy
+    spdlog::flush_every(std::chrono::seconds(1));
+    apply_android_log_policy(spdlog::level::trace);
 #endif
 
     register_log_exception_handler();
@@ -140,11 +181,19 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
 
 void set_level(spdlog::level::level_enum log_level) {
     spdlog::set_level(log_level);
+#ifdef __ANDROID__
+    apply_android_log_policy(log_level);
+#endif
 }
 
 ExitCode add_sink(const fs::path &log_path) {
     try {
-        sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_path.native(), true));
+        // One log file that appends across launches so the start of a session (GPU/driver init, etc is never lost by a relaunch
+        constexpr uintmax_t LOG_SIZE_CAP = 30ull * 1024 * 1024;
+        bool truncate = true;
+        if (fs::exists(log_path))
+            truncate = fs::file_size(log_path) > LOG_SIZE_CAP; // append while under the cap
+        sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_path.generic_path().native(), truncate));
     } catch (const spdlog::spdlog_ex &ex) {
         std::cerr << "File log initialization failed: " << ex.what() << std::endl;
         return InitConfigFailed;
@@ -163,7 +212,7 @@ void rebuild_default_logger() {
         spdlog::init_thread_pool(ASYNC_LOG_QUEUE_SIZE, 1);
     });
 
-    auto duplicate_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(2));
+    auto duplicate_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(2), spdlog::level::info);
     for (const auto &sink : sinks)
         duplicate_filter->add_sink(sink);
 
@@ -180,6 +229,31 @@ void rebuild_default_logger() {
 #ifdef _WIN32
 static LONG WINAPI exception_handler(PEXCEPTION_POINTERS pExp) noexcept {
     const unsigned ec = pExp->ExceptionRecord->ExceptionCode;
+
+    static std::atomic<int64_t> window_start_ms{ 0 };
+    static std::atomic<uint32_t> in_window{ 0 };
+    static std::atomic<uint64_t> suppressed{ 0 };
+    constexpr uint32_t MAX_PER_WINDOW = 32;
+    constexpr int64_t WINDOW_MS = 5000;
+
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+    int64_t started = window_start_ms.load(std::memory_order_relaxed);
+    if (now_ms - started >= WINDOW_MS
+        && window_start_ms.compare_exchange_strong(started, now_ms, std::memory_order_relaxed)) {
+        const uint64_t dropped = suppressed.exchange(0, std::memory_order_relaxed);
+        in_window.store(0, std::memory_order_relaxed);
+        if (dropped)
+            LOG_CRITICAL("Suppressed {} further exception report(s) in the previous 5s window", dropped);
+    }
+    const uint32_t seen = in_window.fetch_add(1, std::memory_order_relaxed);
+    if (seen >= MAX_PER_WINDOW) {
+        suppressed.fetch_add(1, std::memory_order_relaxed);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const bool should_flush = seen < 4;
+
     switch (ec) {
     case EXCEPTION_ACCESS_VIOLATION:
         LOG_CRITICAL("Exception EXCEPTION_ACCESS_VIOLATION ({}). ", log_hex(ec));
@@ -224,7 +298,8 @@ static LONG WINAPI exception_handler(PEXCEPTION_POINTERS pExp) noexcept {
     default:
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    flush();
+    if (should_flush)
+        flush();
     return EXCEPTION_CONTINUE_SEARCH;
 }
 

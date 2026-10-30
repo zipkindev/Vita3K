@@ -19,7 +19,6 @@ add_library(gui-qt STATIC
     src/live_area_widget.cpp
     src/log_widget.cpp
     src/persistent_settings.cpp
-    src/patch_manager_dialog.cpp
     src/pkg_install_dialog.cpp
     src/physical_key_qt.cpp
     src/qt_utils.cpp
@@ -65,10 +64,10 @@ add_library(gui-qt STATIC
     include/gui-qt/live_area_widget.h
     include/gui-qt/log_widget.h
     include/gui-qt/persistent_settings.h
-    include/gui-qt/patch_manager_dialog.h
     include/gui-qt/pkg_install_dialog.h
     include/gui-qt/physical_key_qt.h
     include/gui-qt/qt_utils.h
+    include/gui-qt/settings_tabs.h
     include/gui-qt/settings_dialog.h
     include/gui-qt/settings_dialog_tooltips.h
     include/gui-qt/theme_manager.h
@@ -110,7 +109,6 @@ target_link_libraries(gui-qt PUBLIC
     kernel
     motion
     packages
-    patch
     renderer
     touch
     gxm
@@ -121,6 +119,7 @@ target_link_libraries(gui-qt PUBLIC
     libzRIF
     psvpfsparser
     pugixml::pugixml
+    cppcommon
     updater
     input
 )
@@ -129,3 +128,20 @@ target_include_directories(gui-qt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 if (TRACY_ENABLE_ON_CORE_COMPONENTS)
 	target_link_libraries(gui-qt PRIVATE tracy)
 endif()
+
+add_executable(performance-layout-tests tests/performance_layout.cpp src/settings_dialog.ui)
+set_target_properties(performance-layout-tests PROPERTIES AUTOUIC ON AUTOUIC_SEARCH_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(performance-layout-tests PRIVATE Qt6::Widgets)
+target_include_directories(performance-layout-tests PRIVATE include)
+add_test(NAME performance-layout COMMAND performance-layout-tests)
+# A relocated Qt DLL can infer the build tree as its install prefix. Query the
+# SDK plugin path so the headless platform is found in a server/service session.
+execute_process(COMMAND "${_qt6_qmake_executable}" -query QT_INSTALL_PLUGINS
+    OUTPUT_VARIABLE _performance_qt_plugins OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _performance_qt_query_result)
+if(NOT _performance_qt_query_result EQUAL 0)
+    message(FATAL_ERROR "Could not query the Qt plugin directory for the layout test")
+endif()
+set_tests_properties(performance-layout PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_performance_qt_plugins}"
+    TIMEOUT 30)

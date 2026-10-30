@@ -34,11 +34,27 @@
 //!\cond NO_DOXYGEN
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 
+#include <renderer/decoded_texture_telemetry.h>
+#include <renderer/learned_texture_profile.h>
+#include <renderer/parallel_decode_worker.h>
 #include <renderer/pvrt-dec.h>
+#include <renderer/pvrtc-cache.h>
+#include <renderer/texture_work_profile.h>
+#include <xxhash.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace pvr {
 enum {
@@ -788,7 +804,7 @@ static int pvrtcDecompress(uint8_t *pCompressedData, Pixel32 *pDecompressedData,
     return ui32Width * ui32Height / static_cast<uint32_t>(ui32WordWidth / 2);
 }
 
-uint32_t PVRTDecompressPVRTC(const void *pCompressedData, uint32_t Do2bitMode, uint32_t XDim, uint32_t YDim, uint32_t DoPvrtType, uint8_t *pResultImage) {
+uint32_t PVRTDecompressPVRTCUncached(const void *pCompressedData, uint32_t Do2bitMode, uint32_t XDim, uint32_t YDim, uint32_t DoPvrtType, uint8_t *pResultImage) {
     // Cast the output buffer to a Pixel32 pointer.
     Pixel32 *pDecompressedData = (Pixel32 *)pResultImage;
     std::vector<Pixel32> pTempDataVector;
@@ -819,6 +835,334 @@ uint32_t PVRTDecompressPVRTC(const void *pCompressedData, uint32_t Do2bitMode, u
     }
 
     return retval;
+}
+
+static std::atomic<bool> parallel_decode_enabled{ true };
+
+int PVRTCDecodeParallelism() {
+    // Diagnostic A/B control, read once per process. 1 disables; default is 2.
+    static const int threads = [] {
+        const char *text = std::getenv("VITA3K_DIAG_PVRTC_THREADS");
+        return text && std::strcmp(text, "1") == 0 ? 1 : (text && std::strcmp(text, "2") == 0 ? 2 : 0);
+    }();
+    return threads ? threads : (parallel_decode_enabled.load(std::memory_order_relaxed) ? 2 : 1);
+}
+
+static int pvrtcDecompressParallel(uint8_t *pCompressedData, Pixel32 *pDecompressedData, uint32_t ui32Width, uint32_t ui32Height, uint8_t ui8Bpp, uint32_t uiII) {
+    uint32_t ui32WordWidth = 4;
+    uint32_t ui32WordHeight = 4;
+    if (ui8Bpp == 2) {
+        ui32WordWidth = 8;
+    }
+
+    uint32_t *pWordMembers = reinterpret_cast<uint32_t *>(pCompressedData);
+    Pixel32 *pOutData = pDecompressedData;
+
+    // Calculate number of words
+    int i32NumXWords = static_cast<int>(ui32Width / ui32WordWidth);
+    int i32NumYWords = static_cast<int>(ui32Height / ui32WordHeight);
+
+    auto rows = [&](int begin, int end) {
+        // Each task owns its scratch and writes disjoint output quadrants.
+        // Structs used for decompression
+        PVRTCWordIndices indices;
+        std::vector<Pixel32> pPixels(ui32WordWidth * ui32WordHeight);
+
+        // For each row of words
+        for (int wordY = begin; wordY < end; wordY++) {
+            // for each column of words
+            for (int wordX = -1; wordX < i32NumXWords - 1; wordX++) {
+                indices.P[0] = wrapWordIndex(i32NumXWords, wordX);
+                indices.P[1] = wrapWordIndex(i32NumYWords, wordY);
+                indices.Q[0] = wrapWordIndex(i32NumXWords, wordX + 1);
+                indices.Q[1] = wrapWordIndex(i32NumYWords, wordY);
+                indices.R[0] = wrapWordIndex(i32NumXWords, wordX);
+                indices.R[1] = wrapWordIndex(i32NumYWords, wordY + 1);
+                indices.S[0] = wrapWordIndex(i32NumXWords, wordX + 1);
+                indices.S[1] = wrapWordIndex(i32NumYWords, wordY + 1);
+
+                // Work out the offsets into the twiddle structs, multiply by two as there are two members per word.
+                uint32_t WordOffsets[4] = {
+                    TwiddleUV(i32NumXWords, i32NumYWords, indices.P[0], indices.P[1]) * 2,
+                    TwiddleUV(i32NumXWords, i32NumYWords, indices.Q[0], indices.Q[1]) * 2,
+                    TwiddleUV(i32NumXWords, i32NumYWords, indices.R[0], indices.R[1]) * 2,
+                    TwiddleUV(i32NumXWords, i32NumYWords, indices.S[0], indices.S[1]) * 2,
+                };
+
+                // Access individual elements to fill out PVRTCWord
+                PVRTCWord P, Q, R, S;
+                P.u32ColorData = static_cast<uint32_t>(pWordMembers[WordOffsets[0] + 1]);
+                P.u32ModulationData = static_cast<uint32_t>(pWordMembers[WordOffsets[0]]);
+                Q.u32ColorData = static_cast<uint32_t>(pWordMembers[WordOffsets[1] + 1]);
+                Q.u32ModulationData = static_cast<uint32_t>(pWordMembers[WordOffsets[1]]);
+                R.u32ColorData = static_cast<uint32_t>(pWordMembers[WordOffsets[2] + 1]);
+                R.u32ModulationData = static_cast<uint32_t>(pWordMembers[WordOffsets[2]]);
+                S.u32ColorData = static_cast<uint32_t>(pWordMembers[WordOffsets[3] + 1]);
+                S.u32ModulationData = static_cast<uint32_t>(pWordMembers[WordOffsets[3]]);
+
+                // assemble 4 words into struct to get decompressed pixels from
+                pvrtcGetDecompressedPixels(P, Q, R, S, pPixels.data(), ui8Bpp, uiII);
+                mapDecompressedData(pOutData, ui32Width, pPixels.data(), indices, ui8Bpp);
+
+            } // for each word
+        } // for each row of words
+    };
+    // Small images stay serial. No renderer/guest state is used by the helper.
+    if (uint64_t(ui32Width) * ui32Height >= 65536 && i32NumYWords >= 2) {
+        try {
+            static renderer::ParallelDecodeWorker worker;
+            const int split = i32NumYWords / 2 - 1;
+            if (worker.try_run([&] { rows(-1, split); }, [&] { rows(split, i32NumYWords - 1); }))
+                return ui32Width * ui32Height / static_cast<uint32_t>(ui32WordWidth / 2);
+        } catch (...) {
+            // All borrowed work has completed before an exception escapes.
+            // Thread creation/allocation failure retries the unchanged decoder.
+            return pvrtcDecompress(pCompressedData, pDecompressedData, ui32Width, ui32Height, ui8Bpp, uiII);
+        }
+    }
+    // Busy helper: do not queue or wait behind an unrelated decode.
+    return pvrtcDecompress(pCompressedData, pDecompressedData, ui32Width, ui32Height, ui8Bpp, uiII);
+}
+
+uint32_t PVRTDecompressPVRTCParallel(const void *pCompressedData, uint32_t Do2bitMode, uint32_t XDim, uint32_t YDim, uint32_t DoPvrtType, uint8_t *pResultImage) {
+    if (PVRTCDecodeParallelism() == 1)
+        return PVRTDecompressPVRTCUncached(pCompressedData, Do2bitMode, XDim, YDim, DoPvrtType, pResultImage);
+    // Cast the output buffer to a Pixel32 pointer.
+    Pixel32 *pDecompressedData = (Pixel32 *)pResultImage;
+    std::vector<Pixel32> pTempDataVector;
+
+    // Check the X and Y values are at least the minimum size.
+    uint32_t XTrueDim = std::max(XDim, ((Do2bitMode == 1u) ? 16u : 8u));
+    uint32_t YTrueDim = std::max(YDim, 8u);
+
+    // If the dimensions aren't correct, we need to create a new buffer instead of just using the provided one, as the buffer will overrun otherwise.
+    if ((XTrueDim != XDim) || (YTrueDim != YDim)) {
+        pTempDataVector.resize(XTrueDim * YTrueDim);
+        pDecompressedData = pTempDataVector.data();
+    }
+
+    // Decompress the surface.
+    int retval = pvrtcDecompressParallel((uint8_t *)pCompressedData, pDecompressedData, XTrueDim, YTrueDim, (Do2bitMode == 1 ? 2 : 4), DoPvrtType);
+
+    // If the dimensions were too small, then copy the new buffer back into the output buffer.
+    if ((XTrueDim != XDim) || (YTrueDim != YDim)) {
+        Pixel32 *pOriginalPtr = (Pixel32 *)pResultImage;
+
+        // Loop through all the required pixels.
+        for (uint32_t x = 0; x < XDim; ++x) {
+            for (uint32_t y = 0; y < YDim; ++y) {
+                pOriginalPtr[x + y * XDim] = pTempDataVector[x + y * XTrueDim];
+            }
+        }
+    }
+
+    return retval;
+}
+
+static renderer::DecodedTextureCache &decoded_cache() {
+    // The environment also supports standalone decoder tests before app setup.
+    static renderer::DecodedTextureCache cache([]() -> size_t {
+        const char *text = std::getenv("VITA3K_DIAG_PVRTC_CACHE_MB");
+        if (!text || *text < '0' || *text > '9')
+            return 0;
+        char *end = nullptr;
+        const auto mb = std::strtoul(text, &end, 10);
+        return *end == '\0' && mb <= 512 ? size_t(mb) * 1024 * 1024 : 0;
+    }());
+    // Constructed after cache, so its writer joins before cache destruction.
+    // Opt-in only; all file operations run on the telemetry writer.
+    static renderer::DecodedTextureTelemetry telemetry(cache, std::getenv("VITA3K_DIAG_PVRTC_TELEMETRY"));
+    return cache;
+}
+
+void PVRTCConfigureDecodeCache(int configured_mib, bool parallel) {
+    parallel_decode_enabled.store(parallel, std::memory_order_relaxed);
+    size_t mib = std::clamp(configured_mib, 0, 512);
+    if (const char *text = std::getenv("VITA3K_DIAG_PVRTC_CACHE_MB")) {
+        char *end = nullptr;
+        const auto override_mib = std::strtoul(text, &end, 10);
+        mib = *text >= '0' && *text <= '9' && *end == '\0' && override_mib <= 512 ? override_mib : 0;
+    }
+    decoded_cache().set_budget(mib * 1024 * 1024);
+}
+
+void PVRTCConfigureDecodeTelemetry(const char *path) {
+    // Called only at game startup/shutdown, after render workers quiesce on exit.
+    static std::unique_ptr<renderer::DecodedTextureTelemetry> ui_telemetry;
+    ui_telemetry.reset();
+    const char *override_path = std::getenv("VITA3K_DIAG_PVRTC_TELEMETRY");
+    if (path && *path && !(override_path && *override_path))
+        ui_telemetry = std::make_unique<renderer::DecodedTextureTelemetry>(decoded_cache(), path);
+}
+
+renderer::DecodedTextureCache::Stats PVRTCDecodeCacheStats() {
+    return decoded_cache().stats();
+}
+
+static renderer::LearnedTextureProfile &texture_profile() {
+    static renderer::LearnedTextureProfile profile(decoded_cache());
+    return profile;
+}
+
+std::string PVRTCStartTextureProfile(const std::string &root, const std::string &title, const std::string &identity, bool automatic) {
+    using Profile = renderer::LearnedTextureProfile;
+    const char *text = std::getenv("VITA3K_DIAG_PVRTC_PROFILE_MODE");
+    const std::string mode = text && *text ? text : automatic ? "auto"
+                                                              : "off";
+    const char *output = std::getenv("VITA3K_DIAG_PVRTC_PRELOAD_REPORT");
+    const auto path = [](const std::string &s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); };
+    try {
+        const auto report = texture_profile().begin(path(root), title, identity,
+            mode == "auto" ? Profile::Mode::Automatic : mode == "learn" ? Profile::Mode::Learn
+                : mode == "preload"                                     ? Profile::Mode::Preload
+                                                                        : Profile::Mode::Off,
+            output ? path(output) : std::filesystem::path{}, PVRTDecompressPVRTCParallel);
+        return mode + ": " + report.status + ", prepared=" + std::to_string(report.prepared_entries) + ", ns=" + std::to_string(report.prepare_ns);
+    } catch (...) {
+        texture_profile().fail();
+        return "profile error; normal demand decoding continues";
+    }
+}
+
+bool PVRTCClearTextureProfiles(const std::string &root, const std::string &title, std::string &message) {
+    if (texture_profile().active()) {
+        message = "Close the game normally before clearing saved texture profiles.";
+        return false;
+    }
+    try {
+        const auto directory = std::filesystem::path(std::u8string(root.begin(), root.end())) / "decoded-textures";
+        const auto count = std::filesystem::exists(directory) ? renderer::TextureProfileStorage(directory).clear(title) : 0;
+        message = "Cleared " + std::to_string(count) + " saved texture profile files.";
+        return true;
+    } catch (...) {
+        message = "Could not clear saved profiles. Another emulator may be using them, or storage is unavailable.";
+        return false;
+    }
+}
+
+std::string PVRTCFinishTextureProfile() {
+    try {
+        const auto report = texture_profile().finish();
+        return report.status + ", saved=" + std::to_string(report.saved_entries);
+    } catch (...) {
+        texture_profile().fail();
+        return "profile save error; prior completed profile preserved";
+    }
+}
+
+bool PVRTConsumeCachedPVRTC(const void *data, uint32_t two_bit, uint32_t width, uint32_t height, uint32_t type,
+    const std::function<bool()> &before_copy, const std::function<void(std::span<const uint8_t>)> &consume) {
+    auto &cache = decoded_cache();
+    const uint64_t w = std::max(width, two_bit ? 16u : 8u), h = std::max(height, 8u);
+    const uint64_t input_bytes = w * h / (two_bit ? 4 : 2), output_bytes = uint64_t(width) * height * 4;
+    if (!width || !height || two_bit > 1 || type > 1 || (w & (w - 1)) || (h & (h - 1))
+        || !cache.eligible(static_cast<size_t>(input_bytes), static_cast<size_t>(output_bytes)))
+        return false;
+    const renderer::TextureWorkContext context{ input_bytes, output_bytes, width, height, two_bit | (type << 1) };
+    std::vector<uint8_t> compressed;
+    renderer::DecodedTextureCache::Key key{};
+    {
+        renderer::TextureWorkScope snapshot(renderer::TextureWorkKind::SourceSnapshotHash, context);
+        const auto *source = static_cast<const uint8_t *>(data);
+        compressed.assign(source, source + static_cast<size_t>(input_bytes));
+        key = { XXH3_64bits(compressed.data(), compressed.size()), width, height, two_bit | (type << 1) };
+        snapshot.result(0);
+    }
+    // Inspection neither changes demand policy nor counts a miss. The fallback
+    // decoder remains the sole miss observer. Revalidate after staging waits.
+    // Loading already writes prepared pixels. Do not issue potentially blocking OS
+    // page-prefetch/residency requests on the required render-thread cache-hit path.
+    if (!cache.inspect_if_present(key, compressed, static_cast<size_t>(output_bytes), [](auto) {}))
+        return false;
+    if (!before_copy())
+        return false;
+    renderer::TextureWorkScope total(renderer::TextureWorkKind::CacheTotal, context);
+    renderer::DecodedTextureCache::CopyTiming timing{ renderer::TextureWorkProfile::counter };
+    uint32_t result = 0;
+    const bool hit = cache.consume_if_present(key, compressed, static_cast<size_t>(output_bytes), result, consume, total.active() ? &timing : nullptr);
+    total.result(0);
+    total.flags(hit ? 1 : 2);
+    if (total.active()) {
+        total.bounds(timing.start, timing.done);
+        total.record(renderer::TextureWorkKind::CacheLockWait, timing.start, timing.locked);
+        total.record(renderer::TextureWorkKind::CacheValidate, timing.locked, timing.validated);
+        // Direct consumer time is StagingCopy, not the removed scratch copy.
+        total.record(renderer::TextureWorkKind::CacheBookkeeping, hit ? timing.copied : timing.validated, timing.done);
+    }
+    return hit;
+}
+
+uint32_t PVRTDecompressPVRTC(const void *data, uint32_t two_bit, uint32_t width, uint32_t height, uint32_t type, uint8_t *output) {
+    auto &cache = decoded_cache();
+    const uint64_t true_width = std::max(width, two_bit == 1 ? 16u : 8u);
+    const uint64_t true_height = std::max(height, 8u);
+    const uint64_t input_bytes = true_width * true_height / (two_bit == 1 ? 4 : 2);
+    const bool valid_layout = width && height && two_bit <= 1 && type <= 1
+        && !(true_width & (true_width - 1)) && !(true_height & (true_height - 1));
+    // Reject dimensions beyond the cache budget before allocating or hashing.
+    const auto budget = cache.stats().budget_bytes;
+    if (!valid_layout || input_bytes > budget || uint64_t(width) * height > (budget - input_bytes) / 4) {
+        cache.bypass();
+        renderer::TextureWorkScope decode(renderer::TextureWorkKind::Decode, { input_bytes, uint64_t(width) * height * 4, width, height, two_bit | (type << 1), 0, 0, 4 });
+        const auto start = std::chrono::steady_clock::now();
+        const auto result = PVRTDecompressPVRTCParallel(data, two_bit, width, height, type, output);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+        decode.end_now();
+        decode.result(0);
+        cache.decoded(elapsed, width, height);
+        return result;
+    }
+    const size_t output_bytes = size_t(width) * height * 4;
+
+    // Decode from the same immutable bytes used for the key. Guest memory can be
+    // rewritten, and caching output computed from another version would be stale.
+    const auto *source = static_cast<const uint8_t *>(data);
+    const renderer::TextureWorkContext work_context{ input_bytes, output_bytes, width, height, two_bit | (type << 1) };
+    std::vector<uint8_t> compressed;
+    renderer::DecodedTextureCache::Key key{};
+    {
+        renderer::TextureWorkScope snapshot(renderer::TextureWorkKind::SourceSnapshotHash, work_context);
+        compressed.assign(source, source + size_t(input_bytes));
+        key = { XXH3_64bits(compressed.data(), compressed.size()), width, height, two_bit | (type << 1) };
+        snapshot.result(0);
+    }
+    const std::span<uint8_t> pixels(output, size_t(output_bytes));
+    uint32_t result;
+    renderer::DecodedTextureCache::Observation observation;
+    bool hit;
+    {
+        renderer::TextureWorkScope copy(renderer::TextureWorkKind::CacheTotal, work_context);
+        renderer::DecodedTextureCache::CopyTiming timing{ renderer::TextureWorkProfile::counter };
+        hit = cache.copy(key, compressed, pixels, result, &observation, copy.active() ? &timing : nullptr);
+        copy.result(0);
+        copy.flags(hit ? 1 : 2);
+        if (copy.active()) {
+            copy.bounds(timing.start, timing.done);
+            copy.record(renderer::TextureWorkKind::CacheLockWait, timing.start, timing.locked);
+            copy.record(renderer::TextureWorkKind::CacheValidate, timing.locked, timing.validated);
+            if (hit)
+                copy.record(renderer::TextureWorkKind::CachePixelCopy, timing.validated, timing.copied);
+            copy.record(renderer::TextureWorkKind::CacheBookkeeping, hit ? timing.copied : timing.validated, timing.done);
+        }
+    }
+    if (hit)
+        return result;
+    int64_t elapsed;
+    {
+        renderer::TextureWorkScope decode(renderer::TextureWorkKind::Decode, work_context);
+        const auto start = std::chrono::steady_clock::now();
+        result = PVRTDecompressPVRTCParallel(compressed.data(), two_bit, width, height, type, output);
+        elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+        decode.end_now();
+        decode.result(0);
+    }
+    cache.decoded(elapsed, width, height, observation);
+    {
+        renderer::TextureWorkScope insertion(renderer::TextureWorkKind::CacheInsert, work_context);
+        const bool inserted = cache.insert(key, std::move(compressed), pixels, result, elapsed);
+        insertion.result(inserted ? 0 : 1);
+    }
+    return result;
 }
 
 ////////////////////////////////////// ETC Compression //////////////////////////////////////

@@ -19,6 +19,7 @@
 #include <gxm/types.h>
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
+#include <renderer/functions.h>
 #include <renderer/state.h>
 #include <renderer/types.h>
 
@@ -30,6 +31,8 @@
 #include <config/state.h>
 #include <util/log.h>
 #include <util/tracy.h>
+
+#include <cstring>
 
 #define DEBUG_FRAMEBUFFER 1
 
@@ -49,8 +52,60 @@ void destroy_command_payload(Command &cmd) {
         break;
     }
 
+    case CommandOpcode::SetState: {
+        CommandHelper helper(&cmd);
+        const GXMState state = helper.pop<GXMState>();
+        if (state == GXMState::Program) {
+            helper.pop<Ptr<void>>();
+            delete helper.pop<std::shared_ptr<ProgramBinding> *>();
+        }
+        break;
+    }
+
     default:
         break;
+    }
+}
+
+void append_command_list(Context &destination, const CommandList &source) {
+    for (const Command *command = source.first; command; command = command->next) {
+        Command *copy = destination.alloc_func();
+        copy->opcode = command->opcode;
+        copy->magic = Command::MAGIC_LIVE;
+        std::memcpy(copy->data, command->data, sizeof(copy->data));
+        copy->status = command->status;
+        copy->status_keepalive = command->status_keepalive;
+        copy->next = nullptr;
+
+        // the render thread frees an immediate command's payload after running it so the copy gets its own
+        CommandHelper payload(copy);
+        if (copy->opcode == CommandOpcode::SetContext) {
+            payload.pop<RenderTarget *>();
+            const std::uint32_t surfaces_at = payload.point;
+            const SceGxmColorSurface *color_surface = payload.pop<SceGxmColorSurface *>();
+            const SceGxmDepthStencilSurface *depth_stencil_surface = payload.pop<SceGxmDepthStencilSurface *>();
+            SceGxmColorSurface *color_surface_copy = color_surface ? new SceGxmColorSurface(*color_surface) : nullptr;
+            SceGxmDepthStencilSurface *depth_stencil_surface_copy = depth_stencil_surface ? new SceGxmDepthStencilSurface(*depth_stencil_surface) : nullptr;
+            payload.point = surfaces_at;
+            payload.push(color_surface_copy);
+            payload.push(depth_stencil_surface_copy);
+        } else if (copy->opcode == CommandOpcode::SetState && payload.pop<GXMState>() == GXMState::Program) {
+            payload.pop<Ptr<void>>();
+            const std::uint32_t binding_at = payload.point;
+            const std::shared_ptr<ProgramBinding> *binding = payload.pop<std::shared_ptr<ProgramBinding> *>();
+            std::shared_ptr<ProgramBinding> *binding_copy = binding ? new std::shared_ptr<ProgramBinding>(*binding) : nullptr;
+            payload.point = binding_at;
+            payload.push(binding_copy);
+        }
+
+        if (destination.command_list.last)
+            destination.command_list.last->next = copy;
+        else
+            destination.command_list.first = copy;
+        destination.command_list.last = copy;
+
+        if (command == source.last)
+            break;
     }
 }
 
@@ -74,7 +129,6 @@ COMMAND(handle_set_context) {
     } else {
         render_context->record.depth_stencil_surface.depth_data.reset();
         render_context->record.depth_stencil_surface.stencil_data.reset();
-        render_context->record.depth_stencil_surface.mask = 1;
     }
 
     destroy_command_payload(*helper.cmd);
@@ -120,6 +174,7 @@ COMMAND(handle_sync_surface_data) {
         // unlocking before a notify should be faster
         lock.unlock();
         renderer.notification_ready.notify_all();
+        note_gpu_event();
     };
 
     if (renderer.disable_surface_sync)
@@ -226,6 +281,7 @@ COMMAND(handle_draw) {
     Ptr<const void> indices = helper.pop<Ptr<const void>>();
     const std::uint32_t count = helper.pop<const std::uint32_t>();
     const std::uint32_t instance_count = helper.pop<const std::uint32_t>();
+    const uint64_t index_snapshot = helper.pop<uint64_t>();
 
     switch (renderer.current_backend) {
     case Backend::OpenGL:
@@ -234,8 +290,7 @@ COMMAND(handle_draw) {
         break;
 
     case Backend::Vulkan:
-        vulkan::draw(*reinterpret_cast<vulkan::VKContext *>(render_context), type, format, indices.cast<void>(),
-            count, instance_count, mem, config);
+        vulkan::draw(*reinterpret_cast<vulkan::VKContext *>(render_context), type, format, indices.cast<void>(), count, instance_count, index_snapshot, mem, config);
         break;
 
     default:

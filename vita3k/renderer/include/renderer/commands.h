@@ -20,6 +20,7 @@
 #include <cassert>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace renderer {
@@ -84,7 +85,10 @@ enum class CommandOpcode : std::uint8_t {
     NewFrame,
 
     DestroyRenderTarget,
-    DestroyContext
+    DestroyContext,
+
+    MemoryUnmapFlush,
+    SyncGuestRange
 };
 
 enum CommandErrorCode {
@@ -104,10 +108,18 @@ struct Command {
     CommandOpcode opcode;
     std::uint8_t flags = 0;
 
+    std::uint32_t magic = 0;
+    static constexpr std::uint32_t MAGIC_LIVE = 0xC0DEC0DEu;
+
     std::uint8_t data[MAX_COMMAND_DATA_SIZE];
     int *status;
+    std::shared_ptr<int> status_keepalive;
 
     Command *next = nullptr;
+};
+
+struct alignas(Command) CommandSlot {
+    std::uint8_t storage[sizeof(Command)];
 };
 
 using CommandPool = std::vector<Command>;
@@ -173,10 +185,13 @@ bool do_command_push_data(CommandHelper &helper, Head arg1, Args... args2) {
 }
 
 template <typename... Args>
-Command *make_command(CommandAllocFunc alloc_func, CommandFreeFunc free_func, const CommandOpcode opcode, int *status, Args... arguments) {
+Command *make_command(const CommandAllocFunc &alloc_func, const CommandFreeFunc &free_func, const CommandOpcode opcode, int *status, Args... arguments) {
     Command *new_command = alloc_func();
+    if (!new_command)
+        return nullptr;
 
     new_command->opcode = opcode;
+    new_command->magic = Command::MAGIC_LIVE;
     new_command->status = status;
     new_command->next = nullptr;
 

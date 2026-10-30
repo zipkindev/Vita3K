@@ -19,10 +19,27 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
 namespace ngs {
+
+static int32_t valid_buffer_index(const int32_t index) {
+    return (index >= 0 && index < SCE_NGS_PLAYER_MAX_BUFFERS) ? index : -1;
+}
+
+static int32_t first_buffer_with_data(const SceNgsPlayerParams *params, int32_t index, const bool null_ends) {
+    for (int32_t visited = 0; visited <= SCE_NGS_PLAYER_MAX_BUFFERS && index != -1; visited++) {
+        const SceNgsPlayerBufferParams &buffer = params->buffer_params[index];
+        if (buffer.buffer && buffer.bytes_count > 0)
+            return index;
+        if (null_ends && !buffer.buffer)
+            return -1;
+        index = valid_buffer_index(buffer.next_buffer_index);
+    }
+    return -1;
+}
 
 std::unique_ptr<ModuleLogicalState> PlayerModule::create_logical_state() const {
     return std::make_unique<PlayerLogicalState>();
@@ -40,16 +57,19 @@ void PlayerModule::on_state_change(const MemState &mem, ModuleData &data, const 
     if (data.parent->state == VOICE_STATE_ACTIVE && previous == VOICE_STATE_AVAILABLE) {
         state->samples_generated_since_key_on = 0;
         state->bytes_consumed_since_key_on = 0;
-        state->current_buffer = params->start_buffer;
+        state->current_buffer = valid_buffer_index(params->start_buffer);
         state->current_byte_position_in_buffer = params->start_bytes;
         logical->current_loop_count = 0;
         logical->decoded_pcm.clear();
         logical->rate_resampler.reset();
         logical->adpcm_buffer.clear();
+        logical->requested_initial_buffer = false;
+        logical->lead_in_pending = true;
+        logical->samples_played = 0;
 
         std::memset(&logical->adpcm_history, 0, sizeof(logical->adpcm_history));
     } else if (data.parent->is_keyed_off) {
-        state->current_buffer = params->start_buffer;
+        state->current_buffer = valid_buffer_index(params->start_buffer);
         state->current_byte_position_in_buffer = params->start_bytes;
         logical->current_loop_count = 0;
         logical->rate_resampler.reset();
@@ -57,7 +77,6 @@ void PlayerModule::on_state_change(const MemState &mem, ModuleData &data, const 
 }
 
 void PlayerModule::on_param_change(const MemState &mem, ModuleData &data) {
-    PlayerLogicalState *logical = data.get_logical_state<PlayerLogicalState>();
     const SceNgsPlayerParams *old_params = reinterpret_cast<SceNgsPlayerParams *>(data.last_info.data());
     SceNgsPlayerParams *new_params = static_cast<SceNgsPlayerParams *>(data.info.data.get(mem));
 
@@ -80,14 +99,6 @@ void PlayerModule::on_param_change(const MemState &mem, ModuleData &data) {
         if (is_invalid_playback_value(new_params->playback_frequency, 192000.f)) {
             new_params->playback_frequency = 48000.f;
         }
-    }
-
-    // if playback scaling changed, reset the rate resampler
-    if (old_params->playback_frequency != new_params->playback_frequency || old_params->playback_scalar != new_params->playback_scalar) {
-        ADPCMHistory hist_empty{};
-        std::fill_n(logical->adpcm_history, SCE_NGS_PLAYER_MAX_PCM_CHANNELS, hist_empty);
-
-        logical->rate_resampler.reset();
     }
 }
 
@@ -123,14 +134,105 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
 
     logical->decoded_pcm.compact();
 
-    while (static_cast<int>(logical->decoded_pcm.available_frames()) < granularity) {
-        if ((state->current_buffer == -1)
-            || !params->buffer_params[state->current_buffer].buffer
-            || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
-            // Stop processing if no valid buffer is available or if the buffer is empty
+    const auto prefer_live_params_before_first_consume = [&]() {
+        if (!(data.flags & ModuleData::PARAMS_LOCK) || state->bytes_consumed_since_key_on != 0)
+            return;
+        SceNgsPlayerParams *live = data.info.data.cast<SceNgsPlayerParams>().get(mem);
+        if (!live)
+            return;
+        const int buf = state->current_buffer;
+        if (buf < 0 || buf >= SCE_NGS_PLAYER_MAX_BUFFERS)
+            return;
+        const auto &snapshot = params->buffer_params[buf];
+        const auto &live_buf = live->buffer_params[buf];
+        if ((!snapshot.buffer || snapshot.bytes_count <= 0) && live_buf.buffer && live_buf.bytes_count > 0)
+            params = live;
+    };
+
+    const auto request_initial_buffer = [&]() {
+        if (state->bytes_consumed_since_key_on != 0 || logical->requested_initial_buffer)
+            return false;
+        logical->requested_initial_buffer = true;
+        const int buf = state->current_buffer;
+        const uint32_t buf_addr = (buf >= 0 && buf < SCE_NGS_PLAYER_MAX_BUFFERS)
+            ? params->buffer_params[buf].buffer.address()
+            : 0;
+
+        if (buf_addr && params->type == ParameterAudioTypePCM
+            && params->buffer_params[buf].bytes_count == 0) {
+            constexpr uint32_t peek_frames = 4096;
+            const uint32_t peek_bytes = peek_frames * sizeof(int16_t);
+            const int16_t *p = Ptr<int16_t>(buf_addr).get(mem);
+            if (p && Ptr<uint8_t>(buf_addr + peek_bytes - 1).valid(mem)) {
+                int16_t peak = 0;
+                for (uint32_t i = 0; i < peek_frames; ++i)
+                    peak = std::max<int16_t>(peak, static_cast<int16_t>(std::abs(p[i])));
+                if (peak > 8) {
+                    const int ch = std::max<int>(1, params->channels);
+                    params->buffer_params[buf].bytes_count = peek_frames * static_cast<int32_t>(sizeof(int16_t)) * ch;
+                    LOG_WARN_ONCE("NGS player: adopted {} bytes of pre-written PCM in an unpublished buffer (FMOD stream race)", params->buffer_params[buf].bytes_count);
+                    return true;
+                }
+            }
+        }
+
+        if (!data.callback || !buf_addr)
+            return false;
+        voice_lock.unlock();
+        scheduler_lock.unlock();
+        data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_SWAPPED_BUFFER, buf, buf_addr);
+        scheduler_lock.lock();
+        voice_lock.lock();
+        params = data.get_parameters<SceNgsPlayerParams>(mem);
+        prefer_live_params_before_first_consume();
+        return true;
+    };
+
+    prefer_live_params_before_first_consume();
+
+    if (logical->lead_in_pending) {
+        logical->lead_in_pending = false;
+        logical->lead_in_samples_left = static_cast<uint32_t>(std::max<int32_t>(params->lead_in_samples, 0));
+        if (params->lead_in_samples > 0 || params->limit_number_of_samples_played > 0)
+            LOG_INFO_ONCE("NGS player: the game uses a lead-in ({} samples) or a sample limit ({} samples)", params->lead_in_samples, params->limit_number_of_samples_played);
+    }
+    if (logical->lead_in_samples_left >= static_cast<uint32_t>(granularity)) {
+        logical->lead_in_samples_left -= granularity;
+        data.ensure_scratch_size(static_cast<size_t>(granularity) * sizeof(float) * 2);
+        std::fill(data.scratch_data.begin(), data.scratch_data.end(), 0);
+        data.parent->products[0].data = data.scratch_data.data();
+        return false;
+    }
+    const uint32_t lead_in = logical->lead_in_samples_left;
+    logical->lead_in_samples_left = 0;
+    const int32_t limit = params->limit_number_of_samples_played;
+    uint32_t wanted = granularity - lead_in;
+    if (limit > 0)
+        wanted = static_cast<uint32_t>(std::min<uint64_t>(wanted, static_cast<uint64_t>(limit) - std::min<uint64_t>(logical->samples_played, limit)));
+
+    while (logical->decoded_pcm.available_frames() < wanted) {
+        state->current_buffer = valid_buffer_index(state->current_buffer);
+        const int32_t playable = first_buffer_with_data(params, state->current_buffer, null_buffer_ends_stream && state->bytes_consumed_since_key_on != 0);
+        if (playable == -1) {
+            if (state->bytes_consumed_since_key_on == 0) {
+                if (request_initial_buffer() && first_buffer_with_data(params, state->current_buffer, false) != -1)
+                    continue;
+                break;
+            }
+            voice_lock.unlock();
+            scheduler_lock.unlock();
+            data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_END_OF_DATA, 0, 0);
+            scheduler_lock.lock();
+            voice_lock.lock();
             finished = true;
             break;
-        } else if (state->current_byte_position_in_buffer >= params->buffer_params[state->current_buffer].bytes_count) {
+        }
+        if (playable != state->current_buffer) {
+            state->current_buffer = playable;
+            state->current_byte_position_in_buffer = 0;
+            logical->current_loop_count = 0;
+        }
+        if (state->current_byte_position_in_buffer >= params->buffer_params[state->current_buffer].bytes_count) {
             const int32_t prev_index = state->current_buffer;
             state->current_byte_position_in_buffer = 0;
             logical->current_loop_count++;
@@ -141,12 +243,10 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
             // Enable looping over the buffer if needed
             if (params->buffer_params[state->current_buffer].loop_count != -1
                 && logical->current_loop_count > params->buffer_params[state->current_buffer].loop_count) {
-                state->current_buffer = params->buffer_params[state->current_buffer].next_buffer_index;
+                state->current_buffer = valid_buffer_index(params->buffer_params[state->current_buffer].next_buffer_index);
                 logical->current_loop_count = 0;
 
-                if ((state->current_buffer == -1)
-                    || !params->buffer_params[state->current_buffer].buffer
-                    || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
+                if (state->current_buffer == -1) {
                     data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_END_OF_DATA, 0, 0);
 
                     // we are done
@@ -165,6 +265,16 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
 
             scheduler_lock.lock();
             voice_lock.lock();
+            params = data.get_parameters<SceNgsPlayerParams>(mem);
+            continue;
+        }
+
+        if (params->channels < 0 || params->channels > SCE_NGS_PLAYER_MAX_PCM_CHANNELS || state->current_byte_position_in_buffer < 0) {
+            static std::atomic<uint32_t> bad_voices{ 0 };
+            if (bad_voices.fetch_add(1, std::memory_order_relaxed) < 16)
+                LOG_ERROR("NGS player: stopping a voice with {} channels at byte position {}", static_cast<int>(params->channels), state->current_byte_position_in_buffer);
+            finished = true;
+            break;
         }
 
         runtime->decoder->source_channels = params->channels;
@@ -267,7 +377,7 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
 
         // Playback rate scaling
         float src_sample_rate = params->playback_frequency;
-        if ((src_sample_rate >= 1.f) && ((params->playback_scalar != 1.f) || (static_cast<int>(src_sample_rate) != sample_rate))) {
+        if ((src_sample_rate >= 1.f) && (logical->rate_resampler.continuous || (params->playback_scalar != 1.f) || (static_cast<int>(src_sample_rate) != sample_rate))) {
             runtime->decoded_chunk.resize(static_cast<size_t>(samples_count.samples) * sizeof(float) * 2);
             runtime->decoder->receive(runtime->decoded_chunk.data(), nullptr);
 
@@ -287,22 +397,32 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
     }
 
     const uint32_t available_samples = logical->decoded_pcm.available_frames();
-    const uint32_t samples_to_be_passed = std::min<uint32_t>(available_samples, granularity);
+    const uint32_t samples_to_be_passed = std::min<uint32_t>(available_samples, wanted);
 
-    if (available_samples >= static_cast<uint32_t>(granularity)) {
+    if (lead_in == 0 && samples_to_be_passed == static_cast<uint32_t>(granularity)) {
         data.parent->products[0].data = logical->decoded_pcm.read_bytes();
     } else {
         data.ensure_scratch_size(static_cast<size_t>(granularity) * sizeof(float) * 2);
         std::fill(data.scratch_data.begin(), data.scratch_data.end(), 0);
-        if (available_samples > 0) {
-            std::memcpy(data.scratch_data.data(), logical->decoded_pcm.read_bytes(), static_cast<size_t>(available_samples) * sizeof(float) * 2);
+        if (samples_to_be_passed > 0) {
+            std::memcpy(data.scratch_data.data() + static_cast<size_t>(lead_in) * sizeof(float) * 2, logical->decoded_pcm.read_bytes(), static_cast<size_t>(samples_to_be_passed) * sizeof(float) * 2);
         }
         data.parent->products[0].data = data.scratch_data.data();
     }
 
     logical->decoded_pcm.consume_frames(samples_to_be_passed);
+    logical->samples_played += samples_to_be_passed;
     state->samples_generated_since_key_on += samples_to_be_passed * params->channels;
     state->samples_generated_total += samples_to_be_passed * params->channels;
+
+    if (!finished && limit > 0 && logical->samples_played >= static_cast<uint64_t>(limit)) {
+        voice_lock.unlock();
+        scheduler_lock.unlock();
+        data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_END_OF_DATA, 0, 0);
+        scheduler_lock.lock();
+        voice_lock.lock();
+        finished = true;
+    }
 
     return finished;
 }

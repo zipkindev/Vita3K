@@ -57,6 +57,7 @@ COMMAND(handle_create_render_target);
 COMMAND(handle_destroy_render_target);
 COMMAND(handle_memory_map);
 COMMAND(handle_memory_unmap);
+COMMAND(handle_memory_unmap_flush);
 
 // Scene
 COMMAND(handle_set_context);
@@ -68,6 +69,7 @@ COMMAND(handle_draw);
 COMMAND(handle_transfer_copy);
 COMMAND(handle_transfer_downscale);
 COMMAND(handle_transfer_fill);
+COMMAND(handle_sync_guest_range);
 
 // Sync
 COMMAND(handle_nop);

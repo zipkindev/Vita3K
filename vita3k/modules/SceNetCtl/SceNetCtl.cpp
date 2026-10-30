@@ -157,13 +157,10 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
             emuenv.netctl.adhocCondVar.notify_all();
         }
 
-        {
-            // Set the common dialog status to finished with user canceled result
-            std::lock_guard<std::recursive_mutex> lock(emuenv.common_dialog.mutex);
-            if (emuenv.common_dialog.type == NETCHECK_DIALOG && emuenv.common_dialog.status == SCE_COMMON_DIALOG_STATUS_RUNNING) {
-                emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
-                emuenv.common_dialog.result = SCE_COMMON_DIALOG_RESULT_USER_CANCELED;
-            }
+        // Set the common dialog status to finished with user canceled result
+        if (emuenv.common_dialog.status == SCE_COMMON_DIALOG_STATUS_RUNNING) {
+            emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
+            emuenv.common_dialog.result = SCE_COMMON_DIALOG_RESULT_USER_CANCELED;
         }
 
         LOG_ERROR("Adhoc thread: error occurred, closing sockets");
@@ -290,14 +287,9 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
         std::strncpy(selfInfo.username, reinterpret_cast<const char *>(username.data()), sizeof(selfInfo.username) - 1);
         selfInfo.username[sizeof(selfInfo.username) - 1] = '\0';
 
-        {
-            // Notify the common dialog that the adhoc connection is established
-            std::lock_guard<std::recursive_mutex> lock(emuenv.common_dialog.mutex);
-            if (emuenv.common_dialog.type == NETCHECK_DIALOG && emuenv.common_dialog.status == SCE_COMMON_DIALOG_STATUS_RUNNING) {
-                emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
-                emuenv.common_dialog.result = SCE_COMMON_DIALOG_RESULT_OK;
-            }
-        }
+        // Notify the common dialog that the adhoc connection is established
+        emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
+        emuenv.common_dialog.result = SCE_COMMON_DIALOG_RESULT_OK;
 
         {
             // Set the adhoc event and state to indicate that the connection is established
@@ -496,11 +488,11 @@ EXPORT(int, sceNetCtlCheckCallback) {
 
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
 
-    // TODO: Check if the network is connected
     if (emuenv.net.state != 1) {
+        const auto event = emuenv.cfg.current_config.psn_signed_in ? SCE_NET_CTL_EVENT_TYPE_IPOBTAINED : SCE_NET_CTL_EVENT_TYPE_DISCONNECTED;
         for (auto &callback : emuenv.netctl.callbacks) {
             if (callback.pc != 0) {
-                thread->run_callback(callback.pc, { SCE_NET_CTL_EVENT_TYPE_DISCONNECTED, callback.arg });
+                thread->run_callback(callback.pc, { static_cast<uint32_t>(event), callback.arg });
             }
         }
         emuenv.net.state = 1;
@@ -581,17 +573,6 @@ EXPORT(int, sceNetCtlInetGetInfo, int code, SceNetCtlInfo *info) {
         info->device = 0; /*SCE_NET_CTL_DEVICE_WIRELESS*/
         // STUBBED("SCE_NETCTL_INFO_GET_DEVICE return SCE_NET_CTL_DEVICE_WIRELESS");
         break;
-    case SCE_NETCTL_INFO_GET_ETHER_ADDR: {
-        SceNetEtherAddr ether_addr{};
-        const int result = CALL_EXPORT(sceNetGetMacAddress, &ether_addr, 0);
-        static constexpr unsigned char zero_mac[sizeof(ether_addr.data)]{};
-        const bool valid = result >= 0 && std::memcmp(ether_addr.data, zero_mac, sizeof(zero_mac)) != 0;
-        if (!valid)
-            return RET_ERROR(SCE_NET_CTL_ERROR_NOT_AVAIL);
-
-        info->ether_addr = ether_addr;
-        break;
-    }
     case SCE_NETCTL_INFO_GET_RSSI_PERCENTAGE:
         info->rssi_percentage = 100;
         // STUBBED("code SCE_NETCTL_INFO_GET_RSSI_PERCENTAGE return 100%");
@@ -608,6 +589,9 @@ EXPORT(int, sceNetCtlInetGetInfo, int code, SceNetCtlInfo *info) {
         switch (code) {
         case SCE_NETCTL_INFO_GET_CNF_NAME:
             STUBBED("code SCE_NETCTL_INFO_GET_CNF_NAME not implemented");
+            break;
+        case SCE_NETCTL_INFO_GET_ETHER_ADDR:
+            STUBBED("code SCE_NETCTL_INFO_GET_ETHER_ADDR not implemented");
             break;
         case SCE_NETCTL_INFO_GET_MTU:
             STUBBED("code SCE_NETCTL_INFO_GET_MTU not implemented");

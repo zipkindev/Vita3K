@@ -16,6 +16,12 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <app/functions.h>
+#include <renderer/texture_work_profile.h>
+#include <util/jit_startup_profile.h>
+#include <util/pipeline_profile.h>
+#include <util/sync_wait_profile.h>
+
+#include <exception>
 
 #include <audio/state.h>
 #include <camera/state.h>
@@ -23,6 +29,9 @@
 #include <config/settings.h>
 #include <config/state.h>
 #include <config/version.h>
+#include <cpu/functions.h>
+#include <cpu/jit_preparation.h>
+#include <cpu/jit_profile.h>
 #include <ctrl/functions.h>
 #include <ctrl/state.h>
 #include <dialog/state.h>
@@ -40,6 +49,7 @@
 #include <motion/state.h>
 #include <net/state.h>
 #include <ngs/state.h>
+#include <nids/functions.h>
 #include <np/functions.h>
 #include <np/state.h>
 #include <np/trophy/context.h>
@@ -49,6 +59,7 @@
 #include <packages/sfo.h>
 #include <regmgr/state.h>
 #include <renderer/functions.h>
+#include <renderer/pvrtc-cache.h>
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
 #include <touch/state.h>
@@ -207,11 +218,11 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
         case config::RestartRequiredSetting::GraphicsDevice:
             runtime_current.gpu_idx = previous_current.gpu_idx;
             break;
-        case config::RestartRequiredSetting::CustomDriver:
 #ifdef __ANDROID__
+        case config::RestartRequiredSetting::CustomDriver:
             runtime_current.custom_driver_name = previous_current.custom_driver_name;
-#endif
             break;
+#endif
         case config::RestartRequiredSetting::HighAccuracy:
             runtime_current.high_accuracy = previous_current.high_accuracy;
             break;
@@ -227,6 +238,36 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
         case config::RestartRequiredSetting::ValidationLayer:
             runtime_current.validation_layer = previous_current.validation_layer;
             break;
+        case config::RestartRequiredSetting::AccurateThreadScheduling:
+            runtime_current.accurate_thread_scheduling = previous_current.accurate_thread_scheduling;
+            break;
+        case config::RestartRequiredSetting::GuestCores:
+            runtime_current.guest_cores = previous_current.guest_cores;
+            break;
+        case config::RestartRequiredSetting::ParallelTextureDecode:
+            runtime_current.parallel_texture_decode = previous_current.parallel_texture_decode;
+            break;
+        case config::RestartRequiredSetting::DecodedTextureTelemetry:
+            runtime_current.decoded_texture_telemetry = previous_current.decoded_texture_telemetry;
+            break;
+        case config::RestartRequiredSetting::JitCompileTelemetry:
+            runtime_current.jit_compile_telemetry = previous_current.jit_compile_telemetry;
+            break;
+        case config::RestartRequiredSetting::JitPreparation:
+            runtime_current.jit_preparation = previous_current.jit_preparation;
+            break;
+        case config::RestartRequiredSetting::PipelineTelemetry:
+            runtime_current.pipeline_telemetry = previous_current.pipeline_telemetry;
+            break;
+        case config::RestartRequiredSetting::SyncWaitTelemetry:
+            runtime_current.sync_wait_telemetry = previous_current.sync_wait_telemetry;
+            break;
+        case config::RestartRequiredSetting::AutomaticTexturePreparation:
+            runtime_current.automatic_texture_preparation = previous_current.automatic_texture_preparation;
+            break;
+        case config::RestartRequiredSetting::DecodedTextureCache:
+            runtime_current.decoded_texture_cache_mb = previous_current.decoded_texture_cache_mb;
+            break;
         }
     }
 
@@ -235,17 +276,38 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
 
 void set_current_config(EmuEnvState &emuenv, const std::string &app_path) {
     config::set_current_config(emuenv.cfg, emuenv.config_path, app_path);
+    pvr::PVRTCConfigureDecodeCache(emuenv.cfg.current_config.decoded_texture_cache_mb, emuenv.cfg.current_config.parallel_texture_decode);
+    // Runtime switches apply on launch; shutdown retires the previous game observer.
+    if (!app_path.empty() && emuenv.cfg.current_config.decoded_texture_telemetry && !emuenv.texture_work_profile) {
+        try {
+            const auto directory = util::fresh_diagnostic_path(emuenv.cache_path.native(), "texture-work");
+            emuenv.texture_work_profile = std::make_shared<renderer::TextureWorkProfile>(directory, app_path);
+            renderer::publish_texture_work_profile(emuenv.texture_work_profile);
+            LOG_INFO("[TEXTURE-WORK] Bounded cache copy/upload observer armed: {}", directory.string());
+        } catch (const std::exception &e) {
+            LOG_WARN("[TEXTURE-WORK] Disabled: {}", e.what());
+        }
+    }
+    if (!app_path.empty() && emuenv.cfg.current_config.decoded_texture_telemetry) {
+        try {
+            const auto path = util::fresh_diagnostic_path(emuenv.cache_path.native(), "texture-cache");
+            const auto text = fs_utils::path_to_utf8(fs::path(path.native())) + ".csv";
+            pvr::PVRTCConfigureDecodeTelemetry(text.c_str());
+        } catch (const std::exception &e) {
+            LOG_WARN("[TEXTURE-TELEMETRY] Disabled: {}", e.what());
+        }
+    } else {
+        pvr::PVRTCConfigureDecodeTelemetry(nullptr);
+    }
     set_backend_renderer(emuenv, emuenv.cfg.current_config.backend_renderer);
     emuenv.audio.set_global_volume(emuenv.cfg.current_config.audio_volume / 100.f);
     lang::set_locale(emuenv.cfg.current_config.sys_lang);
 }
 
 // Initializes paths to their respective defaults, to be changed later by settings or CLI
-// Returns true if in portable mode, false otherwise
-bool init_paths(Root &root_paths) {
-    bool portable = false;
+void init_paths(Root &root_paths) {
 #ifdef __ANDROID__
-    fs::path internal_storage_path = fs::path(SDL_GetAndroidExternalStoragePath());
+    fs::path internal_storage_path = fs::path(SDL_GetAndroidExternalStoragePath()) / "";
     fs::path vita_storage_path = internal_storage_path / "vita/";
 
     // On Android, static assets are bundled inside the APK and accessed via SDL_IOFromFile.
@@ -255,8 +317,8 @@ bool init_paths(Root &root_paths) {
     root_paths.set_log_path(internal_storage_path);
     root_paths.set_config_path(internal_storage_path);
     root_paths.set_shared_path(internal_storage_path);
-    root_paths.set_cache_path(internal_storage_path / "cache");
-    root_paths.set_patch_path(internal_storage_path / "patch");
+    root_paths.set_cache_path(internal_storage_path / "cache" / "");
+    root_paths.set_patch_path(internal_storage_path / "patch" / "");
 #else
     auto sdl_exe_path = SDL_GetBasePath();
     auto exe_path = fs_utils::utf8_to_path(sdl_exe_path);
@@ -264,32 +326,31 @@ bool init_paths(Root &root_paths) {
     root_paths.set_static_assets_path(exe_path);
 
 #ifdef _WIN32
-    auto portable_path = exe_path / "portable";
+    auto portable_path = exe_path / "portable" / "";
 #elif defined(__APPLE__)
     // On Apple platforms, exe_path is "Contents/Resources/" inside the app bundle.
     // An extra parent_path is apparently needed because of the trailing slash.
-    auto portable_path = exe_path.parent_path().parent_path().parent_path().parent_path() / "portable";
+    auto portable_path = exe_path.parent_path().parent_path().parent_path().parent_path() / "portable" / "";
 #elif defined(__linux__)
     fs::path portable_path = "";
     auto APPIMAGE = getenv("APPIMAGE"); // Used in AppImage
     if (APPIMAGE) {
-        fs::path appimage_path = fs::path(APPIMAGE).remove_filename();
-        portable_path = appimage_path / "portable";
+        fs::path appimage_path = fs::path(APPIMAGE).remove_filename() / "";
+        portable_path = appimage_path / "portable" / "";
     } else {
-        portable_path = exe_path / "portable";
+        portable_path = exe_path / "portable" / "";
     }
 #endif
 
     if (fs::is_directory(portable_path)) {
-        portable = true;
         // If a portable directory exists, use it for everything else.
         // Note that vita_fs_path should not be the same as the other paths.
-        root_paths.set_vita_fs_path(portable_path / "fs");
+        root_paths.set_vita_fs_path(portable_path / "fs" / "");
         root_paths.set_log_path(portable_path);
         root_paths.set_config_path(portable_path);
         root_paths.set_shared_path(portable_path);
-        root_paths.set_cache_path(portable_path / "cache");
-        root_paths.set_patch_path(portable_path / "patch");
+        root_paths.set_cache_path(portable_path / "cache" / "");
+        root_paths.set_patch_path(portable_path / "patch" / "");
     } else {
         // SDL_GetPrefPath is deferred as it creates the directory.
         // When using a portable directory, it is not needed.
@@ -312,7 +373,7 @@ bool init_paths(Root &root_paths) {
         // For backwards compatibility, though, check if ux0 exists first.
         auto existing_ux0 = vita_fs_path / "ux0";
         if (!fs::is_directory(existing_ux0)) {
-            vita_fs_path = vita_fs_path / "fs";
+            vita_fs_path = vita_fs_path / "fs" / "";
         }
 #endif
 
@@ -320,8 +381,8 @@ bool init_paths(Root &root_paths) {
         root_paths.set_log_path(exe_path);
         root_paths.set_config_path(exe_path);
         root_paths.set_shared_path(exe_path);
-        root_paths.set_cache_path(exe_path / "cache");
-        root_paths.set_patch_path(exe_path / "patch");
+        root_paths.set_cache_path(exe_path / "cache" / "");
+        root_paths.set_patch_path(exe_path / "patch" / "");
 
 #if defined(__linux__)
         // XDG Data Dirs.
@@ -345,23 +406,22 @@ bool init_paths(Root &root_paths) {
 
         // Config and game-specific configs
         if (XDG_CONFIG_HOME != NULL)
-            root_paths.set_config_path(fs::path(XDG_CONFIG_HOME) / app_name);
+            root_paths.set_config_path(fs::path(XDG_CONFIG_HOME) / app_name / "");
         else if (home_path[0] != '\0')
-            root_paths.set_config_path(fs::path(home_path) / ".config" / app_name);
+            root_paths.set_config_path(fs::path(home_path) / ".config" / app_name / "");
 
         // Logs, cache and dumps
         if (XDG_CACHE_HOME != NULL) {
-            root_paths.set_cache_path(fs::path(XDG_CACHE_HOME) / app_name);
-            root_paths.set_log_path(fs::path(XDG_CACHE_HOME) / app_name);
+            root_paths.set_cache_path(fs::path(XDG_CACHE_HOME) / app_name / "");
+            root_paths.set_log_path(fs::path(XDG_CACHE_HOME) / app_name / "");
         } else if (home_path[0] != '\0') {
-            root_paths.set_cache_path(fs::path(home_path) / ".cache" / app_name);
-            root_paths.set_log_path(fs::path(home_path) / ".cache" / app_name);
+            root_paths.set_cache_path(fs::path(home_path) / ".cache" / app_name / "");
+            root_paths.set_log_path(fs::path(home_path) / ".cache" / app_name / "");
         }
 
         const constexpr char *static_asset_paths[] = {
             "/usr/local/share/Vita3K",
             "/usr/share/Vita3K",
-            "/app/share/Vita3K",
         };
 
         // Check both normal case and all lowercase paths
@@ -380,21 +440,19 @@ bool init_paths(Root &root_paths) {
         if (fs::exists(exe_path / "shaders-builtin"))
             root_paths.set_static_assets_path(exe_path);
 
-        // AppImage data directory (Anylinux layout, then the legacy layout)
-        if (APPDIR != NULL && fs::exists(fs::path(APPDIR) / "share/Vita3K"))
-            root_paths.set_static_assets_path(fs::path(APPDIR) / "share/Vita3K");
-        else if (APPDIR != NULL && fs::exists(fs::path(APPDIR) / "usr/share/Vita3K"))
+        // AppImage root
+        if (APPDIR != NULL && fs::exists(fs::path(APPDIR) / "usr/share/Vita3K"))
             root_paths.set_static_assets_path(fs::path(APPDIR) / "usr/share/Vita3K");
 
         // shared path
         if (XDG_DATA_HOME != NULL)
-            root_paths.set_shared_path(fs::path(XDG_DATA_HOME) / app_name);
+            root_paths.set_shared_path(fs::path(XDG_DATA_HOME) / app_name / "");
         else if (home_path[0] != '\0')
-            root_paths.set_shared_path(fs::path(home_path) / ".local/share" / app_name);
+            root_paths.set_shared_path(fs::path(home_path) / ".local/share" / app_name / "");
 
         // These default to being in shared path
-        root_paths.set_vita_fs_path(root_paths.get_shared_path() / app_name);
-        root_paths.set_patch_path(root_paths.get_shared_path() / "patch");
+        root_paths.set_vita_fs_path(root_paths.get_shared_path() / app_name / "");
+        root_paths.set_patch_path(root_paths.get_shared_path() / "patch" / "");
 #endif
     }
 #endif
@@ -406,10 +464,32 @@ bool init_paths(Root &root_paths) {
     fs::create_directories(root_paths.get_log_path() / "texturelog");
     fs::create_directories(root_paths.get_patch_path());
 
-    return portable;
+    const auto gui_configs_source_path = root_paths.get_static_assets_path() / "data" / "gui-configs";
+    if (fs::is_directory(gui_configs_source_path)) {
+        const auto gui_configs_destination_path = root_paths.get_config_path() / "gui-configs";
+        if (!fs_utils::copy_directory_contents(gui_configs_source_path, gui_configs_destination_path, fs::copy_options::overwrite_existing))
+            LOG_WARN("Failed to copy GUI configs from {} to {}", gui_configs_source_path, gui_configs_destination_path);
+    }
 }
 
 bool init(EmuEnvState &state, Config &cfg, const Root &root_paths) {
+    // Log the escaped exception's message before dying instead of a bare std::terminate().
+    std::set_terminate([]() {
+        if (auto exc = std::current_exception()) {
+            try {
+                std::rethrow_exception(exc);
+            } catch (const std::exception &e) {
+                LOG_CRITICAL("std::terminate: unhandled exception: {}", e.what());
+            } catch (...) {
+                LOG_CRITICAL("std::terminate: unhandled non-standard exception");
+            }
+        } else {
+            LOG_CRITICAL("std::terminate called without an active exception");
+        }
+        logging::flush();
+        std::abort();
+    });
+
     state.cfg = std::move(cfg);
 
     state.default_path = root_paths.get_vita_fs_path();
@@ -456,10 +536,6 @@ bool init(EmuEnvState &state, Config &cfg, const Root &root_paths) {
 
     state.motion.init();
 
-    if (state.cfg.controller_binds.empty() || state.cfg.controller_binds.size() != 15
-        || state.cfg.controller_axis_binds.empty() || state.cfg.controller_axis_binds.size() != 6)
-        reset_controller_binding(state);
-
     return true;
 }
 
@@ -471,7 +547,18 @@ void shutdown_app_runtime(EmuEnvState &state) {
     state.net.abort_all();
     state.http.shutdown_connections();
 
+    if (state.renderer)
+        state.renderer->command_buffer_queue.abort();
+
     state.kernel.process_exit();
+    if (state.jit_preparation) {
+        LOG_INFO("[JIT-PREPARE] {}", state.jit_preparation->finish() ? "learning profile saved" : "profile write failed");
+        state.jit_preparation.reset();
+    }
+    if (state.jit_compile_profile) {
+        LOG_INFO("[JIT-PROFILE] {}", state.jit_compile_profile->finish() ? "saved" : "report write failed");
+        state.jit_compile_profile.reset();
+    }
 
     state.motion.reset_runtime();
 
@@ -479,6 +566,8 @@ void shutdown_app_runtime(EmuEnvState &state) {
 
     state.renderer->preclose_action();
     renderer::stop_render_thread(*state.renderer);
+    LOG_INFO("[PVRTC-PRELOAD] {}", pvr::PVRTCFinishTextureProfile());
+    state.renderer->wait_gpu_idle();
     gxm::destroy_all_contexts(state, true);
     gxm::destroy_all_render_targets(state, true);
     state.gxm.deinit();
@@ -522,8 +611,30 @@ void shutdown_app_runtime(EmuEnvState &state) {
 
     state.kernel.deinit(state.mem);
 
+    unprotect_external_mappings(state.mem);
     state.renderer->cleanup();
     state.renderer.reset();
+    pvr::PVRTCConfigureDecodeTelemetry(nullptr);
+    if (state.texture_work_profile) {
+        renderer::publish_texture_work_profile({});
+        LOG_INFO("[TEXTURE-WORK] {}", state.texture_work_profile->finish() ? "saved" : "report write failed");
+        state.texture_work_profile.reset();
+    }
+    if (state.jit_startup_profile) {
+        util::publish_jit_startup_profile({});
+        LOG_INFO("[JIT-STARTUP] {}", state.jit_startup_profile->finish() ? "saved" : "report write failed");
+        state.jit_startup_profile.reset();
+    }
+    if (state.pipeline_profile) {
+        util::publish_pipeline_profile({});
+        LOG_INFO("[PIPELINE-PROFILE] {}", state.pipeline_profile->finish() ? "saved" : "report write failed");
+        state.pipeline_profile.reset();
+    }
+    if (state.sync_wait_profile) {
+        util::publish_sync_wait_profile({});
+        LOG_INFO("[SYNC-PROFILE] {}", state.sync_wait_profile->finish() ? "saved" : "report write failed");
+        state.sync_wait_profile.reset();
+    }
 
     deinit_mem(state.mem);
 }
@@ -535,7 +646,6 @@ void reset_app_state(EmuEnvState &state) {
     state.current_app_title.clear();
     state.self_name.clear();
     state.self_path.clear();
-    state.clear_launch_uri();
     state.main_thread_id = 0;
     state.drop_inputs = false;
     state.missing_nids.clear();
@@ -557,10 +667,25 @@ void reset_app_state(EmuEnvState &state) {
     }
 }
 
+// Formats guest PC/LR + last HLE import for mem's unhandled-fault logs; runs on the faulting thread.
+static std::string fault_context_provider() {
+    uint32_t pc = 0, lr = 0, imp_nid = 0, imp_lr = 0;
+    if (CPUState *cpu = get_current_cpu_state()) {
+        pc = read_pc(*cpu);
+        lr = read_lr(*cpu);
+    }
+    get_last_import_call(imp_nid, imp_lr);
+    return fmt::format(" guest PC=0x{:X} LR=0x{:X} last_import=0x{:X} ({}) called from LR=0x{:X}",
+        pc, lr, imp_nid, import_name(imp_nid), imp_lr);
+}
+
 bool late_init(EmuEnvState &state) {
     // note: mem is not initialized yet but that's not an issue
     // the renderer is not using it yet, just storing it for later uses
     state.renderer->late_init(state.cfg, state.app_path, state.mem);
+    // for the stop-the-world bracket around page-table memory transitions
+    state.renderer->kernel = &state.kernel;
+    set_fault_context_provider(&fault_context_provider);
 
     const bool need_page_table = state.renderer->mapping_method == MappingMethod::PageTable || state.renderer->mapping_method == MappingMethod::NativeBuffer;
     if (!init(state.mem, need_page_table)) {
@@ -620,12 +745,8 @@ void apply_renderer_config(EmuEnvState &emuenv) {
             return poll_overlay_input(emuenv);
         },
         [&emuenv](bool intercepted) {
-            auto &ctrl = emuenv.ctrl;
-            if (intercepted) {
-                ctrl.overlay_input_intercepted.store(true, std::memory_order_relaxed);
-            } else {
-                ctrl.overlay_input_intercepted.store(false, std::memory_order_relaxed);
-            }
+            if (emuenv.ctrl.native_overlay_intercepted.exchange(intercepted, std::memory_order_relaxed) != intercepted)
+                LOG_INFO("[CTRL] game input {} by a native overlay", intercepted ? "blocked" : "released");
         },
         [&emuenv]() -> overlay::overlay_touch_state {
             auto &mouse = emuenv.ctrl.overlay_mouse;

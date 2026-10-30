@@ -19,6 +19,8 @@
 
 #include <ngs/system.h>
 
+#include <vector>
+
 struct SwrContext;
 
 namespace ngs {
@@ -26,15 +28,24 @@ namespace ngs {
 struct StereoRateResamplerLogicalState {
     PCMFrameQueue input_history;
     bool needs_reset = false;
+    bool continuous = false;
+    double position = 0.0;
+    std::vector<float> carry;
 
     void clear() {
         input_history.clear();
         needs_reset = false;
+        continuous = false;
+        position = 0.0;
+        carry.clear();
     }
 
     void reset() {
         input_history.clear();
         needs_reset = true;
+        continuous = false;
+        position = 0.0;
+        carry.clear();
     }
 };
 

@@ -42,6 +42,26 @@ QString restart_required_setting_label(config::RestartRequiredSetting setting) {
         return QCoreApplication::translate("SettingsDialogTooltips", "Audio Backend");
     case config::RestartRequiredSetting::ValidationLayer:
         return QCoreApplication::translate("SettingsDialogTooltips", "Vulkan Validation Layer");
+    case config::RestartRequiredSetting::AccurateThreadScheduling:
+        return QCoreApplication::translate("SettingsDialogTooltips", "Accurate Thread Scheduling");
+    case config::RestartRequiredSetting::JitCompileTelemetry:
+        return QObject::tr("JIT Compilation Telemetry");
+    case config::RestartRequiredSetting::JitPreparation:
+        return QObject::tr("JIT Preparation (Experimental)");
+    case config::RestartRequiredSetting::PipelineTelemetry:
+        return QObject::tr("Vulkan Pipeline Telemetry");
+    case config::RestartRequiredSetting::SyncWaitTelemetry:
+        return QObject::tr("Synchronization Wait Telemetry");
+    case config::RestartRequiredSetting::ParallelTextureDecode:
+        return QObject::tr("Parallel Texture Decoding");
+    case config::RestartRequiredSetting::DecodedTextureTelemetry:
+        return QObject::tr("Texture Cache and Reuse Telemetry");
+    case config::RestartRequiredSetting::AutomaticTexturePreparation:
+        return QCoreApplication::translate("SettingsDialogTooltips", "Automatic Texture Preparation");
+    case config::RestartRequiredSetting::DecodedTextureCache:
+        return QCoreApplication::translate("SettingsDialogTooltips", "Decoded Texture Cache");
+    case config::RestartRequiredSetting::GuestCores:
+        return QCoreApplication::translate("SettingsDialogTooltips", "Guest CPU Cores");
     }
 
     return {};
@@ -80,6 +100,8 @@ QString SettingsDialogTooltips::category_summary(SettingsTab tab) const {
         return tr("Manage CPU behavior.");
     case SettingsTab::Graphics:
         return tr("Tune renderer behavior, textures, and shader behavior.");
+    case SettingsTab::Performance:
+        return tr("Performance tweaks for eligible PVRTC textures: decoded caching, parallel decoding and learned preparation. Tested primarily with WipEout 2048 on Legion Go; results vary by game. Optional diagnostics record remaining hitches. Changes apply on the next game launch.");
     case SettingsTab::Audio:
         return tr("Adjust audio.");
     case SettingsTab::Camera:
@@ -111,6 +133,8 @@ SettingsDialogTooltips::SettingsDialogTooltips(QObject *parent)
     , vsync(tr("Enable V-Sync for OpenGL. Reduces screen tearing."))
     , disable_surface_sync(tr("Speed hack, disabling turns off surface syncing between CPU and GPU. Surface syncing is needed by a few games.\nGives a big performance boost if disabled (in particular when upscaling is on)."))
     , async_pipeline(tr("Allow pipelines to be compiled concurrently on multiple concurrent threads.\nThis decreases pipeline compilation stutter at the cost of temporary graphical glitches."))
+    , accurate_thread_scheduling(tr("Run the game's threads the way a PS Vita schedules them: threads left at the default CPU affinity take turns by priority instead of all running at once."))
+    , guest_cores(tr("Number of guest threads at the default CPU affinity that may run at the same time when Accurate Thread Scheduling is on. A PS Vita gives games three cores, so 3 is the default. Some games crash while loading when their threads run in parallel (e.g., Sonic & All-Stars Racing Transformed). Set to 1 in a Custom Config to fix them at a performance cost."))
     , screen_filter(tr("Select the final image filter to apply."))
     , gpu_device(tr("Select which GPU Vita3k should use."))
     , resolution_upscaling(tr("Scale the games resolution by a multiplier.\nExperimental: apps are not guaranteed to render properly at more than 1x."))
@@ -139,6 +163,7 @@ SettingsDialogTooltips::SettingsDialogTooltips(QObject *parent)
     , check_for_updates(tr("Choose whether Vita3K checks for updates at startup.\n\"Check\" notifies you when a newer build is available, and \"Don't Check\" disables startup checks."))
     , log_compat_warn(tr("Log compatibility database related warnings."))
     , texture_cache(tr("Enable the texture cache. Improves performance in games at the cost of additional VRAM usage."))
+    , decoded_texture_cache(tr("Experimental: use RAM to reuse decoded PVRTC textures and reduce repeated decoding pauses. Expensive or reused textures get bounded retention; older content yields space as scenes change. New textures still need decoding. The limit covers texture payload; bookkeeping uses additional memory. Restart the game after changing this setting."))
     , archive_log(tr("Keep a duplicate of the log file named after the current title when an app runs."))
     , log_level(tr("Select the verbosity of the logging system."))
     , discord_rpc(tr("Enable Discord Rich Presence to show what app you're running on Discord."))
@@ -179,6 +204,6 @@ SettingsDialogTooltips::SettingsDialogTooltips(QObject *parent)
     , windows_rounded_corners(tr("Enable rounded corners for the game window on Windows.\nUnsupported Windows versions may ignore this setting."))
     , log_buffer_size(tr("Set the maximum number of log lines to keep in memory.\nSet to 0 to remove the user cap and use the built-in safety limit."))
     , log_font(tr("Choose the font family used by the log view."))
-    , gui_stylesheet(tr("Select the visual theme for the application.\nPlace custom themes in gui-configs/custom-themes; non-Windows OS may keep theme assets in separate folders."))
+    , gui_stylesheet(tr("Select the visual theme for the application.\nYou can also place custom .qss files in the gui-configs folder."))
     , ui_language(tr("Select the desktop interface language used by the Qt frontend.\nUse System Default to follow the operating system language.")) {
 }

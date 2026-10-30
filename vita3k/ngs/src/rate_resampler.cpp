@@ -25,7 +25,9 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstring>
 
 namespace ngs {
 namespace {
@@ -57,6 +59,10 @@ bool create_stereo_rate_resampler(StereoRateResamplerRuntimeState &runtime, cons
 
     runtime.source_rate = source_rate;
     runtime.dest_rate = dest_rate;
+    static std::atomic<uint64_t> created{ 0 };
+    const uint64_t n = created.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n == 1 || (n % 4096) == 0)
+        LOG_DEBUG("[NGSRATE] stereo rate resampler churn: {} creations so far (latest {} -> {} Hz)", n, source_rate, dest_rate);
     return true;
 }
 
@@ -116,6 +122,59 @@ bool replay_history(StereoRateResamplerRuntimeState &runtime, StereoRateResample
     }
     return true;
 }
+
+void switch_to_continuous(StereoRateResamplerRuntimeState &runtime, StereoRateResamplerLogicalState &logical) {
+    const int64_t delay = std::max<int64_t>(swr_get_delay(runtime.context, runtime.source_rate), 0);
+    logical.input_history.compact();
+    const uint32_t history_frames = logical.input_history.available_frames();
+    logical.carry.assign(logical.input_history.samples.begin(), logical.input_history.samples.end());
+    logical.position = std::max(1.0, static_cast<double>(history_frames) - static_cast<double>(delay));
+    logical.input_history.clear();
+    logical.continuous = true;
+    destroy_stereo_rate_resampler(runtime);
+}
+
+uint32_t process_continuous(const StereoRateResamplerRuntimeState &runtime, StereoRateResamplerLogicalState &logical,
+    const uint8_t *input, const uint32_t input_frames, PCMFrameQueue &output) {
+    if (runtime.source_rate <= 0 || runtime.dest_rate <= 0) {
+        return 0;
+    }
+
+    if (input && input_frames > 0) {
+        const size_t old_size = logical.carry.size();
+        logical.carry.resize(old_size + static_cast<size_t>(input_frames) * stereo_channels);
+        std::memcpy(logical.carry.data() + old_size, input, static_cast<size_t>(input_frames) * sizeof(float) * stereo_channels);
+    }
+
+    const uint32_t frames = static_cast<uint32_t>(logical.carry.size() / stereo_channels);
+    const double step = static_cast<double>(runtime.source_rate) / static_cast<double>(runtime.dest_rate);
+    const float *x = logical.carry.data();
+    double position = std::max(logical.position, 1.0);
+    uint32_t produced = 0;
+    while (true) {
+        const uint32_t i = static_cast<uint32_t>(position);
+        if (i + 2 >= frames)
+            break;
+        const float t = static_cast<float>(position - i);
+        float frame[stereo_channels];
+        for (uint32_t ch = 0; ch < stereo_channels; ch++) {
+            const float y0 = x[(i - 1) * stereo_channels + ch];
+            const float y1 = x[i * stereo_channels + ch];
+            const float y2 = x[(i + 1) * stereo_channels + ch];
+            const float y3 = x[(i + 2) * stereo_channels + ch];
+            frame[ch] = y1 + 0.5f * t * (y2 - y0 + t * (2.f * y0 - 5.f * y1 + 4.f * y2 - y3 + t * (3.f * (y1 - y2) + y3 - y0)));
+        }
+        output.append_frame(frame[0], frame[1]);
+        produced++;
+        position += step;
+    }
+
+    const uint32_t whole = static_cast<uint32_t>(position);
+    const uint32_t drop = std::min<uint32_t>(whole > 0 ? whole - 1 : 0, frames);
+    logical.carry.erase(logical.carry.begin(), logical.carry.begin() + static_cast<std::ptrdiff_t>(drop) * stereo_channels);
+    logical.position = position - drop;
+    return produced;
+}
 } // namespace
 
 void destroy_stereo_rate_resampler(StereoRateResamplerRuntimeState &runtime) {
@@ -135,10 +194,26 @@ bool ensure_stereo_rate_resampler(StereoRateResamplerRuntimeState &runtime, Ster
         return false;
     }
 
-    const bool needs_recreate = logical.needs_reset || !runtime.context || runtime.source_rate != source_rate
-        || runtime.dest_rate != dest_rate;
+    if (logical.continuous) {
+        runtime.source_rate = source_rate;
+        runtime.dest_rate = dest_rate;
+        return true;
+    }
 
-    if (!needs_recreate) {
+    const bool same_rates = runtime.context && runtime.source_rate == source_rate && runtime.dest_rate == dest_rate;
+    if (same_rates && !logical.needs_reset) {
+        return true;
+    }
+
+    if (runtime.context && !logical.needs_reset) {
+        switch_to_continuous(runtime, logical);
+        runtime.source_rate = source_rate;
+        runtime.dest_rate = dest_rate;
+        return true;
+    }
+
+    if (same_rates && swr_init(runtime.context) >= 0 && replay_history(runtime, logical)) {
+        logical.needs_reset = false;
         return true;
     }
 
@@ -158,6 +233,9 @@ bool ensure_stereo_rate_resampler(StereoRateResamplerRuntimeState &runtime, Ster
 
 uint32_t process_stereo_rate_resampler(StereoRateResamplerRuntimeState &runtime, StereoRateResamplerLogicalState &logical,
     const uint8_t *input, const uint32_t input_frames, PCMFrameQueue &output) {
+    if (logical.continuous) {
+        return process_continuous(runtime, logical, input, input_frames, output);
+    }
     if (!input || input_frames == 0 || !runtime.context) {
         return 0;
     }

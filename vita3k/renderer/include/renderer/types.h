@@ -27,6 +27,7 @@
 #include <array>
 #include <bitset>
 #include <map>
+#include <memory>
 #include <vector>
 
 static constexpr auto DEFAULT_RES_WIDTH = 960;
@@ -37,6 +38,8 @@ struct SceGxmProgram;
 using UniformBufferSizes = std::array<std::uint32_t, 15>;
 
 namespace renderer {
+
+struct ProgramBinding;
 
 // State types
 typedef std::map<Sha256Hash, const SceGxmProgram *> GXPPtrMap;
@@ -78,6 +81,7 @@ struct RenderTarget;
 struct GXMStreamInfo {
     Ptr<const uint8_t> data = Ptr<const uint8_t>(0);
     size_t size = 0;
+    uint64_t snapshot = ~0ull;
 };
 
 // We separate the following two parts of the stencil state because the first is part of the pipeline creation
@@ -131,6 +135,8 @@ struct GxmRecordState {
     // Programs.
     Ptr<SceGxmFragmentProgram> fragment_program;
     Ptr<SceGxmVertexProgram> vertex_program;
+    std::shared_ptr<ProgramBinding> fragment_program_binding;
+    std::shared_ptr<ProgramBinding> vertex_program_binding;
 
     SceGxmColorSurface color_surface;
     SceGxmDepthStencilSurface depth_stencil_surface;
@@ -161,6 +167,8 @@ struct Context {
     CommandList command_list;
     CommandAllocFunc alloc_func;
     CommandFreeFunc free_func;
+    std::function<std::string()> describe_command_allocator;
+    std::vector<CommandSlot> command_ring;
 
     int render_finish_status = 0;
     int notification_finish_status = 0;
@@ -182,6 +190,7 @@ struct ShaderProgram {
     UniformBufferSizes uniform_buffer_sizes; // Size of the buffer in 4-bytes unit
     UniformBufferSizes uniform_buffer_data_offsets; // Offset of the buffer in 4-bytes unit
     size_t max_total_uniform_buffer_storage;
+    uint32_t dynamic_uniform_buffers = 0; // blocks can read through a computed address past their declared size
     uint16_t buffer_count; // max buffer index used by the shader + 1
 
     uint16_t texture_count; // max texture index used by the shader + 1
@@ -189,10 +198,28 @@ struct ShaderProgram {
 };
 
 struct FragmentProgram : ShaderProgram {
+    SceGxmOutputRegisterFormat output_register_format = SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED;
+    SceGxmMultisampleMode multisample_mode = SCE_GXM_MULTISAMPLE_NONE;
+    uint8_t color_write_mask = 0xF;
 };
 
 struct VertexProgram : ShaderProgram {
     shader::usse::AttributeInformationMap attribute_infos;
+    uint32_t varying_location_mask = 0xFFFFFFFFu; // (0xFFFFFFFF = not yet computed)
+};
+
+struct ProgramBinding {
+    std::vector<uint8_t> gxp;
+    std::shared_ptr<FragmentProgram> fragment_program;
+    std::shared_ptr<VertexProgram> vertex_program;
+    std::vector<SceGxmVertexStream> streams;
+    std::vector<SceGxmVertexAttribute> attributes;
+    uint64_t key_hash = 0;
+    bool is_maskupdate = false;
+
+    const SceGxmProgram *program() const {
+        return reinterpret_cast<const SceGxmProgram *>(gxp.data());
+    }
 };
 
 struct ShadersHash {

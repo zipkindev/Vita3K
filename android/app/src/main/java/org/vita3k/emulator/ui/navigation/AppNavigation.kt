@@ -72,8 +72,7 @@ fun AppNavigation(
     installViewModel: InstallViewModel,
     settingsViewModel: SettingsViewModel,
     userManagementViewModel: UserManagementViewModel,
-    onAppLaunch: (AppInfo) -> Unit,
-    onCreateAppShortcut: (AppInfo) -> Unit
+    onAppLaunch: (AppInfo) -> Unit
 ) {
     val navController = rememberNavController()
     val currentBackStackEntry by navController.currentBackStackEntryAsState()
@@ -314,8 +313,7 @@ fun AppNavigation(
                     navController.navigate(customConfigRoute(app.titleId, app.title)) {
                         launchSingleTop = true
                     }
-                },
-                onCreateAppShortcut = onCreateAppShortcut
+                }
             )
         }
 

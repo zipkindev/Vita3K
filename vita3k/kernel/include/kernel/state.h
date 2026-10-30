@@ -34,11 +34,13 @@
 #include <emuenv/app_launch_request.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <vector>
 
 struct ThreadState;
@@ -58,11 +60,9 @@ typedef std::map<SceUID, CodecEngineBlock> CodecEngineBlocks;
 typedef std::map<SceUID, Ptr<Ptr<void>>> SlotToAddress;
 typedef std::map<SceUID, ThreadStatePtr> ThreadStatePtrs;
 typedef std::map<SceUID, SceKernelModulePtr> SceKernelModuleInfoPtrs;
+typedef std::map<SceUID, CallbackPtr> CallbackPtrs;
 typedef unordered_map_fast<uint32_t, Address> ExportNids;
-// A NID hashes the function name alone, so same-named exports from different libraries collide.
 typedef unordered_map_fast<uint64_t, Address> LibExportNids;
-// The plain NID entry outlives taiHEN and HLE redirects, so its owner is tracked apart from its address.
-typedef unordered_map_fast<uint32_t, uint32_t> ExportNidOwners;
 constexpr uint64_t lib_export_key(uint32_t library_nid, uint32_t nid) {
     return (static_cast<uint64_t>(library_nid) << 32) | nid;
 }
@@ -110,6 +110,10 @@ struct KernelState {
     std::mutex mutex;
     CodecEngineBlocks codec_blocks;
 
+    bool accurate_thread_scheduling = true;
+    bool preempt_on_wake = false;
+    int preempt_on_wake_us = 1000;
+
     Ptr<const void> tls_address = Ptr<const void>(0);
     unsigned int tls_psize = 0;
     unsigned int tls_msize = 0;
@@ -119,8 +123,17 @@ struct KernelState {
     Ptr<const void> thread_event_end = Ptr<const void>(0);
     Address thread_event_end_arg = 0;
 
-    // Thread manager objects other than threads, by UID
-    KernelObjects objects;
+    SimpleEventPtrs simple_events;
+    TimerPtrs timers;
+    SemaphorePtrs semaphores;
+    CondvarPtrs condvars;
+    CondvarPtrs lwcondvars;
+    MutexPtrs mutexes;
+    MutexPtrs lwmutexes; // also Mutexes for now
+    RWLockPtrs rwlocks;
+    EventFlagPtrs eventflags;
+    MsgPipePtrs msgpipes;
+    CallbackPtrs callbacks;
 
     ThreadStatePtrs threads;
     void *jni_env;
@@ -130,12 +143,16 @@ struct KernelState {
     LoadedSysmodules loaded_sysmodules;
     LoadedInternalSysmodules loaded_internal_sysmodules;
 
+    // a game can spawn a thread per async read, so an identical creation is only worth one INFO line
+    std::mutex logged_threads_mutex;
+    std::set<std::string> logged_threads;
+
     // the variables in this block must be accessed by first locking export_nids_mutex
     std::mutex export_nids_mutex;
     ExportNids export_nids;
     LibExportNids export_nids_by_lib;
-    ExportNidOwners export_nid_owners;
     FuncBindingInfos func_binding_infos;
+    std::unordered_map<uint32_t, std::string> nid_libraries;
     VarBindingInfos var_binding_infos;
     ModuleUidByNid module_uid_by_nid;
 
@@ -151,8 +168,6 @@ struct KernelState {
 
     uint64_t start_tick;
     SceRtcTick base_tick;
-    // Returns the process time at a time of the host clock that timers count with
-    uint64_t process_time_at(uint64_t clock_time) const;
     Ptr<SceProcessParam> process_param;
     Ptr<void> client_vtable = Ptr<void>(0);
     Ptr<Address> shellsvc_client = Ptr<Address>(0);
@@ -173,34 +188,39 @@ struct KernelState {
     void deinit(MemState &mem);
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point = Ptr<const void>(0));
-    // Creates a dormant thread with these creation arguments, attr without THREAD_ATTR_USER, or returns null
-    ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr, const SceKernelThreadOptParam *option);
+    ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
 
     ThreadStatePtr get_thread(SceUID thread_id);
-
-    // Creates a callback owned by thread and returns its UID.
-    SceUID create_callback(const ThreadStatePtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common);
-    // Deletes the callback with this UID for the thread deleter, so it never runs again. Returns false
-    // if there is none.
-    bool delete_callback(SceUID id, SceUID deleter);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
 
-    bool is_threads_paused() {
-        const std::lock_guard<std::mutex> lock(mutex);
-        return threads_paused;
-    }
+    bool is_threads_paused() { return !paused_threads_status.empty(); }
     void pause_threads();
     void resume_threads();
-    // Stops every thread for the debugger, and the threads created until the resume start stopped
-    void suspend_threads();
-    void resume_suspended_threads();
+
+    int stop_world(SceUID except_id, std::chrono::milliseconds budget);
+    void resume_world();
+
+    void log_thread_hang_dump();
+    void log_eventflag_history();
+    void log_condvar_history();
+    int try_break_provable_evf_cycle(bool dry_run = false);
+    void clear_evf_cycle_history();
+    std::atomic<int64_t> last_world_stop_epoch_ms{ 0 };
+    // Last resort recovery for a full deadlock (called by the hang watchdog)
+    int try_break_frame_sync_deadlock(std::vector<SceUID> &already_nudged);
+    // Anti-freeze recovery - wake every condvar waiter in the system!
+    int nudge_all_condvar_waiters();
+
+    std::atomic<uint64_t> thread_wake_counter{ 0 };
+    std::atomic<uint64_t> thread_create_counter{ 0 };
 
     // Kill all guest threads and block until they have exited. Must only be called from a host thread.
     void process_exit();
     std::function<void(int, std::optional<AppLaunchRequest>)> process_exit_callback;
     // Request process exit. Safe to call from a guest thread. Returns immediately.
-    // The registered process_exit_callback is invoked to notify the host layer.
+    // The registered process_exit_callback is invoked to notify the host layer, for the first request only.
     void request_process_exit(int res, std::optional<AppLaunchRequest> relaunch = std::nullopt);
+    std::atomic<bool> process_exit_requested{ false };
 
     void set_memory_watch(bool enabled);
     void invalidate_jit_cache(Address start, size_t length);
@@ -208,6 +228,6 @@ struct KernelState {
 
 private:
     std::atomic<SceUID> next_uid{ 1 };
-    bool threads_paused = false;
-    bool threads_suspended = false;
+    std::map<SceUID, ThreadStatus> paused_threads_status;
+    std::vector<ThreadStatePtr> world_stopped_threads;
 };

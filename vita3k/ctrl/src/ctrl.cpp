@@ -25,6 +25,15 @@
 #include <kernel/state.h>
 #include <util/log.h>
 
+#ifdef __ANDROID__
+#include <SDL3/SDL_system.h>
+#endif
+
+#include <algorithm>
+#include <cmath>
+#include <set>
+#include <string>
+
 static int reserve_port(CtrlState &state) {
     for (int i = 0; i < SCE_CTRL_MAX_WIRELESS_NUM; i++) {
         if (state.free_ports[i]) {
@@ -47,6 +56,63 @@ SceCtrlExternalInputMode get_type_of_controller(CtrlState &state, int port) {
     return SCE_CTRL_TYPE_DS3;
 }
 
+#ifdef __ANDROID__
+static void map_android_half_controllers() {
+    constexpr uint16_t FACE_BUTTONS = (1 << SDL_GAMEPAD_BUTTON_SOUTH) | (1 << SDL_GAMEPAD_BUTTON_EAST) | (1 << SDL_GAMEPAD_BUTTON_WEST) | (1 << SDL_GAMEPAD_BUTTON_NORTH);
+    static const std::pair<SDL_GamepadButton, const char *> BUTTONS[] = {
+        { SDL_GAMEPAD_BUTTON_BACK, "back:b4," },
+        { SDL_GAMEPAD_BUTTON_START, "start:b6," },
+        { SDL_GAMEPAD_BUTTON_LEFT_STICK, "leftstick:b7," },
+        { SDL_GAMEPAD_BUTTON_RIGHT_STICK, "rightstick:b8," },
+        { SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, "leftshoulder:b9," },
+        { SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, "rightshoulder:b10," },
+        { SDL_GAMEPAD_BUTTON_DPAD_UP, "dpup:b11," },
+        { SDL_GAMEPAD_BUTTON_DPAD_DOWN, "dpdown:b12," },
+        { SDL_GAMEPAD_BUTTON_DPAD_LEFT, "dpleft:b13," },
+        { SDL_GAMEPAD_BUTTON_DPAD_RIGHT, "dpright:b14," },
+    };
+    static std::set<SDL_JoystickID> reported;
+
+    int count = 0;
+    SDL_JoystickID *joysticks = SDL_GetJoysticks(&count);
+    if (!joysticks)
+        return;
+    for (int i = 0; i < count; i++) {
+        const SDL_JoystickID id = joysticks[i];
+        if (SDL_IsGamepad(id))
+            continue;
+        const char *id_name = SDL_GetJoystickNameForID(id);
+        std::string name = (id_name && *id_name) ? id_name : "unnamed";
+        if (name.starts_with("uinput-") || name.starts_with("gf_"))
+            continue;
+
+        const SDL_GUID guid = SDL_GetJoystickGUIDForID(id);
+        const uint16_t buttons = static_cast<uint16_t>(guid.data[12] | (guid.data[13] << 8));
+        const uint16_t axes = static_cast<uint16_t>(guid.data[14] | (guid.data[15] << 8));
+        char guid_string[33];
+        SDL_GUIDToString(guid, guid_string, sizeof(guid_string));
+
+        std::string controls;
+        for (const auto &[button, entry] : BUTTONS) {
+            if (buttons & (1 << button))
+                controls += entry;
+        }
+        if (!(buttons & FACE_BUTTONS) && !controls.empty() && (axes & 0x7FFF) == 0x0003) {
+            if ((buttons & (1 << SDL_GAMEPAD_BUTTON_GUIDE)) && SDL_GetAndroidSDKVersion() >= 30)
+                controls += "guide:b5,";
+            std::replace(name.begin(), name.end(), ',', ' ');
+            const std::string mapping = fmt::format("{},{},{}leftx:a0,lefty:a1,", guid_string, name, controls);
+            const bool added = SDL_AddGamepadMapping(mapping.c_str()) >= 0;
+            LOG_INFO("[CTRL] joystick '{}' (id {}, buttons 0x{:04X}, axes 0x{:04X}) has no face buttons, so SDL left it out; mapped from its reported controls{}: {}",
+                name, id, buttons, axes, added ? std::string() : fmt::format(" FAILED ({})", SDL_GetError()), mapping);
+        } else if (reported.insert(id).second) {
+            LOG_INFO("[CTRL] joystick '{}' (id {}, guid {}, buttons 0x{:04X}, axes 0x{:04X}) is not a gamepad and is not used", name, id, guid_string, buttons, axes);
+        }
+    }
+    SDL_free(joysticks);
+}
+#endif
+
 void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
     // Remove disconnected controllers
     bool found_gyro = false;
@@ -59,69 +125,93 @@ void refresh_controllers(CtrlState &state, EmuEnvState &emuenv) {
 
             ++controller;
         } else {
+            LOG_INFO("[CTRL] '{}' disconnected from port {}", controller->second.name, controller->second.port);
             state.free_ports[controller->second.port] = true;
             controller = state.controllers.erase(controller);
             state.controllers_num--;
         }
     }
 
+    // gamepads left out are reported once each
+    static std::set<SDL_JoystickID> reported_skips;
+
+#ifdef __ANDROID__
+    map_android_half_controllers();
+#endif
+
     // Add new controllers
     int num_gamepads = 0;
     const auto gamepads = SDL_GetGamepads(&num_gamepads);
     for (int gamepad_index = 0; gamepad_index < num_gamepads; ++gamepad_index) {
         const auto gamepad_id = gamepads[gamepad_index];
+        const char *id_name = SDL_GetGamepadNameForID(gamepad_id);
+        const std::string_view name = id_name ? id_name : "unnamed";
         if (state.controllers_num >= SCE_CTRL_MAX_WIRELESS_NUM) {
+            if (reported_skips.insert(gamepad_id).second)
+                LOG_WARN("[CTRL] '{}' (gamepad {}) ignored, {} controllers are already connected", name, gamepad_id, state.controllers_num);
             break;
         }
 
 #ifdef __ANDROID__
         // for whatever reasons, fingerprint sensors are detected as controllers, filter them out
-        const char *controller_name = SDL_GetGamepadNameForID(gamepad_id);
-        if (controller_name != nullptr && (std::string_view(controller_name).starts_with("uinput-") || std::string_view(controller_name).starts_with("gf_")))
+        if (name.starts_with("uinput-") || name.starts_with("gf_"))
             continue;
 #endif
 
         const SDL_GUID guid = SDL_GetJoystickGUIDForID(gamepad_id);
-        if (!state.controllers.contains(guid)) {
-            Controller new_controller;
-            new_controller.port = reserve_port(state);
-            if (new_controller.port == -1) { // Port not available
-                break;
-            }
-            const GamepadPtr controller(SDL_OpenGamepad(gamepad_id), SDL_CloseGamepad);
-            if (controller == nullptr) {
-                continue;
-            }
-            auto controller_name = SDL_GetGamepadName(controller.get());
-            if (controller_name == nullptr) {
-                continue;
-            }
-            new_controller.controller = controller;
-            SDL_SetGamepadPlayerIndex(controller.get(), new_controller.port);
-            new_controller.name = controller_name;
-
-            new_controller.has_gyro = SDL_GamepadHasSensor(controller.get(), SDL_SENSOR_GYRO);
-            if (new_controller.has_gyro)
-                SDL_SetGamepadSensorEnabled(controller.get(), SDL_SENSOR_GYRO, true);
-            new_controller.has_accel = SDL_GamepadHasSensor(controller.get(), SDL_SENSOR_ACCEL);
-            if (new_controller.has_accel)
-                SDL_SetGamepadSensorEnabled(controller.get(), SDL_SENSOR_ACCEL, true);
-
-            new_controller.has_led = SDL_GetBooleanProperty(SDL_GetGamepadProperties(controller.get()), SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
-            if (new_controller.has_led) {
-                auto &color = emuenv.cfg.controller_led_color;
-                if (!color.empty()) {
-                    color.resize(3);
-                    SDL_SetGamepadLED(controller.get(), color[0], color[1], color[2]);
-                }
-            }
-
-            found_gyro |= new_controller.has_gyro;
-            found_accel |= new_controller.has_accel;
-
-            state.controllers.emplace(guid, new_controller);
-            state.controllers_num++;
+        const auto existing = state.controllers.find(guid);
+        if (existing != state.controllers.end()) {
+            const SDL_JoystickID existing_id = SDL_GetGamepadID(existing->second.controller.get());
+            if (existing_id != gamepad_id && reported_skips.insert(gamepad_id).second)
+                LOG_WARN("[CTRL] '{}' (gamepad {}) not used, it shares its GUID with connected '{}' (gamepad {})", name, gamepad_id, existing->second.name, existing_id);
+            continue;
         }
+
+        const GamepadPtr controller(SDL_OpenGamepad(gamepad_id), SDL_CloseGamepad);
+        if (controller == nullptr) {
+            LOG_WARN("[CTRL] could not open '{}' (gamepad {}): {}", name, gamepad_id, SDL_GetError());
+            continue;
+        }
+        auto controller_name = SDL_GetGamepadName(controller.get());
+        if (controller_name == nullptr) {
+            LOG_WARN("[CTRL] gamepad {} has no name, ignored", gamepad_id);
+            continue;
+        }
+
+        // reserved after the open so a failed open holds no port
+        Controller new_controller;
+        new_controller.port = reserve_port(state);
+        if (new_controller.port == -1) {
+            LOG_WARN("[CTRL] no free port for '{}' (gamepad {})", controller_name, gamepad_id);
+            break;
+        }
+        new_controller.controller = controller;
+        SDL_SetGamepadPlayerIndex(controller.get(), new_controller.port);
+        new_controller.name = controller_name;
+
+        new_controller.has_gyro = SDL_GamepadHasSensor(controller.get(), SDL_SENSOR_GYRO);
+        if (new_controller.has_gyro)
+            SDL_SetGamepadSensorEnabled(controller.get(), SDL_SENSOR_GYRO, true);
+        new_controller.has_accel = SDL_GamepadHasSensor(controller.get(), SDL_SENSOR_ACCEL);
+        if (new_controller.has_accel)
+            SDL_SetGamepadSensorEnabled(controller.get(), SDL_SENSOR_ACCEL, true);
+
+        new_controller.has_led = SDL_GetBooleanProperty(SDL_GetGamepadProperties(controller.get()), SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
+        if (new_controller.has_led) {
+            auto &color = emuenv.cfg.controller_led_color;
+            if (!color.empty()) {
+                color.resize(3);
+                SDL_SetGamepadLED(controller.get(), color[0], color[1], color[2]);
+            }
+        }
+
+        found_gyro |= new_controller.has_gyro;
+        found_accel |= new_controller.has_accel;
+
+        LOG_INFO("[CTRL] '{}' connected on port {} (gamepad {}{}{})", controller_name, new_controller.port, gamepad_id,
+            new_controller.has_gyro ? ", gyro" : "", new_controller.has_accel ? ", accelerometer" : "");
+        state.controllers.emplace(guid, new_controller);
+        state.controllers_num++;
     }
     SDL_free(gamepads);
     state.has_motion_support = found_gyro && found_accel;
@@ -190,9 +280,8 @@ static float axis_to_axis(int16_t axis, const auto &mult) {
 
 static uint8_t float_to_byte(float f) {
     const auto clamped_f = std::clamp(f, -1.0f, 1.0f);
-    const auto mapped = (clamped_f * 0.5f) + 0.5f;
 
-    return static_cast<uint8_t>(mapped * 255);
+    return static_cast<uint8_t>(std::lround((clamped_f + 1.0f) * 127.5f));
 }
 
 static void apply_controller(EmuEnvState &emuenv, uint32_t *buttons, float axes[4], SDL_Gamepad *controller, bool ext) {
@@ -255,7 +344,7 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
             buttons ^= ~0;
     };
 
-    if (state.overlay_input_intercepted.load(std::memory_order_relaxed) || emuenv.drop_inputs) {
+    if (state.input_intercepted() || emuenv.drop_inputs) {
         reset_axes();
         return;
     }
@@ -282,6 +371,7 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
 }
 
 int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2 *pData, SceUInt32 count, bool negative, bool is_peek, bool is_v2, bool from_ext) {
+    emuenv.display.guest_input_reads.fetch_add(1, std::memory_order_relaxed);
     if (port > 1 && !emuenv.cfg.current_config.pstv_mode) {
         const char *export_name = "sceCtrl*Buffer*";
         return RET_ERROR(SCE_CTRL_ERROR_NO_DEVICE);
@@ -300,11 +390,13 @@ int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2
             // sceCtrlRead is blocking, wait for the next vsync for the buffer to be updated
             auto thread = emuenv.kernel.get_thread(thread_id);
 
-            wait_vblank(emuenv.display, thread, state.last_vcount[port] + 1, false);
+            wait_vblank(emuenv.display, emuenv.kernel, thread, state.last_vcount[port] + 1, false);
         }
         uint64_t vblank_count = emuenv.display.vblank_count.load();
         nb_returned_data = std::min<int32_t>(count, vblank_count - state.last_vcount[port]);
         state.last_vcount[port] = vblank_count;
+        if ((count > 0) && (nb_returned_data < 1))
+            nb_returned_data = 1;
     }
 
     std::chrono::time_point<std::chrono::steady_clock> ts = std::chrono::steady_clock::now();

@@ -23,6 +23,12 @@
 #include <util/types.h>
 
 #include <atomic>
+#include <functional>
+
+namespace cpu {
+class JitCompileProfile;
+class JitPreparation;
+} // namespace cpu
 
 struct CPUState {
     CPUState() = default;
@@ -31,6 +37,8 @@ struct CPUState {
     MemState *mem = nullptr;
     DisasmState disasm;
 
+    std::shared_ptr<cpu::JitCompileProfile> jit_profile;
+    std::shared_ptr<cpu::JitPreparation> jit_preparation;
     CPUInterfacePtr cpu;
     bool svc_called;
     uint32_t svc;
@@ -41,4 +49,6 @@ struct CPUState {
     std::atomic<bool> abort_pending{ false };
     std::atomic<uint32_t> abort_fault_addr{ 0 };
     std::atomic<bool> abort_is_write{ false };
+
+    std::function<void(uint32_t)> on_guest_breakpoint;
 };

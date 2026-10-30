@@ -1,0 +1,193 @@
+// Vita3K emulator project
+// SPDX-License-Identifier: GPL-2.0-or-later
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+#include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <renderer/pvrt-dec.h>
+#include <renderer/pvrtc-cache.h>
+#include <renderer/texture_work_profile.h>
+#include <sstream>
+#include <string_view>
+#include <thread>
+#include <vector>
+int main(int argc, char **argv) {
+#ifdef _WIN32
+    _putenv_s("VITA3K_DIAG_PVRTC_THREADS", argc > 1 && std::string_view(argv[1]) == "serial" ? "1" : "2");
+#else
+    setenv("VITA3K_DIAG_PVRTC_THREADS", argc > 1 && std::string_view(argv[1]) == "serial" ? "1" : "2", 1);
+#endif
+    const bool configured = argc > 1 && std::string_view(argv[1]) == "configured";
+    const bool serial = argc > 1 && std::string_view(argv[1]) == "serial";
+    const bool reuse = argc > 1 && std::string_view(argv[1]) == "reuse";
+    const bool work = argc > 1 && std::string_view(argv[1]) == "work";
+    const bool disabled = argc > 1 && !configured && !serial && !reuse && !work;
+    std::shared_ptr<renderer::TextureWorkProfile> work_profile;
+    if (work) {
+        work_profile = std::make_shared<renderer::TextureWorkProfile>(std::filesystem::temp_directory_path() / ("vita-work-decoder-" + std::to_string(renderer::TextureWorkProfile::counter())), "TEST");
+        renderer::publish_texture_work_profile(work_profile);
+    }
+    const auto report = std::filesystem::temp_directory_path() / ("vita3k-reuse-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".csv");
+    if (reuse) {
+        pvr::PVRTCConfigureDecodeTelemetry(report.string().c_str());
+        assert(pvr::PVRTCDecodeCacheStats().reuse.enabled);
+    }
+#ifdef _WIN32
+    _putenv_s("VITA3K_DIAG_PVRTC_CACHE_MB", disabled ? "0" : "1");
+#else
+    setenv("VITA3K_DIAG_PVRTC_CACHE_MB", disabled ? "0" : "1", 1);
+#endif
+    if (configured) {
+#ifdef _WIN32
+        _putenv_s("VITA3K_DIAG_PVRTC_THREADS", "");
+#else
+        unsetenv("VITA3K_DIAG_PVRTC_THREADS");
+#endif
+        pvr::PVRTCConfigureDecodeCache(0, false);
+        assert(pvr::PVRTCDecodeParallelism() == 1);
+        pvr::PVRTCConfigureDecodeCache(0, true);
+        assert(pvr::PVRTCDecodeParallelism() == 2);
+#ifdef _WIN32
+        _putenv_s("VITA3K_DIAG_PVRTC_CACHE_MB", "");
+#else
+        unsetenv("VITA3K_DIAG_PVRTC_CACHE_MB");
+#endif
+        pvr::PVRTCConfigureDecodeCache(-1);
+        assert(pvr::PVRTCDecodeCacheStats().budget_bytes == 0);
+        pvr::PVRTCConfigureDecodeCache(513);
+        assert(pvr::PVRTCDecodeCacheStats().budget_bytes == size_t(512) * 1024 * 1024);
+        pvr::PVRTCConfigureDecodeCache(1);
+    } else {
+        // Explicit diagnostic override wins even when saved config requests off.
+        pvr::PVRTCConfigureDecodeCache(0);
+    }
+    assert(pvr::PVRTCDecodeParallelism() == (serial ? 1 : 2));
+    // Run before pressure: demand admission is conditional in a full cache.
+    // Direct consumers must match the reference for PVRTC I/II and both bit
+    // depths; failed preparation must never publish a partially uploaded image.
+    // Keep the original diagnostic-count test unchanged in work mode.
+    if (!disabled && !work) {
+        for (unsigned bits : { 0u, 1u })
+            for (unsigned type : { 0u, 1u }) {
+                std::vector<uint8_t> source(32 * 32 / (bits ? 4 : 2), 17), reference(32 * 32 * 4), staged(reference.size());
+                pvr::PVRTDecompressPVRTC(source.data(), bits, 32, 32, type, reference.data());
+                bool prepared = false, consumed = false;
+                assert(pvr::PVRTConsumeCachedPVRTC(source.data(), bits, 32, 32, type, [&] {
+                    // Proves staging preparation does not hold the cache mutex.
+                    assert(pvr::PVRTCDecodeCacheStats().entries > 0);
+                    prepared = true;
+                    return true;
+                }, [&](auto pixels) {
+                    assert(prepared);
+                    std::copy(pixels.begin(), pixels.end(), staged.begin());
+                    consumed = true;
+                }));
+                assert(consumed && staged == reference);
+                assert(!pvr::PVRTConsumeCachedPVRTC(source.data(), bits, 32, 32, type, [] { return false; }, [](auto) { assert(false); }));
+                source[0] ^= 1;
+                assert(!pvr::PVRTConsumeCachedPVRTC(source.data(), bits, 32, 32, type, [] { assert(false); return true; }, [](auto) { assert(false); }));
+            }
+    }
+    unsigned seed = 17, cases = 0;
+    for (unsigned bits : { 0u, 1u })
+        for (unsigned type : { 0u, 1u }) {
+            for (unsigned w : { 1u, 2u, 4u, 8u, 16u, 32u, 64u, 128u, 512u })
+                for (unsigned h : { 1u, 8u, 32u, 128u, 512u }) {
+                    auto bytes = std::max(w, bits ? 16u : 8u) * std::max(h, 8u) / (bits ? 4 : 2);
+                    std::vector<uint8_t> source(bytes), expected(w * h * 4), actual(w * h * 4);
+                    for (auto &v : source) {
+                        seed = seed * 1664525 + 1013904223;
+                        v = seed >> 24;
+                    }
+                    auto used = pvr::PVRTDecompressPVRTCUncached(source.data(), bits, w, h, type, expected.data());
+                    assert(pvr::PVRTDecompressPVRTCParallel(source.data(), bits, w, h, type, actual.data()) == used && actual == expected);
+                    for (int repeat = 0; repeat < 2; ++repeat) {
+                        assert(pvr::PVRTDecompressPVRTC(source.data(), bits, w, h, type, actual.data()) == used);
+                        assert(actual == expected);
+                        ++cases;
+                    }
+                    auto relocated = source;
+                    assert(pvr::PVRTDecompressPVRTC(relocated.data(), bits, w, h, type, actual.data()) == used && actual == expected);
+                    ++cases;
+                    source[0] ^= 0xff;
+                    used = pvr::PVRTDecompressPVRTCUncached(source.data(), bits, w, h, type, expected.data());
+                    assert(pvr::PVRTDecompressPVRTC(source.data(), bits, w, h, type, actual.data()) == used && actual == expected);
+                    ++cases;
+                }
+        }
+    std::atomic<bool> identical = true;
+    std::vector<std::thread> callers;
+    for (unsigned n = 0; n < 4; ++n) {
+        callers.emplace_back([&, n] {
+            unsigned random = n + 9;
+            std::vector<uint8_t> input(512 * 512 / 2), reference(512 * 512 * 4), parallel(reference.size());
+            for (auto &byte : input) {
+                random = random * 1664525 + 1013904223;
+                byte = random >> 24;
+            }
+            for (unsigned round = 0; round < 4; ++round) {
+                const auto result = pvr::PVRTDecompressPVRTCUncached(input.data(), 0, 512, 512, n % 2, reference.data());
+                if (pvr::PVRTDecompressPVRTCParallel(input.data(), 0, 512, 512, n % 2, parallel.data()) != result || reference != parallel)
+                    identical = false;
+                input[round] ^= 0xff;
+            }
+        });
+    }
+    for (auto &caller : callers)
+        caller.join();
+    assert(identical);
+    auto stats = pvr::PVRTCDecodeCacheStats();
+    assert(stats.resident_bytes <= stats.budget_bytes);
+    if (disabled)
+        assert(stats.hits == 0 && stats.entries == 0 && stats.decodes == cases);
+    else
+        assert(stats.hits > 0 && stats.misses > 0 && stats.evictions > 0 && stats.bypasses > 0);
+    assert(stats.decodes == stats.requests - stats.hits);
+    if (reuse) {
+        uint64_t classified = 0, classified_ns = 0;
+        for (size_t i = 0; i < 4; ++i) {
+            classified += stats.reuse.decodes[i];
+            classified_ns += stats.reuse.decode_ns[i];
+            assert(stats.reuse.decodes[i] == stats.reuse.misses[i]);
+        }
+        assert(classified == stats.misses);
+        assert(classified + stats.reuse.untracked_decodes == stats.decodes);
+        assert(stats.reuse.untracked_decodes == stats.bypasses);
+        assert(classified_ns <= stats.decode_ns && classified_ns > 0);
+        assert(stats.reuse.history_replacements == 0);
+        assert(stats.reuse.misses[0] > 0 && stats.reuse.demand_hits == stats.hits);
+        pvr::PVRTCConfigureDecodeTelemetry(nullptr);
+        assert(!pvr::PVRTCDecodeCacheStats().reuse.enabled);
+        assert(std::filesystem::file_size(report) > 0);
+        std::filesystem::remove(report);
+    }
+    if (work) {
+        renderer::publish_texture_work_profile({});
+        assert(work_profile->finish());
+        std::ifstream totals(work_profile->directory / "kinds.csv");
+        std::string line, token;
+        std::getline(totals, line);
+        std::array<uint64_t, static_cast<size_t>(renderer::TextureWorkKind::Count)> counts{};
+        while (std::getline(totals, line)) {
+            std::istringstream row(line);
+            std::getline(row, token, ',');
+            const auto kind = std::stoull(token);
+            std::getline(row, token, ',');
+            std::getline(row, token, ',');
+            counts[kind] = std::stoull(token);
+        }
+        assert(counts[static_cast<size_t>(renderer::TextureWorkKind::CachePixelCopy)] == stats.hits);
+        assert(counts[static_cast<size_t>(renderer::TextureWorkKind::CacheTotal)] == stats.hits + stats.misses);
+        assert(counts[static_cast<size_t>(renderer::TextureWorkKind::Decode)] == stats.decodes);
+        totals.close(); // Windows does not allow deleting an open report file.
+        std::filesystem::remove_all(work_profile->directory);
+    }
+    printf("%u byte-identical decode comparisons; requests=%llu hits=%llu misses=%llu evictions=%llu resident=%zu budget=%zu\n", cases, (unsigned long long)stats.requests, (unsigned long long)stats.hits, (unsigned long long)stats.misses, (unsigned long long)stats.evictions, stats.resident_bytes, stats.budget_bytes);
+}

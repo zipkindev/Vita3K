@@ -19,3 +19,7 @@ target_link_libraries(config PRIVATE CLI11 pugixml::pugixml yaml-cpp)
 if(TRACY_ENABLE_ON_CORE_COMPONENTS)
 	target_link_libraries(config PRIVATE tracy)
 endif()
+
+add_executable(decoded-texture-settings-tests tests/decoded_texture_settings.cpp)
+target_link_libraries(decoded-texture-settings-tests PRIVATE config)
+add_test(NAME decoded-texture-settings COMMAND decoded-texture-settings-tests)

@@ -1,0 +1,11 @@
+# Pipeline preparation lifecycle candidate .35
+
+Based on .34 with pipeline libraries disabled. No skipped-draw policy, texture budget, guest scheduler, graphics setting or learned profile format changes.
+
+Early pair suppression now follows live vertex/fragment binding objects. Previously a shader/layout/blend identity marked seen for the whole process could suppress registration of a newly created binding after the registry's weak reference expired. Equivalent replacement bindings now refresh registration and trigger exact-recipe scheduling. Repeated observations of the same objects remain suppressed. The history is bounded to 2,048 weak binding pairs and does not extend guest-object lifetime.
+
+Shader consumers now wait on a condition variable under the shader-cache mutex. The producer publishes completed modules under that mutex and wakes waiters on success or failure. This removes an unlocked poll/yield loop and its data race; compilation time itself still exists. A new `shader_wait` telemetry kind measures these waits. No graphics-pipeline-library path is enabled.
+
+When pipeline profiling is enabled, bounded coverage survives cheap skips: up to 1,024 exact draw keys and 2,048 pair variants. Normal closure logs `[PIPECOVER]` records. Exact event flags: missing binding=1, missing render pass=2, hash mismatch=4, invalid recipe=8, no job=16, draw claimed queued job=32, draw waited running job=64, not ready=128, reused=256, queued=512, started=1024, prepared=2048, failed=4096. Pair outcome bits: already drawn=1, unavailable vertex variant=2, unavailable fragment variant=4, no render pass=8, compile failed=16, prepared=32, exception=64. A prepared guessed pair still does not prove the exact draw variant is covered. The bounded table preserves the latest completion per variant, not an unbounded event history.
+
+Validation includes replacement of still-live and expired bindings, repeated observations, capacity handling, native build/tests and separate on-device loading checks. Gameplay performance requires a short Metropia Rapier traffic/weapons recording. The .34 reference had 3,602 intervals from remote start through 120 seconds, median 33.3365 ms and two long gaps of 122.9167/113.8057 ms. Both aligned with synchronous pipeline work. No gain is claimed for .35 before measurement; unseen driver compiles can still exceed 100 ms.

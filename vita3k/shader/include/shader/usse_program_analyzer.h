@@ -49,6 +49,8 @@ bool is_branch(const std::uint64_t inst, std::uint8_t &pred, std::int32_t &br_of
 bool is_buffer_fetch_or_store(const std::uint64_t inst, int &base, int &cursor, int &offset, int &size);
 bool does_write_to_predicate(const std::uint64_t inst, std::uint8_t &pred);
 std::uint8_t get_predicate(const std::uint64_t inst);
+// True when the instruction is predicated on pN which the translator does not currently implement
+bool uses_pn_predicate(const std::uint64_t inst);
 
 enum USSENodeType {
     USSE_ABSTRACT_NODE,
@@ -234,6 +236,8 @@ using AnalyzeReadFunction = std::function<std::uint64_t(USSEOffset)>;
 void get_attribute_informations(const SceGxmProgram &program, AttributeInformationMap &locmap);
 // return the max used buffer index + 1
 int get_uniform_buffer_sizes(const SceGxmProgram &program, UniformBufferSizes &sizes);
+
+std::uint32_t get_dynamic_uniform_buffers(const SceGxmProgram &program);
 
 void analyze(USSEBlockNode &root, USSEOffset end_offset, const AnalyzeReadFunction &read_func);
 } // namespace shader::usse

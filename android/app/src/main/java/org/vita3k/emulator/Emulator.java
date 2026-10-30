@@ -11,7 +11,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.InputDevice;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.ViewGroup;
 import android.view.View;
@@ -51,8 +53,8 @@ import java.io.InputStream;
 import java.util.Arrays;
 
 import org.libsdl.app.SDLActivity;
+import org.libsdl.app.SDLControllerManager;
 import org.libsdl.app.SDLDummyEdit;
-import org.libsdl.app.VitaTextEdit;
 import org.libsdl.app.SDLSurface;
 import org.vita3k.emulator.data.AppStorage;
 import org.vita3k.emulator.data.NativeImeState;
@@ -98,6 +100,7 @@ public class Emulator extends SDLActivity
     private boolean suppressImeHiddenHandler;
     private boolean restoreImeAfterPauseMenu;
     private long lastImeCompletionUptimeMs;
+    private long lastUnfocusedControllerLogMs;
     private RelativeLayout.LayoutParams lastTextInputLayoutParams;
     private int lastTextInputType;
     private boolean hasLastTextInputState;
@@ -247,6 +250,26 @@ public class Emulator extends SDLActivity
     }
 
     @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        try {
+            if (NativeLib.INSTANCE.isInitialized())
+                NativeLib.INSTANCE.onTrimMemory(level);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
+    public void onLowMemory() {
+        super.onLowMemory();
+        try {
+            if (NativeLib.INSTANCE.isInitialized())
+                NativeLib.INSTANCE.onTrimMemory(80);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
     protected void onStart() {
         super.onStart();
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START);
@@ -294,6 +317,7 @@ public class Emulator extends SDLActivity
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             refreshUiState(false);
+            focusGameSurface();
         }
     }
 
@@ -323,7 +347,98 @@ public class Emulator extends SDLActivity
             return true;
         }
 
+        if (event.getAction() == KeyEvent.ACTION_DOWN && isControllerSource(event.getSource())
+                && mSurface != null && !mSurface.hasFocus() && gameOwnsControllerInput()) {
+            reclaimGameFocus("key " + KeyEvent.keyCodeToString(event.getKeyCode()), event.getDeviceId());
+        }
+
         return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if (isControllerSource(event.getSource()) && mSurface != null && !mSurface.hasFocus()) {
+            if (gameOwnsControllerInput()) {
+                reclaimGameFocus("stick", event.getDeviceId());
+            } else if (nativeKeyboardRequested && mTextEdit != null && mTextEdit.hasFocus()) {
+                // the keyboard's text box passes keys on to SDL but not sticks
+                return mSurface.dispatchGenericMotionEvent(event);
+            }
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
+
+    private static boolean isControllerSource(int source) {
+        return (source & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+                || (source & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                || (source & InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD;
+    }
+
+    // no menu, dialog or keyboard of ours is on screen to take controller input
+    private boolean gameOwnsControllerInput() {
+        return mSurface != null && !isFinishing() && !nativeKeyboardRequested
+                && (pauseMenuView == null || pauseMenuView.getVisibility() != View.VISIBLE)
+                && (imeOverlayView == null || imeOverlayView.getVisibility() != View.VISIBLE);
+    }
+
+    private void reclaimGameFocus(String what, int deviceId) {
+        long now = SystemClock.uptimeMillis();
+        if (now - lastUnfocusedControllerLogMs > 5000L) {
+            lastUnfocusedControllerLogMs = now;
+            logInputDiagnostic("[INPUT] controller " + what + " from device " + deviceId + " while " + describeView(getCurrentFocus())
+                    + " had focus, focus returned to the game");
+        }
+        mSurface.requestFocus();
+    }
+
+    public void focusGameSurface() {
+        runOnUiThread(() -> {
+            if (mSurface == null || isFinishing() || nativeKeyboardRequested || mSurface.hasFocus())
+                return;
+            if (sessionViewModel != null && (sessionViewModel.getUiState().getShowMenu()
+                    || sessionViewModel.getUiState().isEditingControls()
+                    || sessionViewModel.getUiState().getShowExitConfirmation()))
+                return;
+            mSurface.requestFocus();
+        });
+    }
+
+    // called by the native loop (SDL's own rescan stalls after an SDL re-init)
+    @Keep
+    public void pollControllerDevices() {
+        SDLControllerManager.pollInputDevices();
+    }
+
+    private String describeView(View view) {
+        if (view == null)
+            return "nothing";
+        if (view == mSurface)
+            return "the game";
+        if (view == mTextEdit)
+            return "the keyboard text box";
+        if (isInside(view, pauseMenuView))
+            return "the pause menu";
+        if (isInside(view, imeOverlayView))
+            return "the keyboard overlay";
+        return view.getClass().getSimpleName();
+    }
+
+    private static boolean isInside(View view, View container) {
+        if (container == null)
+            return false;
+        for (Object v = view; v instanceof View; v = ((View) v).getParent()) {
+            if (v == container)
+                return true;
+        }
+        return false;
+    }
+
+    private static void logInputDiagnostic(String text) {
+        try {
+            if (NativeLib.INSTANCE.isInitialized())
+                NativeLib.INSTANCE.logDiagnostics(text);
+        } catch (Throwable ignored) {
+        }
     }
 
     @Keep
@@ -640,44 +755,31 @@ public class Emulator extends SDLActivity
     }
 
     @Keep
-    public static boolean createShortcut(Context context, String game_id, String game_name, File icon_file){
-        if(context == null || game_id == null || game_id.isEmpty())
+    public boolean createShortcut(String game_id, String game_name){
+        if(!ShortcutManagerCompat.isRequestPinShortcutSupported(getContext()))
             return false;
-
-        if(!ShortcutManagerCompat.isRequestPinShortcutSupported(context))
-            return false;
-
-        String shortcut_label = game_name != null && !game_name.isEmpty() ? game_name : game_id;
 
         // first look at the icon, its location should always be the same
-        File src_icon = icon_file != null && icon_file.exists()
-                ? icon_file
-                : new File(context.getExternalFilesDir(null), "cache/icons/" + game_id + ".png");
+        File src_icon = new File(getExternalFilesDir(null), "cache/icons/" + game_id + ".png");
         Bitmap icon;
         if(src_icon.exists())
             icon = BitmapFactory.decodeFile(src_icon.getPath());
         else
-            icon = BitmapFactory.decodeResource(context.getResources(), R.mipmap.ic_launcher);
-        if(icon == null)
-            icon = BitmapFactory.decodeResource(context.getResources(), R.mipmap.ic_launcher);
+            icon = BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher);
 
         // intent to directly start the game
-        Intent game_intent = createLaunchIntent(context, game_id, shortcut_label);
-        game_intent.setAction("LAUNCH_" + game_id);
+        Intent game_intent = createLaunchIntent(getContext(), game_id, game_name);
 
         // now create the pinned shortcut
-        ShortcutInfoCompat shortcut = new ShortcutInfoCompat.Builder(context, game_id)
-                .setShortLabel(shortcut_label)
-                .setLongLabel(shortcut_label)
+        ShortcutInfoCompat shortcut = new ShortcutInfoCompat.Builder(getContext(), game_id)
+                .setShortLabel(game_name)
+                .setLongLabel(game_name)
                 .setIcon(IconCompat.createWithBitmap(icon))
                 .setIntent(game_intent)
                 .build();
-        return ShortcutManagerCompat.requestPinShortcut(context, shortcut, null);
-    }
+        ShortcutManagerCompat.requestPinShortcut(getContext(), shortcut, null);
 
-    @Keep
-    public boolean createShortcut(String game_id, String game_name){
-        return createShortcut(getContext(), game_id, game_name, null);
+        return true;
     }
 
     @Keep
@@ -779,7 +881,7 @@ public class Emulator extends SDLActivity
 
         mLayout.removeView(mTextEdit);
         final VitaTextEdit replacement = new VitaTextEdit(this);
-        replacement.applyInputType(lastTextInputType);
+        replacement.setInputType(lastTextInputType);
         mTextEdit = replacement;
         mLayout.addView(mTextEdit, params);
 
@@ -812,15 +914,13 @@ public class Emulator extends SDLActivity
 
         if (mTextEdit == null) {
             final VitaTextEdit replacement = new VitaTextEdit(this);
-            replacement.applyInputType(lastTextInputType);
+            replacement.setInputType(lastTextInputType);
             mTextEdit = replacement;
             mLayout.addView(mTextEdit, new RelativeLayout.LayoutParams(lastTextInputLayoutParams));
         } else {
             ensureVitaTextEdit();
             mTextEdit.setLayoutParams(new RelativeLayout.LayoutParams(lastTextInputLayoutParams));
-            if (mTextEdit instanceof VitaTextEdit) {
-                ((VitaTextEdit) mTextEdit).applyInputType(lastTextInputType);
-            }
+            mTextEdit.setInputType(lastTextInputType);
         }
 
         mTextEdit.setVisibility(View.VISIBLE);

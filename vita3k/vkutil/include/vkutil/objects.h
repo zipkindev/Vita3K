@@ -30,6 +30,7 @@ struct Image {
     vma::Allocation allocation;
     vk::Image image{};
     vk::ImageView view{};
+    vk::ImageUsageFlags usage{};
     vk::Sampler sampler{};
 
     uint32_t width;
@@ -53,6 +54,7 @@ struct Image {
     Image &operator=(Image const &) = delete;
 
     void init_image(vk::ImageUsageFlags usage, vk::ComponentMapping mapping = default_comp_mapping, const vk::ImageCreateFlags image_create_flags = vk::ImageCreateFlags(), const void *pNext = nullptr);
+    vk::ImageViewUsageCreateInfo view_usage(vk::Format view_format) const;
     // called by ~Image
     void destroy();
 
@@ -97,6 +99,7 @@ protected:
 
     uint32_t cursor = ~0;
     uint32_t capacity;
+    uint64_t lap_start = 0;
 
 public:
     // any buffer alignment on vulkan is at most 256 on 99% of instances
@@ -109,6 +112,15 @@ public:
 
     // Allocate new data from ring buffer
     void allocate(const uint32_t data_size);
+    // how far the ring has moved since it was created
+    uint64_t position() const {
+        return lap_start + (cursor < capacity ? cursor : capacity);
+    }
+    // what position() will be after allocate(data_size)
+    uint64_t position_after(const uint32_t data_size) const;
+    uint32_t get_capacity() const {
+        return capacity;
+    }
     // copy the content to the framebuffer
     // cmd_buffer may not be used
     virtual void copy(vk::CommandBuffer cmd_buffer, const uint32_t size, const void *data, const uint32_t offset = 0) = 0;
@@ -151,6 +163,14 @@ public:
     void create() override;
 
     void copy(vk::CommandBuffer cmd_buffer, const uint32_t size, const void *data, const uint32_t offset = 0) override;
+
+    uint8_t *allocation_data() {
+        return static_cast<uint8_t *>(buffer.mapped_data) + data_offset;
+    }
+    void flush(const uint32_t size);
+
+    // moves to an empty buffer of new_capacity bytes and hands the old one back (as the GPU may still be reading it)
+    bool grow(const size_t new_capacity, Buffer &old_buffer);
 };
 
 // Queue that contains GPU objects that are planned to be destroyed (deferred destruction)

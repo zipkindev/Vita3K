@@ -29,6 +29,9 @@
 #define SCE_AUDIO_OUT_MAX_VOL 32768 //!< Maximum output port volume
 #define SCE_AUDIO_VOLUME_0DB SCE_AUDIO_OUT_MAX_VOL //!< Maximum output port volume
 
+// keep at least this much audio queued on the host so a late guest audio thread does not reach the device
+constexpr int AUDIO_MIN_QUEUE_MS = 40;
+
 struct AudioOutPort {
     virtual ~AudioOutPort() = default;
 
@@ -43,8 +46,6 @@ struct AudioOutPort {
     int len_bytes = 0;
     // number of microseconds a buffer lasts for
     uint64_t len_microseconds = 0;
-    // last time sceAudioOutOutput was called with this port (timestamp in microseconds)
-    uint64_t last_output = 0;
 
     // current config
     int type = 0;

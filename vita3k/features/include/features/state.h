@@ -26,10 +26,14 @@ struct FeatureState {
     bool preserve_f16_nan_as_u16 = false; ///< Emit store of 4xU16 to draw buffer 1. This buffer is expected to be U16U16U16U16, which can be casted to F16F16F16F16. This is to preserve some drivers's behaviour of casting NaN to default value when store in framebuffer, not keeping its original value.
     bool support_unknown_format = false;
     bool support_rgb_attributes = true; ///< Do the GPU supports RGB (3 components) vertex attribute? If not (AMD GPU), some modifications must be applied to the renderer and the shader recompiler
-    bool use_mask_bit = false; ///< Emulate the GXM mask bit used to reject fragments independently of depth/stencil.
+    bool use_mask_bit = false; ///< Is the mask bit (1 per sample) emulated ? It is only used in homebrews afaik
     bool enable_memory_mapping = false; ///< Is the host GPU memory directly mapped with gxm memory?
     bool support_scaled_attribute_formats = true; // can we pass integer to the shader and read them as floats? This is not supported on some Android GPUs
     bool use_texture_viewport = false; ///< Are we using texture viewports in the shader
+    bool support_clip_distance = false; ///< Clip eye-plane-crossing primitives (w <= 0) via gl_ClipDistance, needed because depth clamp disables z-clipping
+    bool support_gxm_clip_planes = false; ///< Route a vertex program's own CLIP0..7 outputs into gl_ClipDistance instead of dropping them
+    bool force_full_precision = false; ///< Strip RelaxedPrecision so drivers that honour it (Mali = fp16) compute at fp32 instead
+    bool emulate_f16_denormals = false; ///< The GPU flushes fp16 denormals when converting, so VPCK to F16 builds subnormal halves itself
 
     bool is_programmable_blending_supported() const {
         return support_shader_interlock || support_texture_barrier || direct_fragcolor;

@@ -32,7 +32,36 @@ spv::Id USSETranslatorVisitor::load(Operand op, const Imm4 dest_mask, const int 
 }
 
 void USSETranslatorVisitor::store(Operand dest, spv::Id source, std::uint8_t dest_mask, int shift_offset) {
-    utils::store(m_b, m_spirv_params, m_util_funcs, m_features, dest, source, dest_mask, shift_offset);
+    if (!m_store_from_vpck) {
+        const int type_size = get_data_type_size(dest.type);
+        for (int i = 0; i < 4; i++) {
+            if (!(dest_mask & (1 << i)))
+                continue;
+            const uint32_t byte_off = i * type_size;
+            const uint32_t word = (dest.num + shift_offset + byte_off / 4) & 0xFFFFFF;
+            const uint32_t key = (static_cast<uint32_t>(dest.bank) << 24) | word;
+            if (m_store_from_texture_sample || is_integer_data_type(dest.type)) {
+                const std::uint8_t lane_bytes = static_cast<std::uint8_t>(((type_size >= 4) ? 0xFu : ((1u << type_size) - 1)) << (byte_off % 4));
+                m_vpck_written_bytes[key] |= lane_bytes;
+            } else {
+                m_vpck_written_bytes.erase(key);
+            }
+        }
+    }
+    const int stored_size = static_cast<int>(get_data_type_size(dest.type));
+    for (int i = 0; i < 4; i++) {
+        if (!(dest_mask & (1 << i)))
+            continue;
+        const uint32_t key = (static_cast<uint32_t>(dest.bank) << 24) | ((dest.num + shift_offset + (i * stored_size) / 4) & 0xFFFFFF);
+        const DataType stored_type = m_store_is_raw_move ? m_raw_move_types[i] : dest.type;
+        if (stored_type == DataType::UNK)
+            m_word_store_types.erase(key);
+        else
+            m_word_store_types[key] = stored_type;
+    }
+    m_util_funcs.keep_f16_denormals = m_store_from_vpck && m_features.emulate_f16_denormals && dest.type == DataType::F16;
+    utils::store(m_b, m_spirv_params, m_util_funcs, m_features, dest, source, dest_mask, shift_offset, m_store_is_raw_move, m_raw_move_keeps_declared, m_store_raw_f16_lanes);
+    m_util_funcs.keep_f16_denormals = false;
 }
 
 spv::Id USSETranslatorVisitor::swizzle_to_spv_comp(spv::Id composite, spv::Id type, SwizzleChannel swizzle) {

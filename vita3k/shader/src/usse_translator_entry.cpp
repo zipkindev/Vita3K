@@ -902,6 +902,9 @@ spv::Id USSERecompiler::get_condition_value(const std::uint8_t pred, const bool 
     } else if (predicator >= ExtPredicate::NEGP0 && predicator <= ExtPredicate::NEGP1) {
         pred_opr.num = static_cast<int>(predicator) - static_cast<int>(ExtPredicate::NEGP0);
         do_neg = !do_neg;
+    } else if (predicator == ExtPredicate::NEGP2) {
+        pred_opr.num = 2;
+        do_neg = !do_neg;
     }
 
     spv::Id pred_v = visitor.load(pred_opr, 0b0001);
@@ -1091,6 +1094,7 @@ void convert_gxp_usse_to_spirv(spv::Builder &b, const SceGxmProgram &program, co
     // Decode and recompile
     // TODO: Reuse this
     usse::USSERecompiler recomp(b, program, features, parameters, utils, end_hook_func, queries, render_info_id);
+    recomp.visitor.seed_entry_populated_pa(parameters.frag_input_pa_regs);
 
     for (uint32_t phase = 0; phase < static_cast<uint32_t>(ShaderPhase::Max); ++phase) {
         const auto cur_phase_code = shader_code[phase];

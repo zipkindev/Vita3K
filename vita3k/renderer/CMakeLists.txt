@@ -30,6 +30,7 @@ add_library(
 	src/vulkan/sync_state.cpp
 	src/vulkan/texture.cpp
 
+	src/texture/work_profile.cpp
 	src/texture/cache.cpp
 	src/texture/format.cpp
 	src/texture/palette.cpp
@@ -50,6 +51,30 @@ add_library(
 target_include_directories(renderer PUBLIC include)
 target_link_libraries(renderer PUBLIC display mem stb shader glutil threads config util vkutil overlay)
 target_link_libraries(renderer PRIVATE dialog ddspp SDL3::SDL3 stb ffmpeg xxHash::xxhash concurrentqueue)
+
+find_package(Threads REQUIRED)
+add_executable(parallel-decode-worker-tests tests/parallel_decode_worker.cpp)
+target_include_directories(parallel-decode-worker-tests PRIVATE include)
+target_link_libraries(parallel-decode-worker-tests PRIVATE Threads::Threads)
+add_test(NAME parallel-decode-worker COMMAND parallel-decode-worker-tests)
+add_executable(decoded-texture-cache-tests tests/decoded_texture_cache.cpp)
+target_include_directories(decoded-texture-cache-tests PRIVATE include)
+target_link_libraries(decoded-texture-cache-tests PRIVATE Threads::Threads)
+add_test(NAME decoded-texture-cache COMMAND decoded-texture-cache-tests)
+add_executable(decoded-texture-retention-tests tests/decoded_texture_retention.cpp)
+target_include_directories(decoded-texture-retention-tests PRIVATE include)
+target_link_libraries(decoded-texture-retention-tests PRIVATE Threads::Threads)
+add_test(NAME decoded-texture-retention COMMAND decoded-texture-retention-tests)
+
+add_executable(pvrtc-cache-tests src/texture/work_profile.cpp tests/pvrtc_cache.cpp src/texture/pvrt-dec.cpp)
+target_include_directories(pvrtc-cache-tests PRIVATE include)
+target_link_libraries(pvrtc-cache-tests PRIVATE xxHash::xxhash Threads::Threads)
+add_test(NAME pvrtc-cache COMMAND pvrtc-cache-tests)
+add_test(NAME pvrtc-cache-disabled COMMAND pvrtc-cache-tests disabled)
+add_test(NAME pvrtc-cache-configured COMMAND pvrtc-cache-tests configured)
+add_test(NAME pvrtc-cache-serial COMMAND pvrtc-cache-tests serial)
+add_test(NAME pvrtc-cache-reuse COMMAND pvrtc-cache-tests reuse)
+add_test(NAME pvrtc-cache-work-telemetry COMMAND pvrtc-cache-tests work)
 
 if(ANDROID)
 	target_link_libraries(renderer PRIVATE android adrenotools)
@@ -79,3 +104,81 @@ endif()
 if(TRACY_ENABLE_ON_CORE_COMPONENTS)
 	target_link_libraries(renderer PRIVATE tracy)
 endif()
+
+add_executable(decoded-texture-telemetry-tests tests/decoded_texture_telemetry.cpp)
+target_include_directories(decoded-texture-telemetry-tests PRIVATE include)
+target_link_libraries(decoded-texture-telemetry-tests PRIVATE Threads::Threads)
+add_test(NAME decoded-texture-telemetry COMMAND decoded-texture-telemetry-tests)
+
+add_executable(learned-texture-profile-tests src/texture/work_profile.cpp tests/learned_texture_profile.cpp src/texture/pvrt-dec.cpp)
+target_include_directories(learned-texture-profile-tests PRIVATE include)
+target_link_libraries(learned-texture-profile-tests PRIVATE xxHash::xxhash Threads::Threads)
+add_test(NAME learned-texture-profile COMMAND learned-texture-profile-tests)
+add_executable(texture-profile-lifecycle-tests src/texture/work_profile.cpp tests/texture_profile_lifecycle.cpp src/texture/pvrt-dec.cpp)
+target_include_directories(texture-profile-lifecycle-tests PRIVATE include)
+target_link_libraries(texture-profile-lifecycle-tests PRIVATE xxHash::xxhash Threads::Threads)
+add_test(NAME texture-profile-lifecycle COMMAND texture-profile-lifecycle-tests)
+add_executable(texture-profile-storage-tests tests/texture_profile_storage.cpp)
+target_include_directories(texture-profile-storage-tests PRIVATE include)
+add_test(NAME texture-profile-storage COMMAND texture-profile-storage-tests)
+add_executable(texture-learning-history-tests tests/texture_learning_history.cpp)
+target_include_directories(texture-learning-history-tests PRIVATE include)
+target_link_libraries(texture-learning-history-tests PRIVATE xxHash::xxhash Threads::Threads)
+add_test(NAME texture-learning-history COMMAND texture-learning-history-tests)
+
+add_executable(texture-coverage-tests tests/texture_coverage.cpp)
+target_include_directories(texture-coverage-tests PRIVATE include)
+target_link_libraries(texture-coverage-tests PRIVATE Threads::Threads)
+add_test(NAME texture-coverage COMMAND texture-coverage-tests)
+
+add_executable(texture-work-profile-tests tests/texture_work_profile.cpp src/texture/work_profile.cpp)
+target_include_directories(texture-work-profile-tests PRIVATE include)
+target_link_libraries(texture-work-profile-tests PRIVATE Threads::Threads)
+add_test(NAME texture-work-profile COMMAND texture-work-profile-tests)
+
+add_executable(texture-retention-profile-tests tests/texture_retention_profile.cpp)
+target_include_directories(texture-retention-profile-tests PRIVATE include)
+target_link_libraries(texture-retention-profile-tests PRIVATE Threads::Threads)
+add_test(NAME texture-retention-profile COMMAND texture-retention-profile-tests)
+
+add_executable(retention-aware-preparation-tests tests/retention_aware_preparation.cpp)
+target_include_directories(retention-aware-preparation-tests PRIVATE include)
+target_link_libraries(retention-aware-preparation-tests PRIVATE xxHash::xxhash Threads::Threads)
+add_test(NAME retention-aware-preparation COMMAND retention-aware-preparation-tests)
+
+add_executable(protected-pipeline-pairs-tests tests/protected_pipeline_pairs.cpp)
+target_include_directories(protected-pipeline-pairs-tests PRIVATE include)
+add_test(NAME protected-pipeline-pairs COMMAND protected-pipeline-pairs-tests)
+
+add_executable(exact-pipeline-recipes-tests tests/exact_pipeline_recipes.cpp)
+target_include_directories(exact-pipeline-recipes-tests PRIVATE include)
+add_test(NAME exact-pipeline-recipes COMMAND exact-pipeline-recipes-tests)
+
+add_executable(pipeline-state-history-tests tests/pipeline_state_history.cpp)
+target_include_directories(pipeline-state-history-tests PRIVATE include)
+add_test(NAME pipeline-state-history COMMAND pipeline-state-history-tests)
+
+add_executable(pipeline-prediction-admission-tests tests/pipeline_prediction_admission.cpp)
+target_include_directories(pipeline-prediction-admission-tests PRIVATE include)
+add_test(NAME pipeline-prediction-admission COMMAND pipeline-prediction-admission-tests)
+
+add_executable(pipeline-preparation-queue-tests tests/pipeline_preparation_queue.cpp)
+target_include_directories(pipeline-preparation-queue-tests PRIVATE include)
+add_test(NAME pipeline-preparation-queue COMMAND pipeline-preparation-queue-tests)
+
+add_executable(pipeline-binding-epochs-tests tests/pipeline_binding_epochs.cpp)
+target_include_directories(pipeline-binding-epochs-tests PRIVATE include)
+add_test(NAME pipeline-binding-epochs COMMAND pipeline-binding-epochs-tests)
+
+add_executable(pipeline-library-keys-tests tests/pipeline_library_keys.cpp)
+target_include_directories(pipeline-library-keys-tests PRIVATE include)
+target_link_libraries(pipeline-library-keys-tests PRIVATE vulkan)
+add_test(NAME pipeline-library-keys COMMAND pipeline-library-keys-tests)
+
+add_executable(pipeline-recovery-policy-tests tests/pipeline_recovery_policy.cpp)
+target_include_directories(pipeline-recovery-policy-tests PRIVATE include)
+add_test(NAME pipeline-recovery-policy COMMAND pipeline-recovery-policy-tests)
+
+add_executable(pipeline-preparation-work-tests tests/pipeline_preparation_work.cpp)
+target_include_directories(pipeline-preparation-work-tests PRIVATE include)
+add_test(NAME pipeline-preparation-work COMMAND pipeline-preparation-work-tests)

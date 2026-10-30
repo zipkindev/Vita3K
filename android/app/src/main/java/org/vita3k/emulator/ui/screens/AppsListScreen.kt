@@ -111,8 +111,7 @@ fun AppsListScreen(
     onOpenTrophyManager: () -> Unit = {},
     onOpenUserManagement: () -> Unit = {},
     onOpenWelcomeScreen: () -> Unit = {},
-    onOpenCustomConfig: (AppInfo) -> Unit = {},
-    onCreateAppShortcut: (AppInfo) -> Unit = {}
+    onOpenCustomConfig: (AppInfo) -> Unit = {}
 ) {
     var showSearchBar by remember { mutableStateOf(false) }
     var showFilterSheet by remember { mutableStateOf(false) }
@@ -332,10 +331,6 @@ fun AppsListScreen(
             onCustomConfig = {
                 selectedAppForActions = null
                 onOpenCustomConfig(app)
-            },
-            onCreateShortcut = {
-                selectedAppForActions = null
-                onCreateAppShortcut(app)
             }
         )
     }
@@ -813,7 +808,7 @@ private fun AboutSheet(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Image(
-                painter = painterResource(id = R.mipmap.ic_launcher),
+                painter = painterResource(id = R.mipmap.ic_launcher_plus),
                 contentDescription = stringResource(R.string.apps_list_app_title),
                 modifier = Modifier
                     .size(132.dp)
@@ -1042,7 +1037,7 @@ private fun UpdateCheckDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val defaultDownloadUrl = "https://github.com/Vita3K/Vita3K/releases/tag/continuous"
+    val defaultDownloadUrl = "https://github.com/nckstwrt/Vita3K-Plus/releases/latest"
     val latestVersion = result.info.version.ifBlank {
         if (result.info.buildNumber > 0L) "Build ${result.info.buildNumber}" else stringResource(R.string.updates_latest_build)
     }
@@ -1153,8 +1148,7 @@ private fun AppActionsDialog(
     onDismiss: () -> Unit,
     onActionSelected: (AppAction) -> Unit,
     onShowInfo: () -> Unit,
-    onCustomConfig: () -> Unit = {},
-    onCreateShortcut: () -> Unit = {}
+    onCustomConfig: () -> Unit = {}
 ) {
     var showDeleteSubmenu by remember { mutableStateOf(false) }
 
@@ -1223,18 +1217,6 @@ private fun AppActionsDialog(
                 )
             },
             onClick = { onCustomConfig() }
-        )
-        AppMenuRow(
-            label = stringResource(R.string.app_menu_create_shortcut),
-            icon = {
-                Icon(
-                    Icons.Default.Add,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp)
-                )
-            },
-            onClick = { onCreateShortcut() }
         )
 
         // Other actions (reset last played, etc.)

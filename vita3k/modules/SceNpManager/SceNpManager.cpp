@@ -72,6 +72,10 @@ EXPORT(int, sceNpCheckCallback) {
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
     const SceNpServiceState state = emuenv.cfg.current_config.psn_signed_in ? SCE_NP_SERVICE_STATE_SIGNED_IN : SCE_NP_SERVICE_STATE_SIGNED_OUT;
     for (auto &[_, np_callback] : emuenv.np.cbs) {
+        if (np_callback.delivered && np_callback.last_state == static_cast<uint32_t>(state))
+            continue;
+        np_callback.delivered = true;
+        np_callback.last_state = static_cast<uint32_t>(state);
         thread->run_callback(np_callback.pc, { static_cast<uint32_t>(state), 0, np_callback.data });
     }
 
@@ -105,9 +109,28 @@ EXPORT(int, sceNpManagerGetAccountRegion) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpManagerGetCachedParam) {
-    TRACY_FUNC(sceNpManagerGetCachedParam);
-    return UNIMPLEMENTED();
+constexpr size_t SCE_NP_AVATAR_URL_MAX_LENGTH = 127;
+
+struct SceNpAvatarUrl {
+    char data[SCE_NP_AVATAR_URL_MAX_LENGTH];
+    char term;
+};
+
+struct SceNpManagerCacheParam {
+    np::SceNpId npId;
+    SceNpAvatarUrl avatarUrl;
+};
+static_assert(sizeof(SceNpManagerCacheParam) == 0xA4, "SceNpManagerCacheParam is an invalid size");
+
+EXPORT(int, sceNpManagerGetCachedParam, Ptr<SceNpManagerCacheParam> param) {
+    TRACY_FUNC(sceNpManagerGetCachedParam, param);
+    if (!param || !param.valid(emuenv.mem))
+        return RET_ERROR(SCE_NP_MANAGER_ERROR_INVALID_ARGUMENT);
+
+    // the NP ID and avatar URL the system cached in flash at the last sign-in
+    SceNpManagerCacheParam *const cache = param.get(emuenv.mem);
+    memset(cache, 0, sizeof(*cache));
+    return CALL_EXPORT(sceNpManagerGetNpId, &cache->npId);
 }
 
 EXPORT(int, sceNpManagerGetChatRestrictionFlag, SceInt *isRestricted) {

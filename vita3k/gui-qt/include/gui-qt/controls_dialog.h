@@ -121,6 +121,8 @@ private:
         QPushButton *btn_fullscreen_alt = nullptr;
         QPushButton *btn_toggle_touch = nullptr;
         QPushButton *btn_toggle_touch_alt = nullptr;
+        QPushButton *btn_tilt = nullptr;
+        QPushButton *btn_tilt_alt = nullptr;
         QPushButton *btn_tex_replace = nullptr;
         QPushButton *btn_tex_replace_alt = nullptr;
         QPushButton *btn_screenshot = nullptr;
@@ -131,8 +133,6 @@ private:
         QPushButton *btn_alt_pinch_in_alt = nullptr;
         QPushButton *btn_alt_pinch_out = nullptr;
         QPushButton *btn_alt_pinch_out_alt = nullptr;
-        QPushButton *btn_exit = nullptr;
-        QPushButton *btn_exit_alt = nullptr;
         QPushButton *btn_reset = nullptr;
     };
 

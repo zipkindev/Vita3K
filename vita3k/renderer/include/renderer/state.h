@@ -29,7 +29,6 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -39,13 +38,10 @@ struct DialogState;
 struct DisplayState;
 struct GxmState;
 struct Config;
+struct KernelState;
 
 namespace overlay {
 class display_manager;
-}
-
-namespace app {
-class AppSessionController;
 }
 
 enum struct MappingMethod : int {
@@ -63,8 +59,6 @@ struct PerformanceOverlayState {
     int position = 0;
     int detail = 0;
 
-    // Set once the first measurement is in; fps itself rounds to 0 during heavy loads.
-    bool has_data = false;
     uint32_t fps = 0;
     uint32_t avg_fps = 0;
     uint32_t min_fps = 0;
@@ -95,6 +89,7 @@ struct State {
     fs::path shaders_log_path;
 
     FrameHost *frame = nullptr;
+    KernelState *kernel = nullptr;
 
     Backend current_backend;
     FeatureState features;
@@ -105,6 +100,7 @@ struct State {
     bool fullscreen = false;
 
     Context *context;
+    std::vector<Context *> live_contexts;
 
     GXPPtrMap gxp_ptr_map;
     Queue<CommandList> command_buffer_queue;
@@ -121,7 +117,18 @@ struct State {
 
     // on Vulkan, this is actually the number of pipelines compiled
     uint32_t shaders_count_compiled = 0;
+    uint32_t pipelines_redundant_avoided = 0;
     uint32_t programs_count_pre_compiled = 0;
+
+    std::atomic<uint64_t> progress_counter{ 0 };
+    std::atomic<int64_t> last_mem_transition_epoch_ms{ 0 };
+    std::atomic<int> last_cmd_opcode{ -1 };
+    std::atomic<int64_t> last_cmd_epoch_ms{ 0 };
+    std::atomic<int64_t> last_abandon_epoch_ms{ 0 };
+    std::atomic<bool> in_dormant_wait{ false };
+    std::atomic<int> wait_last_kind{ -1 };
+    std::atomic<int64_t> wait_last_epoch_ms{ 0 };
+    std::atomic<uint32_t> wait_fences_pending{ 0 };
 
     bool should_display;
 
@@ -130,6 +137,11 @@ struct State {
 
     std::unique_ptr<std::thread> render_thread;
     std::atomic<bool> render_abort{ false };
+
+    std::mutex render_thread_tasks_mutex;
+    std::vector<std::function<void()>> render_thread_tasks;
+    void run_render_thread_tasks();
+    std::vector<uint32_t> dump_frame_on_render_thread(DisplayState &display, uint32_t &width, uint32_t &height);
 
     std::vector<ShadersHash> precompile_queue;
     bool precompile_requested = false;
@@ -141,6 +153,9 @@ struct State {
     // only support disabled by default
     int supported_mapping_methods_mask = 1;
     MappingMethod mapping_method = MappingMethod::Disabled;
+
+    // Android memory pressure (onTrimMemory)
+    std::atomic<int> memory_trim_level{ -1 };
 
     // used for driver bug workaround
     bool is_adreno_stock = false;
@@ -154,7 +169,6 @@ struct State {
     std::chrono::steady_clock::time_point m_shaders_compiled_time{};
 
     std::atomic<bool> paused{ false };
-    std::optional<std::reference_wrapper<app::AppSessionController>> app_session_controller;
 
     // Non-owning pointer to dialog state for native common dialog overlays.
     DialogState *common_dialog = nullptr;
@@ -223,6 +237,9 @@ struct State {
 
     virtual void precompile_shader(const ShadersHash &hash) = 0;
     virtual void preclose_action() = 0;
+    virtual void wait_gpu_idle() {}
+
+    virtual uint32_t diag_pipelines_created() const { return ~0u; }
 
     virtual ~State() = default;
 

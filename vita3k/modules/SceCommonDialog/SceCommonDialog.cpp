@@ -33,7 +33,6 @@
 #include <SDL3/SDL_timer.h>
 
 #include <mutex>
-#include <span>
 
 #ifdef __ANDROID__
 #include <ime/keyboard.h>
@@ -121,7 +120,8 @@ EXPORT(int, sceCommonDialogSetConfigParam) {
 
 EXPORT(int, sceCommonDialogUpdate) {
     TRACY_FUNC(sceCommonDialogUpdate);
-    return UNIMPLEMENTED();
+    STUBBED("Return 0");
+    return 0;
 }
 
 EXPORT(int, sceCompanionUtilDialogAbort) {
@@ -270,7 +270,7 @@ EXPORT(int, sceImeDialogTerm) {
         emuenv.ime.str.clear();
         emuenv.ime.caretIndex = 0;
         emuenv.ime.edit_text = {};
-        emuenv.ime.event_id = SCE_IME_EVENT_OPEN;
+        emuenv.ime.events.clear();
     }
 
 #ifdef __ANDROID__
@@ -559,15 +559,32 @@ EXPORT(int, sceNetCheckDialogGetPS3ConnectInfo) {
     return UNIMPLEMENTED();
 }
 
+// Only the modes that need PSN or a PS3 are refused and only when the user has not asked us to pretend to be signed in
+static bool netcheck_mode_needs_psn(SceNetCheckDialogMode mode) {
+    switch (mode) {
+    case SCE_NETCHECK_DIALOG_MODE_PSN:
+    case SCE_NETCHECK_DIALOG_MODE_PSN_ONLINE:
+    case SCE_NETCHECK_DIALOG_MODE_PS3_CONNECT:
+        return true;
+    default:
+        // ADHOC_CONN and the three PSP adhoc modes, plus INVALID
+        return false;
+    }
+}
+
 EXPORT(int, sceNetCheckDialogGetResult, SceNetCheckDialogResult *result) {
     TRACY_FUNC(sceNetCheckDialogGetResult, result);
-    if (emuenv.common_dialog.type != NETCHECK_DIALOG)
-        return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NOT_IN_USE);
+    if (!result)
+        return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NULL);
 
+    *result = {};
     result->result = emuenv.common_dialog.result;
 
-    if (emuenv.common_dialog.netcheck.mode != SCE_NETCHECK_DIALOG_MODE_ADHOC_CONN)
-        STUBBED("result->result = 0");
+    if (netcheck_mode_needs_psn(emuenv.common_dialog.netcheck.mode)) {
+        const bool pretend_signed_in = emuenv.cfg.current_config.psn_signed_in;
+        result->result = pretend_signed_in ? SCE_COMMON_DIALOG_RESULT_OK : SCE_COMMON_DIALOG_RESULT_USER_CANCELED;
+        result->psnModeSucceeded = pretend_signed_in;
+    }
 
     return 0;
 }
@@ -769,6 +786,8 @@ EXPORT(int, sceNpTrophySetupDialogGetResult, Ptr<SceNpTrophySetupDialogResult> r
 EXPORT(int, sceNpTrophySetupDialogGetStatus) {
     TRACY_FUNC(sceNpTrophySetupDialogGetStatus);
     complete_trophy_setup_dialog(emuenv.common_dialog);
+    if (emuenv.common_dialog.type != TROPHY_SETUP_DIALOG)
+        return SCE_COMMON_DIALOG_STATUS_NONE;
     return emuenv.common_dialog.status;
 }
 
@@ -892,6 +911,18 @@ EXPORT(int, sceRemoteOSKDialogTerm) {
     return UNIMPLEMENTED();
 }
 
+static constexpr uint64_t SAVEDATA_DIALOG_CLOSE_MS = 150;
+
+// the dialog closes before the status reports FINISHED so a Term straight after Finish fails as on the console
+static void complete_savedata_close(EmuEnvState &emuenv) {
+    std::lock_guard<std::recursive_mutex> lock(emuenv.common_dialog.mutex);
+    auto &savedata = emuenv.common_dialog.savedata;
+    if (savedata.finishing && SDL_GetTicks() >= savedata.finish_tick) {
+        savedata.finishing = false;
+        emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
+    }
+}
+
 EXPORT(int, sceSaveDataDialogAbort) {
     TRACY_FUNC(sceSaveDataDialogAbort);
     if (emuenv.common_dialog.type != SAVEDATA_DIALOG) {
@@ -899,43 +930,13 @@ EXPORT(int, sceSaveDataDialogAbort) {
     }
 
     std::lock_guard<std::recursive_mutex> lock(emuenv.common_dialog.mutex);
+    emuenv.common_dialog.savedata.finishing = false;
     emuenv.common_dialog.savedata.bar_percent = 0;
     emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
     emuenv.common_dialog.savedata.button_id = SCE_SAVEDATA_DIALOG_BUTTON_ID_INVALID;
     emuenv.common_dialog.result = SCE_COMMON_DIALOG_RESULT_ABORTED;
     emuenv.common_dialog.type = NO_DIALOG;
     return 0;
-}
-
-static void initialize_savedata_vectors(EmuEnvState &emuenv, unsigned int size) {
-    emuenv.common_dialog.savedata.icon_texture.resize(size);
-    emuenv.common_dialog.savedata.slot_info.resize(size);
-    emuenv.common_dialog.savedata.title.resize(size);
-    emuenv.common_dialog.savedata.subtitle.resize(size);
-    emuenv.common_dialog.savedata.details.resize(size);
-    emuenv.common_dialog.savedata.has_date.resize(size);
-    emuenv.common_dialog.savedata.date.resize(size);
-    emuenv.common_dialog.savedata.icon_buffer.resize(size);
-    emuenv.common_dialog.savedata.slot_id.resize(size);
-    emuenv.common_dialog.savedata.list_empty_param.resize(size);
-}
-
-// The slot the guest just named is the one about to be used: grow the vectors rather than drop it
-static bool ensure_slot_index(EmuEnvState &emuenv, const char *export_name) {
-    const auto index = emuenv.common_dialog.savedata.selected_save;
-    if (index < emuenv.common_dialog.savedata.slot_id.size()
-        && index < emuenv.common_dialog.savedata.list_empty_param.size())
-        return true;
-
-    if (index >= SCE_SAVEDATA_DIALOG_SLOTLIST_MAXSIZE) {
-        LOG_ERROR("{}: selected slot {} exceeds the maximum slot list size", export_name, index);
-        return false;
-    }
-
-    LOG_WARN("{}: selected slot {} is past the {} slot(s) this dialog was initialised with; resizing",
-        export_name, index, emuenv.common_dialog.savedata.slot_id.size());
-    initialize_savedata_vectors(emuenv, index + 1);
-    return true;
 }
 
 static void check_save_file(const uint32_t index, EmuEnvState &emuenv, const char *export_name) {
@@ -960,7 +961,14 @@ static void check_save_file(const uint32_t index, EmuEnvState &emuenv, const cha
                 const auto thumbnail_path = translate_path(empty_param->iconPath.get(emuenv.mem), device, emuenv.io.device_paths);
                 vfs::read_file(VitaIoDevice::ux0, icon_buf_tmp, emuenv.vita_fs_path, thumbnail_path);
             } else if (iconBuf && (iconBufSize > 0)) {
-                icon_buf_tmp.insert(icon_buf_tmp.end(), iconBuf, iconBuf + iconBufSize);
+                const Address icon_start = empty_param->iconBuf.address();
+                const size_t icon_offset = icon_buf_tmp.size();
+                icon_buf_tmp.resize(icon_offset + iconBufSize);
+                // copy page by page so a buffer that straddles two host backings is read correctly
+                if (!debug_safe_copy_guest(emuenv.mem, icon_start, icon_buf_tmp.data() + icon_offset, iconBufSize)) {
+                    icon_buf_tmp.resize(icon_offset);
+                    LOG_WARN("Save slot {} empty-param iconBuf 0x{:X} size 0x{:X} is not mapped - icon skipped", index, icon_start, iconBufSize);
+                }
             }
         }
     } else {
@@ -1145,35 +1153,28 @@ EXPORT(int, sceSaveDataDialogContinue, const SceSaveDataDialogParam *p) {
 
     switch (emuenv.common_dialog.savedata.mode) {
     default:
-    case SCE_SAVEDATA_DIALOG_MODE_FIXED: {
+    case SCE_SAVEDATA_DIALOG_MODE_FIXED:
         emuenv.common_dialog.savedata.mode_to_display = SCE_SAVEDATA_DIALOG_MODE_FIXED;
-        const bool slot_valid = ensure_slot_index(emuenv, export_name);
         switch (p->mode) {
         case SCE_SAVEDATA_DIALOG_MODE_USER_MSG:
             user_message = p->userMsgParam.get(emuenv.mem);
             emuenv.common_dialog.savedata.msg = reinterpret_cast<const char *>(user_message->msg.get(emuenv.mem));
-            if (slot_valid) {
-                emuenv.common_dialog.savedata.slot_id[emuenv.common_dialog.savedata.selected_save] = user_message->targetSlot.id;
-                emuenv.common_dialog.savedata.list_empty_param[emuenv.common_dialog.savedata.selected_save] = user_message->targetSlot.emptyParam.get(emuenv.mem);
-            }
+            emuenv.common_dialog.savedata.slot_id[emuenv.common_dialog.savedata.selected_save] = user_message->targetSlot.id;
+            emuenv.common_dialog.savedata.list_empty_param[emuenv.common_dialog.savedata.selected_save] = user_message->targetSlot.emptyParam.get(emuenv.mem);
 
             handle_user_message(user_message, emuenv);
             break;
         case SCE_SAVEDATA_DIALOG_MODE_SYSTEM_MSG:
             sys_message = p->sysMsgParam.get(emuenv.mem);
-            if (slot_valid) {
-                emuenv.common_dialog.savedata.slot_id[emuenv.common_dialog.savedata.selected_save] = sys_message->targetSlot.id;
-                emuenv.common_dialog.savedata.list_empty_param[emuenv.common_dialog.savedata.selected_save] = sys_message->targetSlot.emptyParam.get(emuenv.mem);
-            }
+            emuenv.common_dialog.savedata.slot_id[emuenv.common_dialog.savedata.selected_save] = sys_message->targetSlot.id;
+            emuenv.common_dialog.savedata.list_empty_param[emuenv.common_dialog.savedata.selected_save] = sys_message->targetSlot.emptyParam.get(emuenv.mem);
 
             handle_sys_message(sys_message, emuenv);
             break;
         case SCE_SAVEDATA_DIALOG_MODE_ERROR_CODE:
             error_code = p->errorCodeParam.get(emuenv.mem);
-            if (slot_valid) {
-                emuenv.common_dialog.savedata.slot_id[emuenv.common_dialog.savedata.selected_save] = error_code->targetSlot.id;
-                emuenv.common_dialog.savedata.list_empty_param[emuenv.common_dialog.savedata.selected_save] = error_code->targetSlot.emptyParam.get(emuenv.mem);
-            }
+            emuenv.common_dialog.savedata.slot_id[emuenv.common_dialog.savedata.selected_save] = error_code->targetSlot.id;
+            emuenv.common_dialog.savedata.list_empty_param[emuenv.common_dialog.savedata.selected_save] = error_code->targetSlot.emptyParam.get(emuenv.mem);
 
             emuenv.common_dialog.savedata.btn_num = 1;
             emuenv.common_dialog.savedata.btn[0] = lang::get(lang::str::ok);
@@ -1193,11 +1194,9 @@ EXPORT(int, sceSaveDataDialogContinue, const SceSaveDataDialogParam *p) {
         case SCE_SAVEDATA_DIALOG_MODE_PROGRESS_BAR:
             emuenv.common_dialog.savedata.btn_num = 0;
             progress_bar = p->progressBarParam.get(emuenv.mem);
+            emuenv.common_dialog.savedata.slot_id[emuenv.common_dialog.savedata.selected_save] = progress_bar->targetSlot.id;
             emuenv.common_dialog.savedata.has_progress_bar = true;
-            if (slot_valid) {
-                emuenv.common_dialog.savedata.slot_id[emuenv.common_dialog.savedata.selected_save] = progress_bar->targetSlot.id;
-                emuenv.common_dialog.savedata.list_empty_param[emuenv.common_dialog.savedata.selected_save] = progress_bar->targetSlot.emptyParam.get(emuenv.mem);
-            }
+            emuenv.common_dialog.savedata.list_empty_param[emuenv.common_dialog.savedata.selected_save] = progress_bar->targetSlot.emptyParam.get(emuenv.mem);
             if (progress_bar->msg) {
                 emuenv.common_dialog.savedata.msg = progress_bar->msg.cast<char>().get(emuenv.mem);
             } else {
@@ -1225,10 +1224,8 @@ EXPORT(int, sceSaveDataDialogContinue, const SceSaveDataDialogParam *p) {
             LOG_ERROR("Attempt to continue savedata dialog with unknown mode: {}", log_hex(p->mode));
             break;
         }
-        if (slot_valid)
-            check_save_file(emuenv.common_dialog.savedata.selected_save, emuenv, export_name);
+        check_save_file(emuenv.common_dialog.savedata.selected_save, emuenv, export_name);
         break;
-    }
     case SCE_SAVEDATA_DIALOG_MODE_LIST:
         emuenv.common_dialog.savedata.mode_to_display = SCE_SAVEDATA_DIALOG_MODE_LIST;
         list_param = p->listParam.get(emuenv.mem);
@@ -1238,12 +1235,6 @@ EXPORT(int, sceSaveDataDialogContinue, const SceSaveDataDialogParam *p) {
             for (std::uint32_t i = 0; i < emuenv.common_dialog.savedata.slot_list_size; i++) {
                 slot_list[i] = list_param->slotList.get(emuenv.mem)[i];
                 emuenv.common_dialog.savedata.slot_id[i] = slot_list[i].id;
-                // old Vita3K versions could create invalid save ID's of >256. If detected, clear and skip them instead of aborting
-                if (slot_list[i].id >= SCE_APPUTIL_SAVEDATA_SLOT_MAX) {
-                    emuenv.common_dialog.savedata.title[i].clear();
-                    emuenv.common_dialog.savedata.slot_info[i].isExist = 0;
-                    continue;
-                }
                 emuenv.common_dialog.savedata.list_empty_param[i] = slot_list[i].emptyParam.get(emuenv.mem);
                 check_save_file(i, emuenv, export_name);
             }
@@ -1270,12 +1261,14 @@ EXPORT(int, sceSaveDataDialogFinish, const SceSaveDataDialogFinishParam *finishP
     std::lock_guard<std::recursive_mutex> lock(emuenv.common_dialog.mutex);
     emuenv.common_dialog.savedata.bar_percent = 0;
     emuenv.common_dialog.substatus = SCE_COMMON_DIALOG_STATUS_RUNNING;
-    emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
+    emuenv.common_dialog.savedata.finishing = true;
+    emuenv.common_dialog.savedata.finish_tick = SDL_GetTicks() + SAVEDATA_DIALOG_CLOSE_MS;
     return 0;
 }
 
 EXPORT(SceInt32, sceSaveDataDialogGetResult, SceSaveDataDialogResult *result) {
     TRACY_FUNC(sceSaveDataDialogGetResult, result);
+    complete_savedata_close(emuenv);
     if (emuenv.common_dialog.type != SAVEDATA_DIALOG)
         return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NOT_FINISHED);
 
@@ -1295,15 +1288,12 @@ EXPORT(SceInt32, sceSaveDataDialogGetResult, SceSaveDataDialogResult *result) {
         result->result = emuenv.common_dialog.result;
         result->buttonId = save_dialog.button_id;
 
-        const auto selected = save_dialog.selected_save;
-        if (selected < save_dialog.slot_id.size()) {
-            result->slotId = save_dialog.slot_id[selected];
-        } else if (!save_dialog.slot_id.empty()) {
-            LOG_ERROR("{}: selected slot {} is out of range for {} slot(s)", export_name, selected, save_dialog.slot_id.size());
+        if (!save_dialog.slot_id.empty()) {
+            result->slotId = save_dialog.slot_id[save_dialog.selected_save];
         }
-        if (result->slotInfo && selected < save_dialog.slot_info.size()) {
-            result_slotinfo->isExist = save_dialog.slot_info[selected].isExist;
-            result_slotinfo->slotParam = save_dialog.slot_info[selected].slotParam;
+        if (result->slotInfo && !save_dialog.slot_info.empty()) {
+            result_slotinfo->isExist = save_dialog.slot_info[save_dialog.selected_save].isExist;
+            result_slotinfo->slotParam = save_dialog.slot_info[save_dialog.selected_save].slotParam;
         }
         result->userdata = save_dialog.userdata;
         return 0;
@@ -1314,7 +1304,8 @@ EXPORT(SceInt32, sceSaveDataDialogGetResult, SceSaveDataDialogResult *result) {
 
 EXPORT(int, sceSaveDataDialogGetStatus) {
     TRACY_FUNC(sceSaveDataDialogGetStatus);
-    if ((emuenv.common_dialog.type != SAVEDATA_DIALOG) || ((emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_RUNNING) && (emuenv.common_dialog.substatus != SCE_COMMON_DIALOG_STATUS_RUNNING)))
+    complete_savedata_close(emuenv);
+    if (emuenv.common_dialog.type != SAVEDATA_DIALOG)
         return SCE_COMMON_DIALOG_STATUS_NONE;
 
     return emuenv.common_dialog.status;
@@ -1322,10 +1313,24 @@ EXPORT(int, sceSaveDataDialogGetStatus) {
 
 EXPORT(int, sceSaveDataDialogGetSubStatus) {
     TRACY_FUNC(sceSaveDataDialogGetSubStatus);
+    complete_savedata_close(emuenv);
     if (emuenv.common_dialog.type != SAVEDATA_DIALOG || emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_RUNNING) {
         return SCE_COMMON_DIALOG_STATUS_NONE;
     }
     return emuenv.common_dialog.substatus;
+}
+
+static void initialize_savedata_vectors(EmuEnvState &emuenv, unsigned int size) {
+    emuenv.common_dialog.savedata.icon_texture.resize(size);
+    emuenv.common_dialog.savedata.slot_info.resize(size);
+    emuenv.common_dialog.savedata.title.resize(size);
+    emuenv.common_dialog.savedata.subtitle.resize(size);
+    emuenv.common_dialog.savedata.details.resize(size);
+    emuenv.common_dialog.savedata.has_date.resize(size);
+    emuenv.common_dialog.savedata.date.resize(size);
+    emuenv.common_dialog.savedata.icon_buffer.resize(size);
+    emuenv.common_dialog.savedata.slot_id.resize(size);
+    emuenv.common_dialog.savedata.list_empty_param.resize(size);
 }
 
 EXPORT(int, sceSaveDataDialogInit, const SceSaveDataDialogParam *p) {
@@ -1366,14 +1371,13 @@ EXPORT(int, sceSaveDataDialogInit, const SceSaveDataDialogParam *p) {
         check_save_file(0, emuenv, export_name);
         emuenv.common_dialog.substatus = SCE_COMMON_DIALOG_STATUS_FINISHED;
         break;
-    case SCE_SAVEDATA_DIALOG_MODE_LIST: {
+    case SCE_SAVEDATA_DIALOG_MODE_LIST:
         list_param = p->listParam.get(emuenv.mem);
-        const uint32_t slot_list_size = std::min(list_param->slotListSize, (uint32_t)SCE_SAVEDATA_DIALOG_SLOTLIST_MAXSIZE);
-        emuenv.common_dialog.savedata.slot_list_size = slot_list_size;
+        emuenv.common_dialog.savedata.slot_list_size = std::min(list_param->slotListSize, (uint32_t)SCE_SAVEDATA_DIALOG_SLOTLIST_MAXSIZE);
         emuenv.common_dialog.savedata.list_style = list_param->itemStyle;
 
-        slot_list.resize(slot_list_size);
-        initialize_savedata_vectors(emuenv, slot_list_size);
+        slot_list.resize(list_param->slotListSize);
+        initialize_savedata_vectors(emuenv, list_param->slotListSize);
 
         if (list_param->listTitle) {
             emuenv.common_dialog.savedata.list_title = list_param->listTitle.cast<char>().get(emuenv.mem);
@@ -1391,34 +1395,13 @@ EXPORT(int, sceSaveDataDialogInit, const SceSaveDataDialogParam *p) {
             }
         }
 
-        // Old versions of Vita3K allowed save IDs of >256, and a fix stopped loading /any/ saves after finding /only one/ invalid ID.
-        // Games that made saves of -1 weren't stopped before, but after the fix users seemingly had their saves "disappear"
-        // since -1 = 0xFFFFFFFF > 256, thereby tripping the check.
-        // Real hardware can never encounter this, so only *skip* invalid slots but *abort* if they are all invalid.
-        const std::span slots(list_param->slotList.get(emuenv.mem), slot_list_size);
-        const bool all_ids_invalid = !slots.empty() && std::ranges::all_of(slots, [](const SceAppUtilSaveDataSlot &slot) {
-            return slot.id >= SCE_APPUTIL_SAVEDATA_SLOT_MAX;
-        });
-
-        if (all_ids_invalid) {
-            // Hardware finishes the sub status with this error and slot id -1
-            emuenv.common_dialog.savedata.slot_id[0] = 0xFFFFFFFF;
-            emuenv.common_dialog.result = (SceCommonDialogResult)SCE_SAVEDATA_DIALOG_ERROR_PARAM;
-            emuenv.common_dialog.substatus = SCE_COMMON_DIALOG_STATUS_FINISHED;
-            break;
-        }
-
-        for (SceUInt i = 0; i < slot_list_size; i++) {
+        for (SceUInt i = 0; i < list_param->slotListSize; i++) {
             slot_list[i] = list_param->slotList.get(emuenv.mem)[i];
             emuenv.common_dialog.savedata.slot_id[i] = slot_list[i].id;
-            if (slot_list[i].id >= SCE_APPUTIL_SAVEDATA_SLOT_MAX) // same skip as above
-                continue;
             emuenv.common_dialog.savedata.list_empty_param[i] = slot_list[i].emptyParam.get(emuenv.mem);
             check_save_file(i, emuenv, export_name);
         }
-
         break;
-    }
     case SCE_SAVEDATA_DIALOG_MODE_USER_MSG:
         user_message = p->userMsgParam.get(emuenv.mem);
         initialize_savedata_vectors(emuenv, 1);
@@ -1433,13 +1416,6 @@ EXPORT(int, sceSaveDataDialogInit, const SceSaveDataDialogParam *p) {
     case SCE_SAVEDATA_DIALOG_MODE_SYSTEM_MSG:
         sys_message = p->sysMsgParam.get(emuenv.mem);
         initialize_savedata_vectors(emuenv, 1);
-        if (p->dispType == 0) {
-            emuenv.common_dialog.savedata.slot_id[0] = static_cast<SceAppUtilSaveDataSlotId>(-1);
-            emuenv.common_dialog.result = static_cast<SceCommonDialogResult>(SCE_SAVEDATA_DIALOG_ERROR_PARAM);
-            // substatus stays RUNNING so GetStatus reports FINISHED, as after sceSaveDataDialogFinish
-            emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
-            break;
-        }
         emuenv.common_dialog.savedata.slot_id[0] = sys_message->targetSlot.id;
         emuenv.common_dialog.savedata.mode_to_display = SCE_SAVEDATA_DIALOG_MODE_FIXED;
         emuenv.common_dialog.savedata.list_empty_param[0] = sys_message->targetSlot.emptyParam.get(emuenv.mem);
@@ -1530,6 +1506,8 @@ EXPORT(int, sceSaveDataDialogSubClose) {
     }
 
     std::lock_guard<std::recursive_mutex> lock(emuenv.common_dialog.mutex);
+    if (emuenv.common_dialog.savedata.finishing)
+        return 0;
     emuenv.common_dialog.substatus = SCE_COMMON_DIALOG_STATUS_FINISHED;
     emuenv.common_dialog.result = SCE_COMMON_DIALOG_RESULT_OK;
     emuenv.common_dialog.savedata.button_id = SCE_SAVEDATA_DIALOG_BUTTON_ID_INVALID;
@@ -1538,6 +1516,7 @@ EXPORT(int, sceSaveDataDialogSubClose) {
 
 EXPORT(int, sceSaveDataDialogTerm) {
     TRACY_FUNC(sceSaveDataDialogTerm);
+    complete_savedata_close(emuenv);
     if (emuenv.common_dialog.type != SAVEDATA_DIALOG) {
         return RET_ERROR(SCE_COMMON_DIALOG_ERROR_NOT_IN_USE);
     }

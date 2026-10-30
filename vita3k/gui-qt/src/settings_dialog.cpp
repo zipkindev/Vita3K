@@ -33,7 +33,9 @@
 #include <io/state.h>
 #include <kernel/state.h>
 #include <renderer/functions.h>
+#include <renderer/pvrtc-cache.h>
 #include <renderer/state.h>
+#include <util/fs.h>
 #include <util/log.h>
 #include <util/system.h>
 
@@ -55,6 +57,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScreen>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStringList>
@@ -105,7 +108,7 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
     setWindowFlag(Qt::WindowCloseButtonHint, true);
     setWindowFlag(Qt::WindowContextHelpButtonHint, false);
     setAttribute(Qt::WA_DeleteOnClose);
-    setWindowIcon(QIcon(QStringLiteral(":/org.vita3k.vita3k.svg")));
+    setWindowIcon(QIcon(QStringLiteral(":/Vita3KPlus.png")));
     m_ui->tab_widget_settings->tabBar()->hide();
     m_ui->log_font_family->setEditable(true);
     m_ui->log_font_family->setInsertPolicy(QComboBox::NoInsert);
@@ -118,8 +121,14 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
         font_completer->setFilterMode(Qt::MatchContains);
         font_completer->setCaseSensitivity(Qt::CaseInsensitive);
     }
+    constexpr int no_scroll_height = 912;
     if (!m_gui_settings || !restoreGeometry(m_gui_settings->get_value(gui::sd_geometry).toByteArray()))
-        resize(780, 676);
+        resize(780, no_scroll_height);
+    if (height() < no_scroll_height) {
+        const QScreen *dialog_screen = screen() ? screen() : QApplication::primaryScreen();
+        const int usable = dialog_screen ? dialog_screen->availableGeometry().height() - 64 : no_scroll_height;
+        resize(width(), std::max(minimumHeight(), std::min(no_scroll_height, usable)));
+    }
     connect(&m_theme_manager, &ThemeManager::theme_state_changed, this, &SettingsDialog::refresh_themes);
     connect(&m_theme_manager, &ThemeManager::theme_catalog_changed, this, &SettingsDialog::refresh_themes);
     m_ui->settingsCategory->setSpacing(0);
@@ -323,6 +332,28 @@ void SettingsDialog::load_config() {
     m_ui->vsync->setChecked(m_config.v_sync);
     m_ui->disable_surface_sync->setChecked(m_config.disable_surface_sync);
     m_ui->async_pipeline_compilation->setChecked(m_config.async_pipeline_compilation);
+    m_ui->clear_game_texture_profile->setEnabled(!m_app_path.empty() && emuenv.io.app_path.empty());
+    m_ui->clear_all_texture_profiles->setEnabled(emuenv.io.app_path.empty());
+    m_ui->jit_compile_telemetry->setChecked(m_config.jit_compile_telemetry);
+    m_ui->sync_wait_telemetry->setChecked(m_config.sync_wait_telemetry);
+    m_ui->pipeline_telemetry->setChecked(m_config.pipeline_telemetry);
+    m_ui->jit_preparation->setChecked(m_config.jit_preparation);
+    m_ui->parallel_texture_decode->setChecked(m_config.parallel_texture_decode);
+    m_ui->decoded_texture_telemetry->setChecked(m_config.decoded_texture_telemetry);
+    m_ui->automatic_texture_preparation->setChecked(m_config.automatic_texture_preparation);
+    m_ui->decoded_texture_cache_mb->clear();
+    m_ui->decoded_texture_cache_mb->addItem(tr("Off"), 0);
+    for (int mib : { 128, 256, 512 })
+        m_ui->decoded_texture_cache_mb->addItem(tr("%1 MiB").arg(mib), mib);
+    const int cache_index = m_ui->decoded_texture_cache_mb->findData(m_config.decoded_texture_cache_mb);
+    m_ui->decoded_texture_cache_mb->setCurrentIndex(cache_index >= 0 ? cache_index : 0);
+    m_ui->accurate_thread_scheduling->setChecked(m_config.accurate_thread_scheduling);
+    m_ui->guest_cores_box->clear();
+    for (int cores = 1; cores <= 3; cores++)
+        m_ui->guest_cores_box->addItem(QString::number(cores), cores);
+    m_ui->guest_cores_box->setCurrentIndex(qBound(1, m_config.guest_cores, 3) - 1);
+    m_ui->label_guest_cores->setEnabled(m_config.accurate_thread_scheduling);
+    m_ui->guest_cores_box->setEnabled(m_config.accurate_thread_scheduling);
 
     {
         m_ui->memory_mapping_box->clear();
@@ -613,6 +644,16 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     current.v_sync = m_ui->vsync->isChecked();
     current.disable_surface_sync = m_ui->disable_surface_sync->isChecked();
     current.async_pipeline_compilation = m_ui->async_pipeline_compilation->isChecked();
+    current.jit_compile_telemetry = m_ui->jit_compile_telemetry->isChecked();
+    current.sync_wait_telemetry = m_ui->sync_wait_telemetry->isChecked();
+    current.pipeline_telemetry = m_ui->pipeline_telemetry->isChecked();
+    current.jit_preparation = m_ui->jit_preparation->isChecked();
+    current.parallel_texture_decode = m_ui->parallel_texture_decode->isChecked();
+    current.decoded_texture_telemetry = m_ui->decoded_texture_telemetry->isChecked();
+    current.automatic_texture_preparation = m_ui->automatic_texture_preparation->isChecked();
+    current.decoded_texture_cache_mb = m_ui->decoded_texture_cache_mb->currentData().toInt();
+    current.accurate_thread_scheduling = m_ui->accurate_thread_scheduling->isChecked();
+    current.guest_cores = m_ui->guest_cores_box->currentData().toInt();
     current.memory_mapping = m_ui->memory_mapping_box->currentData().toString().toStdString();
     current.screen_filter = m_ui->screen_filter_box->currentText().toStdString();
     current.resolution_multiplier = static_cast<float>(m_ui->resolution_upscale->value()) / 4.0f;
@@ -1033,6 +1074,11 @@ void SettingsDialog::setup_connections() {
         m_ui->theme_music_volume_label->setText(tr("Theme music volume: %1%").arg(val));
     });
 
+    connect(m_ui->accurate_thread_scheduling, &QCheckBox::toggled, this, [this](bool on) {
+        m_ui->label_guest_cores->setEnabled(on);
+        m_ui->guest_cores_box->setEnabled(on);
+    });
+
     connect(m_ui->perf_overlay_enabled, &QCheckBox::toggled, this, [this](bool on) {
         m_ui->label_perf_detail->setEnabled(on);
         m_ui->perf_overlay_detail_box->setEnabled(on);
@@ -1076,6 +1122,7 @@ void SettingsDialog::setup_connections() {
         if (color.isValid()) {
             emuenv.cfg.front_camera_color = color.rgba();
             update_camera_color_preview();
+            mark_dirty();
         }
     });
     connect(m_ui->back_camera_color_btn, &QPushButton::clicked, this, [this] {
@@ -1084,6 +1131,7 @@ void SettingsDialog::setup_connections() {
         if (color.isValid()) {
             emuenv.cfg.back_camera_color = color.rgba();
             update_camera_color_preview();
+            mark_dirty();
         }
     });
 
@@ -1095,6 +1143,7 @@ void SettingsDialog::setup_connections() {
         if (!file.isEmpty()) {
             emuenv.cfg.front_camera_image = file.toUtf8();
             m_ui->front_camera_image_path->setText(file);
+            mark_dirty();
         }
     });
     connect(m_ui->back_camera_image_btn, &QPushButton::clicked, this, [this] {
@@ -1105,6 +1154,7 @@ void SettingsDialog::setup_connections() {
         if (!file.isEmpty()) {
             emuenv.cfg.back_camera_image = file.toUtf8();
             m_ui->back_camera_image_path->setText(file);
+            mark_dirty();
         }
     });
 
@@ -1139,6 +1189,25 @@ void SettingsDialog::setup_connections() {
         const auto result = app::commit_settings(emuenv, desired, {});
         prompt_restart_if_needed(result, false);
     });
+
+    const auto clear_saved_profiles = [this](bool all) {
+        if (!emuenv.io.app_path.empty()) {
+            QMessageBox::information(this, tr("Saved Texture Profiles"), tr("Close the game normally before clearing saved texture profiles."));
+            return;
+        }
+        if (!all && m_app_path.empty())
+            return;
+        const auto question = all ? tr("Clear saved texture profiles for all games? They can be learned again. Saves and shader caches are preserved.") : tr("Clear this game's saved texture profile? It can be learned again. Saves and shader caches are preserved.");
+        if (QMessageBox::question(this, tr("Clear Saved Texture Profiles"), question, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        std::string message;
+        if (pvr::PVRTCClearTextureProfiles(fs_utils::path_to_utf8(emuenv.cache_path), all ? std::string{} : m_app_path, message))
+            QMessageBox::information(this, tr("Saved Texture Profiles"), QString::fromStdString(message));
+        else
+            QMessageBox::warning(this, tr("Saved Texture Profiles"), QString::fromStdString(message));
+    };
+    connect(m_ui->clear_game_texture_profile, &QPushButton::clicked, this, [clear_saved_profiles] { clear_saved_profiles(false); });
+    connect(m_ui->clear_all_texture_profiles, &QPushButton::clicked, this, [clear_saved_profiles] { clear_saved_profiles(true); });
 
     connect(m_ui->clean_shaders_cache, &QPushButton::clicked, this, [this] {
         const auto shaders_cache_path = emuenv.cache_path / "shaders";
@@ -1198,7 +1267,10 @@ void SettingsDialog::setup_connections() {
         { m_ui->renderer_accuracy_box, tr("Rendering Accuracy"), m_tooltips->renderer_accuracy },
         { m_ui->vsync, tr("V-Sync"), m_tooltips->vsync },
         { m_ui->disable_surface_sync, tr("Disable Surface Sync"), m_tooltips->disable_surface_sync },
+        { m_ui->decoded_texture_cache_mb, tr("Decoded Texture Cache"), m_tooltips->decoded_texture_cache },
         { m_ui->async_pipeline_compilation, tr("Asynchronous Pipeline Compilation"), m_tooltips->async_pipeline },
+        { m_ui->accurate_thread_scheduling, tr("Accurate Thread Scheduling"), m_tooltips->accurate_thread_scheduling },
+        { m_ui->guest_cores_box, tr("Guest CPU Cores"), m_tooltips->guest_cores },
         { m_ui->memory_mapping_box, tr("Memory Mapping"), m_tooltips->memory_mapping },
         { m_ui->screen_filter_box, tr("Screen Filter"), m_tooltips->screen_filter },
         { m_ui->gb_gpu_device, tr("Graphics Device"), m_tooltips->gpu_device },
@@ -1427,10 +1499,11 @@ void SettingsDialog::mark_dirty() {
 }
 
 void SettingsDialog::set_pending_vita_fs_path(const fs::path &vita_fs_path) {
-    if (vita_fs_path.empty() || vita_fs_path == m_pending_vita_fs_path)
+    const fs::path normalized_vita_fs_path = vita_fs_path / "";
+    if (normalized_vita_fs_path.empty() || normalized_vita_fs_path == m_pending_vita_fs_path)
         return;
 
-    m_pending_vita_fs_path = vita_fs_path;
+    m_pending_vita_fs_path = normalized_vita_fs_path;
     update_current_emu_path_label();
     mark_dirty();
 }
@@ -1482,8 +1555,7 @@ void SettingsDialog::update_gpu_visibility() {
             m_ui->screen_filter_box->addItems({ QStringLiteral("Nearest"), QStringLiteral("Bilinear"),
                 QStringLiteral("Bicubic"), QStringLiteral("FXAA"), QStringLiteral("FSR") });
         } else {
-            m_ui->screen_filter_box->addItems({ QStringLiteral("Nearest"), QStringLiteral("Bilinear"),
-                QStringLiteral("Bicubic"), QStringLiteral("FXAA") });
+            m_ui->screen_filter_box->addItems({ QStringLiteral("Bilinear"), QStringLiteral("FXAA") });
         }
 
         const int idx = m_ui->screen_filter_box->findText(previous);

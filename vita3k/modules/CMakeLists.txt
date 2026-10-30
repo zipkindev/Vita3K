@@ -1,4 +1,5 @@
 set(SOURCE_LIST
+	guest_code_fixes.cpp
 	module_parent.cpp
 	SceAppMgr/SceAppMgr.cpp
 	SceAppMgr/SceSharedFb.cpp
@@ -232,4 +233,11 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SOURCE_LIST})
 
 if(APPLE)
     target_link_libraries(modules PUBLIC "-framework SystemConfiguration")
+endif()
+
+if(NOT ANDROID)
+    add_executable(sysmem-budget-tests tests/sysmem_budget.cpp)
+    target_include_directories(sysmem-budget-tests PRIVATE include ../kernel/include)
+    target_link_libraries(sysmem-budget-tests PRIVATE mem googletest util)
+    add_test(NAME sysmem-budget COMMAND sysmem-budget-tests)
 endif()

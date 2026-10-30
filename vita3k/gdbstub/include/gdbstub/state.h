@@ -48,5 +48,7 @@ struct GDBState {
     std::string last_reply = "";
     int thread_info_index = 0;
 
+    SceUID inferior_thread = 0;
+
     SceUID current_thread = 0;
 };

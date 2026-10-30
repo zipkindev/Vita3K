@@ -19,7 +19,14 @@
 
 #include <codec/state.h>
 #include <codec/types.h>
+#include <gxm/state.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
+#include <renderer/functions.h>
+#include <renderer/state.h>
+
+#include <algorithm>
+#include <chrono>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceJpegUser);
@@ -173,6 +180,27 @@ static void configure_decoder(MJpegState *state, int decodeMode) {
     state->decoder->configure(&options);
 }
 
+static void wait_for_gpu_readers(EmuEnvState &emuenv, SceUID thread_id) {
+    std::vector<uint64_t> scenes;
+    {
+        const std::lock_guard<std::mutex> lock(emuenv.gxm.open_scenes_mutex);
+        for (const auto &[context, scene] : emuenv.gxm.open_scenes) {
+            if (scene.thread != thread_id)
+                scenes.push_back(scene.serial);
+        }
+    }
+    guest_sched_release_for_block();
+    if (!scenes.empty()) {
+        std::unique_lock<std::mutex> lock(emuenv.gxm.open_scenes_mutex);
+        emuenv.gxm.open_scenes_cond.wait_for(lock, std::chrono::milliseconds(20), [&] {
+            return std::none_of(emuenv.gxm.open_scenes.begin(), emuenv.gxm.open_scenes.end(), [&](const auto &entry) {
+                return std::find(scenes.begin(), scenes.end(), entry.second.serial) != scenes.end();
+            });
+        });
+    }
+    renderer::finish(*emuenv.renderer, nullptr);
+}
+
 EXPORT(int, sceJpegCreateSplitDecoder) {
     TRACY_FUNC(sceJpegCreateSplitDecoder);
     return UNIMPLEMENTED();
@@ -204,6 +232,7 @@ EXPORT(int, sceJpegCsc, uint8_t *pRGBA, const uint8_t *pYCbCr,
     auto colorSpace = convert_color_space_jpeg_to_decoder(static_cast<SceJpegColorSpace>(SCE_JPEG_COLORSPACE_YUV | sampling));
 
     calculate_pitch_info(width, height, 0, colorSpace, false, yuv_pitch);
+    wait_for_gpu_readers(emuenv, thread_id);
     convert_yuv_to_rgb(pYCbCr, pRGBA, iFrameWidth, colorSpace, false, yuv_pitch);
 
     return 0;
@@ -214,7 +243,7 @@ EXPORT(int, sceJpegDecodeMJpeg, const unsigned char *pJpeg, SceSize isize, uint8
     TRACY_FUNC(sceJpegDecodeMJpeg, pJpeg, isize, pRGBA, osize, decodeMode, pTempBuffer, tempBufferSize, pCoefBuffer, coefBufferSize);
 
     const auto state = emuenv.kernel.obj_store.get<MJpegState>();
-    std::lock_guard<std::mutex> guard(state->decoderMutex);
+    std::unique_lock<std::mutex> guard(state->decoderMutex);
     configure_decoder(state, decodeMode);
 
     // the yuv data will always be smaller than the rgba data, so osize is an upper bound
@@ -231,7 +260,10 @@ EXPORT(int, sceJpegDecodeMJpeg, const unsigned char *pJpeg, SceSize isize, uint8
         return RET_ERROR(SCE_JPEG_ERROR_UNSUPPORT_IMAGE_SIZE);
     }
 
-    convert_yuv_to_rgb(temporary.data(), pRGBA, yuv_pitch[0].x, state->decoder->get_color_space(), false, yuv_pitch);
+    const auto color_space = state->decoder->get_color_space();
+    guard.unlock();
+    wait_for_gpu_readers(emuenv, thread_id);
+    convert_yuv_to_rgb(temporary.data(), pRGBA, yuv_pitch[0].x, color_space, false, yuv_pitch);
 
     // Top 16 bits = pitch_width, bottom 16 bits = pitch_height.
     return (yuv_pitch[0].x << 16u) | yuv_pitch[0].y;
@@ -241,6 +273,7 @@ EXPORT(int, sceJpegDecodeMJpegYCbCr, const uint8_t *pJpeg, SceSize isize,
     uint8_t *pYCbCr, SceSize osize, int decodeMode, void *pCoefBuffer, SceSize coefBufferSize) {
     TRACY_FUNC(sceJpegDecodeMJpegYCbCr, pJpeg, isize, pYCbCr, osize, decodeMode, pCoefBuffer, coefBufferSize);
 
+    wait_for_gpu_readers(emuenv, thread_id);
     const auto state = emuenv.kernel.obj_store.get<MJpegState>();
     std::lock_guard<std::mutex> guard(state->decoderMutex);
     configure_decoder(state, decodeMode);
@@ -388,6 +421,7 @@ EXPORT(int, sceJpegMJpegCsc, uint8_t *pRGBA, const uint8_t *pYCbCr,
     auto colorSpace = convert_color_space_jpeg_to_decoder(static_cast<SceJpegColorSpace>(SCE_JPEG_COLORSPACE_YUV | sampling));
 
     calculate_pitch_info(width, height, 0, colorSpace, true, yuv_pitch);
+    wait_for_gpu_readers(emuenv, thread_id);
     convert_yuv_to_rgb(pYCbCr, pRGBA, iFrameWidth, colorSpace, colorOption == SCE_JPEG_PIXEL_BGRA8888, yuv_pitch);
 
     return 0;

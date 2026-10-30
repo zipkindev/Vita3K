@@ -29,7 +29,6 @@
     <addaction name="install_zip_action"/>
     <addaction name="install_license_action"/>
     <addaction name="separator"/>
-    <addaction name="exit_action"/>
    </widget>
    <widget class="QMenu" name="menuEmulation">
     <property name="title">
@@ -45,6 +44,7 @@
     <addaction name="settings_core_action"/>
     <addaction name="settings_cpu_action"/>
     <addaction name="settings_gpu_action"/>
+    <addaction name="settings_performance_action"/>
     <addaction name="settings_audio_action"/>
     <addaction name="settings_camera_action"/>
     <addaction name="settings_system_action"/>
@@ -75,7 +75,6 @@
     </property>
     <addaction name="vita_themes_action"/>
     <addaction name="trophy_collection_action"/>
-    <addaction name="patch_manager_action"/>
     <addaction name="user_management_action"/>
    </widget>
    <widget class="QMenu" name="menuView">
@@ -215,20 +214,12 @@
   </action>
   <action name="install_zip_action">
    <property name="text">
-    <string>Install Archive (.zip / .vpk / .vci)</string>
+    <string>Install Archive (.zip / .vpk)</string>
    </property>
   </action>
   <action name="install_license_action">
    <property name="text">
     <string>Install License (.rif / work.bin)</string>
-   </property>
-  </action>
-  <action name="exit_action">
-   <property name="text">
-    <string>Exit</string>
-   </property>
-   <property name="menuRole">
-    <enum>QAction::MenuRole::QuitRole</enum>
    </property>
   </action>
   <action name="pause_action">
@@ -257,11 +248,6 @@
     <string>Vita Themes</string>
    </property>
   </action>
-  <action name="patch_manager_action">
-   <property name="text">
-    <string>Patch Manager</string>
-   </property>
-  </action>
   <action name="user_management_action">
    <property name="text">
     <string>User Management</string>
@@ -281,6 +267,9 @@
    <property name="text">
     <string>Graphics</string>
    </property>
+  </action>
+  <action name="settings_performance_action">
+   <property name="text"><string>Texture Decoding</string></property>
   </action>
   <action name="settings_audio_action">
    <property name="text">

@@ -119,6 +119,11 @@ public:
         reset_repeat_increase();
     }
 
+    void seed_entry_populated_pa(std::uint32_t reg_count) {
+        for (std::uint32_t r = 0; r < reg_count; r++)
+            m_vpck_written_bytes[(static_cast<std::uint32_t>(RegisterBank::PRIMATTR) << 24) | (r & 0xFFFFFF)] = 0xF;
+    }
+
 private:
     //
     // Translation helpers
@@ -136,6 +141,8 @@ private:
     [[maybe_unused]] int src2_repeat_offset = get_repeat_offset(inst.opr.src2, current_repeat, repeat_mode, inst.opr.src2.bank);
 
     const int get_repeat_offset(Operand &op, const std::uint8_t repeat_index, RepeatMode repeat_mode, RegisterBank bank) {
+        if (repeat_mode == RepeatMode::INTERNAL && !(op.flags & RegisterFlags::GPI) && op.index != 3)
+            return 0;
         if (repeat_mode == RepeatMode::INTERNAL || repeat_mode == RepeatMode::BOTH) {
             if (bank == RegisterBank::FPINTERNAL) {
                 return repeat_index;
@@ -155,6 +162,9 @@ private:
         }
         if (repeat_mode == RepeatMode::EXTERNAL && bank != RegisterBank::FPINTERNAL) {
             return repeat_index * 4;
+        }
+        if (repeat_mode == RepeatMode::EXTERNAL) {
+            return repeat_index;
         }
         if (repeat_mode == RepeatMode::SLMSI) {
             auto inc = repeat_increase[op.index][repeat_index];
@@ -197,7 +207,26 @@ private:
 
     bool m_second_program{ false };
 
-    spv::Id do_alu_op(Instruction &inst, const Imm4 source_mask, const Imm4 possible_dest_mask);
+    // per 32-bit register word - a mask of bytes a VPCK has written (a f16 lane covers 2 bytes, u8 lane 1)
+    std::map<uint32_t, std::uint8_t> m_vpck_written_bytes;
+    bool m_store_from_vpck{ false };
+    // a sampled texture leaves real data in its destination therefore a later partial vpck must preserve it
+    bool m_store_from_texture_sample{ false };
+    bool m_store_is_raw_move{ false };
+    bool m_store_raw_f16_lanes{ false };
+    // the data type each register word (bank << 24 | word) was last stored with
+    std::map<uint32_t, DataType> m_word_store_types;
+    DataType m_raw_move_types[4]{};
+    // a raw move into the output's first word leaves the declared type only when every word it copies was stored in that type
+    bool m_raw_move_keeps_declared{ false };
+
+    DataType word_store_type(const Operand &op, int repeat_offset, int component, int component_size) const {
+        const uint32_t word = (op.num + repeat_offset + (component * component_size) / 4) & 0xFFFFFF;
+        const auto it = m_word_store_types.find((static_cast<uint32_t>(op.bank) << 24) | word);
+        return it == m_word_store_types.end() ? DataType::UNK : it->second;
+    }
+
+    spv::Id do_alu_op(Instruction &inst, const Imm4 source_mask, const Imm4 possible_dest_mask, int src1_repeat_offset = 0, int src2_repeat_offset = 0);
 
 public:
     void set_secondary_program(const bool is_it) {
@@ -823,7 +852,7 @@ public:
         Imm7 src2_n);
     // Instructions end
 private:
-    spv::Id vtst_impl(Instruction inst, ExtPredicate pred, int zero_test, int sign_test, Imm4 load_mask, bool mask);
+    spv::Id vtst_impl(Instruction inst, ExtPredicate pred, int zero_test, int sign_test, Imm4 load_mask, bool mask, spv::Id *alu_result = nullptr);
 
     // SPIR-V emitter
     spv::Builder &m_b;
