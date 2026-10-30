@@ -141,6 +141,45 @@ int main() {
     measured.acquire_reuse_tracking();
     assert(measured.stats().reuse.epochs == 2 && measured.stats().reuse.history_entries == 0);
     measured.release_reuse_tracking();
+    // Highest-priority-first preparation must preserve that relative order
+    // when later demand needs space. Check independent byte and entry bounds.
+    for (bool entry_bound : { false, true }) {
+        Cache ranked(entry_bound ? 1024 : 16, entry_bound ? 2 : 16);
+        ranked.acquire_reuse_tracking();
+        assert(ranked.insert(a, input, pixels, 32, 100000000, false));
+        assert(ranked.insert(b, input, other, 64, 1000, false));
+        // Partial/budget-limited preparation cannot evict an earlier record.
+        assert(!ranked.insert(c, input, other, 64, 100, false));
+        assert(ranked.stats().evictions == 0 && ranked.stats().entries == 2);
+        assert(ranked.insert(c, input, other, 64, 100, true));
+        Cache::Observation miss;
+        assert(!ranked.copy(b, input, output, result, &miss));
+        assert(miss.classification == Cache::MissClass::CapacityEvicted);
+        assert(ranked.copy(a, input, output, result) && result == 32);
+        assert(std::equal(output.begin(), output.end(), pixels.begin()));
+        assert(ranked.copy(c, input, output, result) && result == 64);
+        assert(ranked.stats().reuse.preloaded_hits == 1 && ranked.stats().reuse.demand_hits == 1);
+        assert(ranked.stats().evictions == 1);
+        assert(entry_bound ? ranked.stats().entry_evictions == 1 : ranked.stats().byte_evictions == 1);
+        ranked.release_reuse_tracking();
+    }
+    // A demand hit still promotes a lower-priority prepared texture. There is
+    // no permanent pinning, and normal demand insertion remains ordinary LRU.
+    Cache promoted(16, 2);
+    assert(promoted.insert(a, input, pixels, 32, 100000000, false));
+    assert(promoted.insert(b, input, other, 64, 1000, false));
+    assert(promoted.copy(b, input, output, result));
+    assert(promoted.insert(c, input, other, 64));
+    assert(!promoted.copy(a, input, output, result));
+    assert(promoted.copy(b, input, output, result) && result == 64);
+    assert(promoted.copy(c, input, output, result) && result == 64);
+    // Loading only the leading portion of a profile retains its priority, too.
+    Cache partial(16, 2);
+    assert(partial.insert(a, input, pixels, 32, 100000000, false));
+    assert(partial.insert(c, input, other, 64));
+    assert(partial.insert(b, input, other, 64));
+    assert(!partial.copy(a, input, output, result)); // Demand recency can supersede preparation.
+    assert(partial.copy(c, input, output, result));
     Cache shared(4096, 16);
     shared.acquire_reuse_tracking();
     std::vector<std::thread> workers;

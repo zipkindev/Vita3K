@@ -141,11 +141,15 @@ public:
             lru.erase(victim);
             ++counts.evictions;
         }
-        lru.push_front({ key, std::move(compressed), std::move(pixels), result, decode_ns, 0 });
-        lookup.emplace(key, lru.begin());
+        // Preparation submits records in descending profile priority. Append
+        // each prepared entry so earlier, higher-ranked entries stay newer.
+        // Demand inserts/hits retain ordinary most-recently-used promotion.
+        const auto entry = lru.insert(allow_eviction ? lru.begin() : lru.end(),
+            { key, std::move(compressed), std::move(pixels), result, decode_ns, 0 });
+        lookup.emplace(key, entry);
         resident += cost;
         if (reuse)
-            reuse_slot(key, lru.front().compressed.size(), decoded.size()).state = allow_eviction ? ReuseState::Resident : ReuseState::Preloaded;
+            reuse_slot(key, entry->compressed.size(), decoded.size()).state = allow_eviction ? ReuseState::Resident : ReuseState::Preloaded;
         return true;
     }
 
