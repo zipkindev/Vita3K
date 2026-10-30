@@ -1,0 +1,60 @@
+name: Observe upstream and build reviewed candidates
+on:
+  schedule:
+    - cron: '23 9 * * *'
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths: [tools/upstream/approved-candidate.json]
+permissions:
+  contents: read
+concurrency:
+  group: upstream-candidate-coordinator
+  cancel-in-progress: false
+jobs:
+  observe:
+    if: github.repository == 'zipkindev/Vita3K-ZipZ' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: master
+          persist-credentials: false
+      - run: node --test tools/upstream/observe.test.mjs
+      - run: node tools/upstream/observe.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+  build-reviewed:
+    if: github.repository == 'zipkindev/Vita3K-ZipZ' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Dispatch dedicated Windows build for accepted source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, re, subprocess
+          from pathlib import Path
+          pin = json.loads(Path('tools/upstream/approved-candidate.json').read_text())
+          if pin.get('enabled') is not True:
+              print('Candidate auto-builds are disabled pending initial validation.')
+              raise SystemExit(0)
+          assert re.fullmatch(r'[0-9a-f]{40}', pin['sourceCommit'])
+          assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', pin['buildLabel'])
+          subprocess.run(['gh', 'workflow', 'run', 'windows-self-hosted-release.yml',
+              '--repo', 'zipkindev/Vita3K-ZipZ', '--ref', 'master',
+              '-f', 'preflight_only=false', '-f', 'source_commit='+pin['sourceCommit'],
+              '-f', 'build_label='+pin['buildLabel']], check=True)
+          PY
