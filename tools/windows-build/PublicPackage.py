@@ -33,7 +33,8 @@ def relative_path(value):
 
 
 def public_text(text, name):
-    if PRIVATE_TEXT.search(text):
+    # Also catch Windows paths escaped inside JSON or quoted command lines.
+    if any(PRIVATE_TEXT.search(value) for value in (text, text.replace('\\\\', '\\'))):
         raise ValueError('Private metadata in public payload: ' + name)
     return text
 
@@ -67,7 +68,7 @@ def prepare_public_package(package, destination, *, allow_legacy_symbol_paths=Fa
     records = {}
     for entry in original['files']:
         relative = relative_path(entry['path'])
-        if str(relative) in ('provenance.json', 'build-evidence/public-summary.json'):
+        if str(relative).casefold() in ('provenance.json', 'build-evidence/public-summary.json'):
             raise ValueError('Reserved package manifest path')
         public_text(str(relative), 'manifest path')
         if str(relative).casefold() in {key.casefold() for key in records}:
@@ -89,7 +90,7 @@ def prepare_public_package(package, destination, *, allow_legacy_symbol_paths=Fa
     destination.mkdir(parents=True, exist_ok=False)
     for name, source in records.items():
         relative = PurePosixPath(name)
-        if relative.parts[0] == 'build-evidence' and (
+        if relative.parts[0].casefold() == 'build-evidence' and (
                 len(relative.parts) != 2 or relative.name not in EVIDENCE):
             continue
         if (source.suffix.lower() in ('.log', '.ninja', '.py', '.ps1', '.bat', '.cmd')
@@ -101,7 +102,7 @@ def prepare_public_package(package, destination, *, allow_legacy_symbol_paths=Fa
             if not allow_legacy_symbol_paths:
                 validate_symbol_privacy(source)
             shutil.copy2(source, target)
-        elif relative.parts[0] == 'build-evidence':
+        elif relative.parts[0].casefold() == 'build-evidence':
             target.write_text(public_text(read_text(source), name), encoding='utf-8', newline='\n')
         else:
             if source.suffix.lower() in ('.txt', '.md', '.json', '.ini', '.conf', '.xml', '.ps1', '.py'):

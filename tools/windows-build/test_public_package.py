@@ -114,7 +114,7 @@ class PublicPackageTests(unittest.TestCase):
             prepare_public_package(self.package, self.root / 'public')
 
     def test_public_text_rejects_network_and_home_details(self):
-        for text in (r'\\private-host\share', '/home/private/source', '192.168.12.34', '10.1.2.3', r'C:\Users\Private'):
+        for text in (r'\\private-host\share', '/home/private/source', '192.168.12.34', '10.1.2.3', r'C:\Users\Private', json.dumps({'path': r'C:\Users\Private'})):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 public_text(text, 'test')
 

@@ -119,7 +119,7 @@ of package contents.
 ### Historical release sanitization, 2026-10-30
 
 The seven Windows prereleases from `v1.3.3-win11diag.2` through
-`v1.3.3-win11merge.46` were prepared for evidence-only repackaging. Original assets
+`v1.3.3-win11merge.46` receive evidence-only repackaging. Original assets
 were backed up privately with verified SHA-256 hashes before any remote changes.
 Runtime EXEs/DLLs and full PDBs are preserved byte-for-byte. Their GUID/age pairs
 remain unchanged. Public ZIPs remove raw machine evidence, regenerate provenance
@@ -133,3 +133,10 @@ data stays public, including its historical embedded source/object paths. This
 is an intentional exception, not a claim that those binary records were scrubbed.
 Full private originals also remain available for recovery. Do not upload those
 private backups or use them as new public evidence packages.
+
+
+The native Windows packaging canary passed: an optimized MSVC LTCG executable
+ran successfully; its basename-only RSDS reference and full PDB GUID/age matched;
+packaging preserved EXE/PDB bytes and excluded a machine-specific cache canary.
+Windows PowerShell parsed the updated build script successfully. All 30 Python
+regression tests passed locally and in the PR's storage-test workflow.
