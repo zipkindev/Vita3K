@@ -8,10 +8,17 @@
 int main() {
     renderer::PipelineStateHistory<unsigned> h;
     renderer::ExactPipelineRecipe a;
-    a.pipeline_key = 1; a.vertex[0] = 1; a.fragment[0] = 2; a.words[7] = 1;
-    a.words[20] = 12582912; a.words[46] = 2197815296;
+    a.pipeline_key = 1;
+    a.vertex[0] = 1;
+    a.fragment[0] = 2;
+    a.words[7] = 1;
+    a.words[20] = 12582912;
+    a.words[46] = 2197815296;
     h.observe(a, 10, false);
-    auto b = a; b.pipeline_key = 2; b.vertex[0] = 3; b.fragment[0] = 4;
+    auto b = a;
+    b.pipeline_key = 2;
+    b.vertex[0] = 3;
+    b.fragment[0] = 4;
     h.observe(b, 20, false);
     assert(h.size() == 2); // identical state must retain both shader associations
     auto found = h.candidates(a.vertex, a.fragment, false);
@@ -37,7 +44,8 @@ int main() {
     assert(h.observed(a)); // a busy unrelated pair didn't evict this association
     for (unsigned i = 0; i < 1000; ++i) {
         b.pipeline_key = i + 2000;
-        b.vertex[0] = i & 255; b.vertex[1] = i >> 8;
+        b.vertex[0] = i & 255;
+        b.vertex[1] = i >> 8;
         b.fragment = b.vertex;
         h.observe(b, i, false);
         assert(h.size() <= h.limit);
@@ -51,13 +59,18 @@ int main() {
         h.observe(b, i, false);
     }
     assert(!h.observed(a) && h.observed(b)); // key history is independently bounded
-    h.clear(); assert(h.size() == 0 && h.generation() == 0);
+    h.clear();
+    assert(h.size() == 0 && h.generation() == 0);
     h.observe(a, 1, false);
     const auto available = h.relevant_generation(a.vertex, a.fragment);
     for (unsigned i = 0; i < 65; ++i) {
-        auto different = b; different.vertex = {}; different.fragment = {};
-        different.vertex[0] = 50; different.vertex[1] = i;
-        different.fragment[0] = 51; different.fragment[1] = i;
+        auto different = b;
+        different.vertex = {};
+        different.fragment = {};
+        different.vertex[0] = 50;
+        different.vertex[1] = i;
+        different.fragment[0] = 51;
+        different.fragment[1] = i;
         different.pipeline_key = 60000 + i;
         h.observe(different, i, false);
     }
@@ -75,10 +88,14 @@ int main() {
     unsigned changes = 0;
     auto previous = relevant;
     for (unsigned i = 0; i < 10000; ++i) {
-        b.vertex = {}; b.fragment = {};
-        b.vertex[0] = 99; b.fragment[0] = 98;
-        b.vertex[1] = i & 255; b.vertex[2] = i >> 8;
-        b.fragment[1] = i & 255; b.fragment[2] = i >> 8;
+        b.vertex = {};
+        b.fragment = {};
+        b.vertex[0] = 99;
+        b.fragment[0] = 98;
+        b.vertex[1] = i & 255;
+        b.vertex[2] = i >> 8;
+        b.fragment[1] = i & 255;
+        b.fragment[2] = i >> 8;
         b.pipeline_key = i + 50000;
         h.observe(b, i, false);
         auto g = h.relevant_generation(a.vertex, a.fragment);
@@ -87,5 +104,4 @@ int main() {
         assert(h.candidates(a.vertex, a.fragment, false).size() <= 1);
     }
     assert(changes == 1 && previous == 0); // only bounded dependency-registry eviction changes it
-
 }

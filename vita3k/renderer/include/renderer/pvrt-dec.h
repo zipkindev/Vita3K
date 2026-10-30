@@ -31,9 +31,9 @@
 \copyright Copyright (c) Imagination Technologies Limited.
 */
 #pragma once
-#include <stdint.h>
 #include <functional>
 #include <span>
+#include <stdint.h>
 namespace pvr {
 
 /// <summary>Decompresses PVRTC to RGBA 8888.</summary>
@@ -49,7 +49,6 @@ uint32_t PVRTDecompressPVRTC(const void *compressedData, uint32_t do2bitMode, ui
 // not escape and the callback must not wait on GPU work or re-enter the cache.
 bool PVRTConsumeCachedPVRTC(const void *data, uint32_t two_bit, uint32_t width, uint32_t height, uint32_t type,
     const std::function<bool()> &before_copy, const std::function<void(std::span<const uint8_t>)> &consume);
-
 
 /// <summary>Decompresses ETC to RGBA 8888.</summary>
 /// <param name="srcData">The ETC texture data to decompress</param>

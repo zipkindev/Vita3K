@@ -22,11 +22,11 @@
 #include <optional>
 #include <renderer/exact_pipeline_recipes.h>
 #include <renderer/pipeline_binding_epochs.h>
-#include <renderer/pipeline_preparation_queue.h>
 #include <renderer/pipeline_prediction_admission.h>
-#include <renderer/pipeline_state_history.h>
-#include <renderer/pipeline_recovery_policy.h>
+#include <renderer/pipeline_preparation_queue.h>
 #include <renderer/pipeline_preparation_work.h>
+#include <renderer/pipeline_recovery_policy.h>
+#include <renderer/pipeline_state_history.h>
 #include <renderer/protected_pipeline_pairs.h>
 #include <util/containers.h>
 #include <vkutil/vkutil.h>

@@ -3,6 +3,13 @@
 See [restore storage](RESTORE-STORAGE.md) for recovery inputs, secure installation,
 scheduled tasks, verification and retention controls.
 
+Merged storage commit `71a5eb44` was deployed and reboot-verified on 2026-10-25.
+The installer preserved credentials and release-protection rules; startup SMB
+reconnect, Network Service archiving/local cleanup, production retention dry run,
+isolated expiry tests and the post-reboot readiness workflow passed. See the
+[deployment record](RESTORE-STORAGE.md#deployment-verification-2026-10-25) for
+script hashes, test scope and rollback information.
+
 The manual `Windows release package (self-hosted)` workflow uses the dedicated Windows Server 2022 runner. It has no push or pull-request trigger. Only the default branch can dispatch this job. Diagnostic iterations use the local workstation and retain its build directory.
 
 Run its default readiness check to verify MSVC, SDK linking, executable execution, Qt and matching EXE/PDB identity under the runner service account. This does not build Vita3K.

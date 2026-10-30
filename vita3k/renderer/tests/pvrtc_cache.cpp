@@ -83,12 +83,10 @@ int main(int argc, char **argv) {
                     // Proves staging preparation does not hold the cache mutex.
                     assert(pvr::PVRTCDecodeCacheStats().entries > 0);
                     prepared = true;
-                    return true;
-                }, [&](auto pixels) {
+                    return true; }, [&](auto pixels) {
                     assert(prepared);
                     std::copy(pixels.begin(), pixels.end(), staged.begin());
-                    consumed = true;
-                }));
+                    consumed = true; }));
                 assert(consumed && staged == reference);
                 assert(!pvr::PVRTConsumeCachedPVRTC(source.data(), bits, 32, 32, type, [] { return false; }, [](auto) { assert(false); }));
                 source[0] ^= 1;

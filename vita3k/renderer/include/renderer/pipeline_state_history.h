@@ -1,9 +1,9 @@
 // Vita3K emulator project
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
-#include <renderer/exact_pipeline_recipes.h>
 #include <deque>
 #include <map>
+#include <renderer/exact_pipeline_recipes.h>
 #include <unordered_set>
 
 namespace renderer {
@@ -19,7 +19,13 @@ public:
     };
     static constexpr size_t limit = 64, pair_limit = 8, drawn_limit = 4096;
     uint64_t generation() const { return revision; }
-    void clear() { states.clear(); drawn_keys.clear(); drawn_order.clear(); stages.clear(); revision = 0; }
+    void clear() {
+        states.clear();
+        drawn_keys.clear();
+        drawn_order.clear();
+        stages.clear();
+        revision = 0;
+    }
     size_t size() const { return states.size(); }
     void observe(const ExactPipelineRecipe &recipe, Pass pass, bool interlock) {
         // Mirrors the render cache's pipeline-key identity. Remember more drawn keys
@@ -39,7 +45,7 @@ public:
             // a deferred pair may never have tried it while it was available.
             // Completed candidate knowledge is kept separately by the worker.
             for (const auto *hash : { &recipe.vertex, &recipe.fragment }) {
-                const auto stage = std::pair{*hash, interlock};
+                const auto stage = std::pair{ *hash, interlock };
                 if (!stages.contains(stage) && stages.size() == 2 * drawn_limit) {
                     const auto oldest = std::min_element(stages.begin(), stages.end(), [](const auto &a, const auto &b) { return a.second < b.second; });
                     stages.erase(oldest);
@@ -65,7 +71,7 @@ public:
     uint64_t relevant_generation(const std::array<uint8_t, 32> &vertex, const std::array<uint8_t, 32> &fragment, bool interlock = false) const {
         uint64_t result = 0;
         for (const auto *hash : { &vertex, &fragment }) {
-            const auto found = stages.find({*hash, interlock});
+            const auto found = stages.find({ *hash, interlock });
             if (found != stages.end())
                 result = std::max(result, found->second);
         }

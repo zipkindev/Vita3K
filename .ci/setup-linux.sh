@@ -4,7 +4,8 @@ set -euo pipefail
 ARCH="${1:-x86_64}"
 APPIMAGE_MODE="${2:-with-appimage}"
 
-sudo add-apt-repository -y ppa:mhier/libboost-latest
+# Supported Ubuntu runners provide Boost 1.83 in universe. The old Boost PPA
+# does not publish packages for Ubuntu 26.04 and makes apt update fail there.
 sudo add-apt-repository universe
 sudo apt update
 sudo apt -y install \
@@ -44,7 +45,7 @@ sudo apt -y install \
     libdecor-0-dev \
     liburing-dev \
     libgstreamer-plugins-bad1.0-0 \
-    libgstreamer-plugins-good1.0-0
+    libgstreamer-plugins-extra1.0-0
 
 if [[ "$APPIMAGE_MODE" == "with-appimage" ]]; then
     curl -sLO "https://github.com/linuxdeploy/linuxdeploy/releases/latest/download/linuxdeploy-${ARCH}.AppImage"

@@ -47,6 +47,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply source-pinned dependency patches
+        run: python3 tools/windows-build/ApplyDependencyPatches.py --source .
+
+      - name: Apply bounded ATRAC9 decoder patch
+        run: |
+          git -C external/LibAtrac9 apply --check "$GITHUB_WORKSPACE/tools/windows-build/patches/libatrac9-bounded.patch"
+          git -C external/LibAtrac9 apply "$GITHUB_WORKSPACE/tools/windows-build/patches/libatrac9-bounded.patch"
+
       - name: Set up build environment
         run: bash ./.ci/setup-linux.sh x86_64 without-appimage
 

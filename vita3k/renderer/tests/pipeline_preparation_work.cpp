@@ -23,7 +23,8 @@ int main() {
         assert(cache.size() <= cache.limit);
     }
     assert(cache.evictions > 0);
-    cache.clear(); assert(cache.size() == 0 && cache.evictions == 0);
+    cache.clear();
+    assert(cache.size() == 0 && cache.evictions == 0);
 
     PipelinePreparationWorkBudget budget;
     unsigned admitted = 0, scans = 0;
@@ -45,14 +46,18 @@ int main() {
     }
     assert(admitted <= budget.burst + 39 && scans == 40);
     budget = {};
-    for (unsigned i = 0; i < budget.burst; ++i) assert(budget.acquire(0));
+    for (unsigned i = 0; i < budget.burst; ++i)
+        assert(budget.acquire(0));
     admitted = 0;
-    for (unsigned i = 0; i < 1000; ++i) admitted += budget.acquire(100000000000ULL);
+    for (unsigned i = 0; i < 1000; ++i)
+        admitted += budget.acquire(100000000000ULL);
     assert(admitted == budget.burst); // long idle time never creates a catch-up burst
 
     budget = {};
-    for (unsigned i = 0; i < budget.burst - 1; ++i) assert(budget.acquire_background(0));
-    for (unsigned i = 0; i < 10000; ++i) assert(!budget.acquire_background(0));
+    for (unsigned i = 0; i < budget.burst - 1; ++i)
+        assert(budget.acquire_background(0));
+    for (unsigned i = 0; i < 10000; ++i)
+        assert(!budget.acquire_background(0));
     assert(budget.acquire(0)); // reserved existing token serves a fresh actual pair
     assert(!budget.acquire(0));
     assert(!budget.acquire_background(budget.interval_ns));
@@ -60,25 +65,35 @@ int main() {
 
     PipelineStageReadiness ready;
     std::array<uint8_t, 32> a{}, b{}, unrelated{};
-    a[0] = 1; b[0] = 2; unrelated[0] = 3;
-    ready.ready(a); auto revision = ready.generation(a, b);
-    for (unsigned i = 0; i < 10000; ++i) ready.ready(unrelated);
+    a[0] = 1;
+    b[0] = 2;
+    unrelated[0] = 3;
+    ready.ready(a);
+    auto revision = ready.generation(a, b);
+    for (unsigned i = 0; i < 10000; ++i)
+        ready.ready(unrelated);
     assert(ready.generation(a, b) == revision);
-    ready.ready(b); assert(ready.generation(a, b) > revision);
+    ready.ready(b);
+    assert(ready.generation(a, b) > revision);
     for (unsigned i = 0; i < 10000; ++i) {
-        unrelated[1] = i & 255; unrelated[2] = i >> 8;
-        ready.ready(unrelated); assert(ready.size() <= ready.limit);
+        unrelated[1] = i & 255;
+        unrelated[2] = i >> 8;
+        ready.ready(unrelated);
+        assert(ready.size() <= ready.limit);
     }
-    ready.clear(); assert(ready.size() == 0);
+    ready.clear();
+    assert(ready.size() == 0);
     PipelineCompletedPredictions completed;
-    ExactPipelineRecipe recipe; recipe.pipeline_key = 42;
+    ExactPipelineRecipe recipe;
+    recipe.pipeline_key = 42;
     completed.complete(recipe);
     for (unsigned i = 0; i < 10000; ++i) {
         assert(completed.contains(recipe)); // unused object reclamation doesn't forget completed work
         completed.complete(recipe);
     }
     assert(completed.size() == 1);
-    auto other = recipe; other.words[7] = 1;
+    auto other = recipe;
+    other.words[7] = 1;
     assert(!completed.contains(other)); // don't conflate states with the same opaque key
     completed.complete(other);
     for (unsigned i = 0; i < completed.limit; ++i) {
@@ -87,5 +102,6 @@ int main() {
         assert(completed.size() <= completed.limit);
     }
     assert(!completed.contains(recipe) && completed.evictions == 2);
-    completed.clear(); assert(completed.size() == 0 && completed.evictions == 0);
+    completed.clear();
+    assert(completed.size() == 0 && completed.evictions == 0);
 }

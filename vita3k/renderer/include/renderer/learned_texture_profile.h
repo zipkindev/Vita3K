@@ -114,34 +114,46 @@ public:
         const auto payload = [](const Record &e) { return e.size + size_t(e.key.width) * e.key.height * 4; };
         const auto density = [&](const Record &e) { return DecodedTextureCache::preparation_priority(e.decode_ns, e.uses, payload(e)); };
         std::vector<size_t> indices(records.size());
-        for (size_t i = 0; i < indices.size(); ++i) indices[i] = i;
+        for (size_t i = 0; i < indices.size(); ++i)
+            indices[i] = i;
         std::vector<bool> chosen(records.size());
         std::vector<Record> ordered;
         ordered.reserve(records.size());
         std::unordered_set<uint64_t> cohorts;
         size_t used = 0;
         auto select = [&](size_t i, size_t limit) {
-            if (chosen[i] || payload(records[i]) > limit - std::min(limit, used)) return;
+            if (chosen[i] || payload(records[i]) > limit - std::min(limit, used))
+                return;
             chosen[i] = true;
             used += payload(records[i]);
-            if (records[i].cohort) cohorts.insert(records[i].cohort);
+            if (records[i].cohort)
+                cohorts.insert(records[i].cohort);
             ordered.push_back(records[i]);
         };
         std::stable_sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
             const auto score = [&](size_t i) { return std::min<uint64_t>(records[i].decode_ns, 250000000) * records[i].recent * 1024 / std::max<size_t>(payload(records[i]), 4096); };
             return score(a) > score(b);
         });
-        for (auto i : indices) if (records[i].recent) select(i, cap - cap / 3);
+        for (auto i : indices)
+            if (records[i].recent)
+                select(i, cap - cap / 3);
         const size_t cold_end = std::min(cap, used + cap / 6);
         std::stable_sort(indices.begin(), indices.end(), [&](size_t a, size_t b) { return records[a].decode_ns > records[b].decode_ns; });
-        for (auto i : indices) if (records[i].decode_ns >= 2000000) select(i, cold_end);
+        for (auto i : indices)
+            if (records[i].decode_ns >= 2000000)
+                select(i, cold_end);
         std::stable_sort(indices.begin(), indices.end(), [&](size_t a, size_t b) { return density(records[a]) > density(records[b]); });
         // Snapshot seeds so filling does not recursively grow the selected graph.
         const auto seeds = cohorts;
-        for (auto i : indices) if (records[i].cohort && seeds.contains(records[i].cohort)) select(i, cap);
-        for (auto i : indices) select(i, cap);
+        for (auto i : indices)
+            if (records[i].cohort && seeds.contains(records[i].cohort))
+                select(i, cap);
+        for (auto i : indices)
+            select(i, cap);
         // Keep skipped records for coverage accounting and small-entry fallbacks.
-        for (auto i : indices) if (!chosen[i]) ordered.push_back(records[i]);
+        for (auto i : indices)
+            if (!chosen[i])
+                ordered.push_back(records[i]);
         records = std::move(ordered);
     }
 

@@ -19,7 +19,9 @@
 #include <chrono>
 #include <exception>
 #include <typeinfo>
+#if __has_include(<util/fork_build.h>)
 #include <util/fork_build.h>
+#endif
 #include <util/log.h>
 
 #ifdef _WIN32
@@ -121,7 +123,11 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
     if (add_sink(root_paths.get_log_path() / LOG_FILE_NAME) != Success)
         return InitConfigFailed;
     LOG_INFO("================= Vita3K session start =================");
+#if defined(FORK_BUILD_SEQ) && defined(FORK_BUILD_CHANGES)
     LOG_INFO("FORK BUILD seq {} compiled {} {} | {}", FORK_BUILD_SEQ, __DATE__, __TIME__, RELEASE_VERSION ? "Release Version" : FORK_BUILD_CHANGES);
+#else
+    LOG_INFO("Source build compiled {} {}", __DATE__, __TIME__);
+#endif
 
     std::set_terminate([]() {
         if (const std::exception_ptr eptr = std::current_exception()) {
