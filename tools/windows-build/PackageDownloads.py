@@ -2,10 +2,20 @@
 import hashlib
 import json
 from pathlib import Path
+import tempfile
 import zipfile
+
+from PublicPackage import prepare_public_package
 
 
 def package_downloads(package: Path, destination: Path, label: str):
+    with tempfile.TemporaryDirectory(prefix='vita3k-public-') as temporary:
+        public = Path(temporary) / 'payload'
+        prepare_public_package(package, public)
+        return _package_public_downloads(public, destination, label)
+
+
+def _package_public_downloads(package: Path, destination: Path, label: str):
     destination.mkdir(parents=True, exist_ok=False)
     manifest = json.loads((package / 'provenance.json').read_text())
     if manifest['buildLabel'] != label:
@@ -28,8 +38,9 @@ def package_downloads(package: Path, destination: Path, label: str):
                           'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
     (destination / 'downloads.json').write_text(json.dumps({
         'buildLabel': label, 'sourceCommit': manifest['sourceCommit'],
-        'recipeCommit': manifest['recipeCommit'], 'exeIdentity': manifest['exeIdentity'],
+        'recipeCommit': manifest.get('recipeCommit'), 'exeIdentity': manifest['exeIdentity'],
         'pdbIdentity': manifest['pdbIdentity'], 'downloads': downloads,
-        'note': 'Identical optimized EXE; extract matching diagnostics beside runtime for symbols. No unoptimized Debug build.'
+        'symbolPolicy': 'full-symbols',
+        'note': 'Identical optimized EXE and full matching PDB. Raw machine evidence is retained privately.'
     }, indent=2) + '\n')
     return downloads
