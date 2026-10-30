@@ -45,7 +45,7 @@ sudo apt -y install \
     libdecor-0-dev \
     liburing-dev \
     libgstreamer-plugins-bad1.0-0 \
-    libgstreamer-plugins-good1.0-0
+    libgstreamer-plugins-extra1.0-0
 
 if [[ "$APPIMAGE_MODE" == "with-appimage" ]]; then
     curl -sLO "https://github.com/linuxdeploy/linuxdeploy/releases/latest/download/linuxdeploy-${ARCH}.AppImage"
