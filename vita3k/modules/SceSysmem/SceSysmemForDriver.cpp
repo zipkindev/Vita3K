@@ -16,10 +16,14 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include "SceSysmemForDriver.h"
+#include "SceSysmem.h"
+#include <modules/sysmem_budget.h>
 #include <modules/sysmem_state.h>
 
 #include <kernel/state.h>
 #include <mem/functions.h>
+#include <renderer/commands.h>
+#include <renderer/functions.h>
 #include <util/align.h>
 
 #include <util/log.h>
@@ -70,87 +74,38 @@ EXPORT(int, ksceKernelAllocHeapMemoryWithOption) {
     return UNIMPLEMENTED();
 }
 
-// Where blocks of a user type go: CDRAM, the common dialog's memory, uncached main memory or main
-// memory. Kernel types go to main memory.
-static Address region_start(SceKernelMemBlockType type) {
-    if (type & MEMBLOCK_TYPE_KERNEL_MASK)
-        return USER_MAIN_BASE;
-    const SceUInt32 partition_index = type & MEMBLOCK_TYPE_PARTITION_INDEX_MASK;
-    const bool uncached = (type & MEMBLOCK_TYPE_MEMORY_ATTR_MASK) == MEMBLOCK_TYPE_MEMORY_ATTR_NORMAL_NC;
-    if (partition_index == MEMBLOCK_TYPE_PARTITION_INDEX_USER_CDRAM)
-        return USER_CDRAM_BASE;
-    if (partition_index == MEMBLOCK_TYPE_PARTITION_INDEX_USER_CDIALOG)
-        return uncached ? USER_CDIALOG_UNCACHED_BASE : USER_CDIALOG_BASE;
-    return uncached ? USER_UNCACHED_BASE : USER_MAIN_BASE;
-}
-
-// The smallest alignment of a block of the type, which for a user type depends on its ScePhyMemPart
-static SceSize min_alignment(SceKernelMemBlockType type) {
-    if (type & MEMBLOCK_TYPE_KERNEL_MASK)
-        return MEMBLOCK_MIN_ALIGNMENT;
-    switch (type & MEMBLOCK_TYPE_PHYMEMPART_MASK) {
-    case MEMBLOCK_TYPE_PHYMEMPART_CDRAM:
-        return MEMBLOCK_CDRAM_MIN_ALIGNMENT;
-    case MEMBLOCK_TYPE_PHYMEMPART_PHYCONT:
-        return MEMBLOCK_PHYCONT_MIN_ALIGNMENT;
-    default:
-        return MEMBLOCK_MIN_ALIGNMENT;
-    }
-}
-
-// Adds size, negative for a freed block, to the allocated count of the partition a block of the type
-// takes from. Common dialog blocks take from none.
-static void count_block(SysmemState &state, SceKernelMemBlockType type, SceSSize size) {
-    if ((type & MEMBLOCK_TYPE_PARTITION_INDEX_MASK) == MEMBLOCK_TYPE_PARTITION_INDEX_USER_CDIALOG)
-        return;
-    switch (type & MEMBLOCK_TYPE_PHYMEMPART_MASK) {
-    case MEMBLOCK_TYPE_PHYMEMPART_CDRAM:
-        state.allocated_cdram += size;
-        break;
-    case MEMBLOCK_TYPE_PHYMEMPART_PHYCONT:
-        state.allocated_phycont += size;
-        break;
-    case MEMBLOCK_TYPE_PHYMEMPART_CDIALOG:
-        break;
-    default:
-        state.allocated_user += size;
-        break;
-    }
-}
-
-SceUID add_block(SysmemState &state, const char *name, SceKernelMemBlockType type, Address base, SceSize size) {
-    const SceUID uid = state.get_next_uid();
-    const auto block = std::make_shared<KernelMemBlock>();
-    block->type = type;
-    block->mappedBase = Ptr<void>(base);
-    block->mappedSize = size;
-    block->size = sizeof(SceKernelMemBlockInfo);
-    // What the info calls report: the normal memory type bits of the memory attributes, and an app's
-    // read and write access
-    block->memoryType = ((type & MEMBLOCK_TYPE_MEMORY_ATTR_MASK) >> MEMBLOCK_TYPE_MEMORY_ATTR_SHIFT) & SCE_KERNEL_MEMORY_TYPE_NORMAL;
-    block->access = ((type & MEMBLOCK_TYPE_USER_ACCESS_MASK) >> MEMBLOCK_TYPE_USER_ACCESS_SHIFT) & (SCE_KERNEL_MEMORY_ACCESS_R | SCE_KERNEL_MEMORY_ACCESS_W);
-    std::strncpy(block->name, name, KERNELOBJECT_MAX_NAME_LENGTH);
-    state.blocks.emplace(uid, block);
-    count_block(state, type, size);
-    return uid;
-}
-
-EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType type, SceSize size, SceKernelAllocMemBlockOptKernel *opt) {
+EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType type, SceSize size, SceKernelAllocMemBlockKernelOpt *opt) {
     MemState &mem = emuenv.mem;
 
     if (!name || !size) {
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
     }
 
-    SceSize alignment = min_alignment(type);
+    int min_alignment;
+    switch (type) {
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RX:
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW:
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE:
+        min_alignment = 0x1000;
+        break;
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW:
+        min_alignment = 0x40000;
+        break;
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW:
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW:
+        min_alignment = 0x100000;
+        break;
+    default:
+        min_alignment = 0x1000;
+        break;
+    }
+
+    SceSize alignment = min_alignment;
     Address base_address = 0;
 
     if (opt) {
-        constexpr SceUInt32 IMPLEMENTED_ATTRS = SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_VBASE | SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT;
-        if (const SceUInt32 ignored = opt->attr & ~IMPLEMENTED_ATTRS)
-            LOG_WARN("ksceKernelAllocMemBlock: ignoring attributes {} of block {}", log_hex(ignored), name);
         if (opt->attr & SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_VBASE) {
-            base_address = opt->vbase.address();
+            base_address = opt->field_C;
         }
         if (opt->attr & SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT) {
             if (opt->alignment & (opt->alignment - 1))
@@ -164,6 +119,9 @@ EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType 
     const auto state = emuenv.kernel.obj_store.get<SysmemState>();
     const auto guard = std::lock_guard<std::mutex>(state->mutex);
 
+    if (sysmem::takes_from_user(type) && sysmem::exceeds_user_memory_budget(type, state->allocated_user, size, get_max_user_memory(emuenv)))
+        return RET_ERROR(SCE_KERNEL_ERROR_NO_MEMORY);
+
     Ptr<void> address;
     if (base_address) {
         Address addr = alloc_at(mem, base_address, size, name);
@@ -172,13 +130,54 @@ EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType 
         }
         address = Ptr<void>(addr);
     } else {
-        address = Ptr<void>(alloc_aligned(mem, size, name, alignment, region_start(type)));
+        // Pick start address based on type
+        Address start_address;
+        switch (type) {
+        case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE:
+        case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW:
+            start_address = 0x70000000U;
+            break;
+        case SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW:
+            start_address = 0x60000000U;
+            break;
+        default:
+            start_address = 0x80000000U;
+            break;
+        }
+        address = Ptr<void>(alloc_aligned(mem, size, name, alignment, start_address));
         if (!address) {
             return RET_ERROR(SCE_KERNEL_ERROR_NO_MEMORY);
         }
     }
 
-    return add_block(*state, name, type, address.address(), size);
+    const SceUID uid = state->get_next_uid();
+    const auto block = std::make_shared<KernelMemBlock>();
+    block->type = type;
+    block->mappedBase = address;
+    block->mappedSize = size;
+    block->size = sizeof(SceKernelMemBlockInfo);
+    std::strncpy(block->name, name, KERNELOBJECT_MAX_NAME_LENGTH);
+    state->blocks.emplace(uid, block);
+
+    switch (type) {
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RX:
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW:
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE:
+        state->allocated_user += size;
+        break;
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW:
+        state->allocated_cdram += size;
+        break;
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW:
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW:
+        state->allocated_phycont += size;
+        break;
+    default:
+        state->allocated_user += size;
+        break;
+    }
+
+    return uid;
 }
 
 EXPORT(int, ksceKernelAllocMemBlockWithInfo) {
@@ -262,15 +261,41 @@ EXPORT(int, ksceKernelFreeHeapMemoryFromGlobalHeap) {
 }
 
 EXPORT(int, ksceKernelFreeMemBlock, SceUID uid) {
+    if (emuenv.renderer && renderer::has_dormant_mappings()) {
+        guest_sched_release_for_block();
+        renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryUnmapFlush, true, static_cast<uint32_t>(thread_id));
+    }
+
     const auto state = emuenv.kernel.obj_store.get<SysmemState>();
     const auto guard = std::lock_guard<std::mutex>(state->mutex);
 
     const Blocks::const_iterator block = state->blocks.find(uid);
     if (block == state->blocks.end())
-        return RET_ERROR(SCE_KERNEL_ERROR_INVALID_UID);
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_BLOCK_ID);
 
     free(emuenv.mem, block->second->mappedBase.address());
-    count_block(*state, block->second->type, -static_cast<SceSSize>(block->second->mappedSize));
+
+    // size is sizeof(SceKernelMemBlockInfo); allocation counted the mapped size
+    switch (block->second->type) {
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RX:
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW:
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE:
+        state->allocated_user -= block->second->mappedSize;
+        break;
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW:
+        state->allocated_cdram -= block->second->mappedSize;
+        break;
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW:
+    case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW:
+        state->allocated_phycont -= block->second->mappedSize;
+        break;
+    default:
+        state->allocated_user -= block->second->mappedSize;
+        break;
+    }
+
+    // a VM block freed here must not be freed or uncounted again through the VM path
+    state->vm_blocks.erase(uid);
     state->blocks.erase(block);
     return SCE_KERNEL_OK;
 }

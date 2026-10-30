@@ -168,6 +168,18 @@ internal fun OverlaySettingsRows(
             onShowHelp = onShowHelp
         )
         SettingsToggleRow(
+            title = stringResource(R.string.settings_controls_touch_switch_tilt),
+            checked = overlayConfig.touchSwitchTilt,
+            onCheckedChange = { onOverlayConfigChange(overlayConfig.copy(touchSwitchTilt = it)) },
+            enabled = overlayConfig.controlsVisible && overlayConfig.touchSwitchVisible,
+            help = SettingsHelpEntry(
+                title = stringResource(R.string.settings_controls_touch_switch_tilt),
+                body = stringResource(R.string.settings_controls_touch_switch_tilt_desc),
+                scope = SettingsScope.Global
+            ),
+            onShowHelp = onShowHelp
+        )
+        SettingsToggleRow(
             title = stringResource(R.string.settings_controls_hide_toggle),
             checked = overlayConfig.hideToggleVisible,
             onCheckedChange = { onOverlayConfigChange(overlayConfig.withHideToggleVisible(it)) },

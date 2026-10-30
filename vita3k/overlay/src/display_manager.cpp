@@ -192,7 +192,6 @@ void display_manager::set_flip_request_callback(std::function<void()> cb) {
 void display_manager::attach_thread_input(
     const std::string_view &name,
     std::shared_ptr<user_interface> target,
-    uint32_t priority,
     std::function<void()> on_input_loop_enter,
     std::function<void(int32_t)> on_input_loop_exit,
     std::function<int32_t()> input_loop_override) {
@@ -207,7 +206,6 @@ void display_manager::attach_thread_input(
 
         m_input_token_stack.push_back({ name,
             std::move(target),
-            priority,
             std::move(on_input_loop_enter),
             std::move(on_input_loop_exit),
             std::move(input_loop_override),
@@ -232,10 +230,6 @@ void display_manager::input_thread_loop() {
             std::lock_guard lock(m_input_stack_guard);
             batch.swap(m_input_token_stack);
         }
-        std::stable_sort(batch.begin(), batch.end(),
-            [](const auto &a, const auto &b) {
-                return a.priority < b.priority;
-            });
 
         for (auto &input_context : batch) {
             if (!input_context.target || input_context.target->is_detached()) {
@@ -265,6 +259,7 @@ void display_manager::input_thread_loop() {
                 input_context.prologue_completed = true;
             }
 
+            m_active_input_loops.fetch_add(1, std::memory_order_relaxed);
             int32_t result;
             if (input_context.input_loop_override) {
                 result = input_context.input_loop_override();
@@ -280,6 +275,7 @@ void display_manager::input_thread_loop() {
                     return m_input_token_stack.empty();
                 });
             }
+            m_active_input_loops.fetch_sub(1, std::memory_order_relaxed);
 
             if (result == user_interface::selection_code::interrupted) {
                 assert(m_input_thread_interrupted.load());

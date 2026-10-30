@@ -17,12 +17,6 @@
 
 #include <module/module.h>
 
-#include <kernel/state.h>
-
-#include <np/common.h>
-#include <np/state.h>
-
-// Handles are simulated. TSS reads fail explicitly without PSN storage or a network worker.
 enum SceNpCommunityServerErrorCode : uint32_t {
     SCE_NP_COMMUNITY_SERVER_ERROR_BAD_REQUEST = 0x80550801,
     SCE_NP_COMMUNITY_SERVER_ERROR_INVALID_TICKET = 0x80550802,
@@ -97,127 +91,52 @@ enum SceNpCommunityErrorCode : uint32_t {
     SCE_NP_COMMUNITY_ERROR_NO_RESOURCE = 0x80550716
 };
 
-bool is_valid_title_context(const NpTusState &tus, SceInt32 titleCtxId) {
-    return tus.title_contexts.contains(titleCtxId);
+EXPORT(int, sceNpTssGetData) {
+    return UNIMPLEMENTED();
 }
 
-// The caller must hold tus.access_mutex until it has finished using the request.
-NpTusRequest *get_request(NpTusState &tus, SceInt32 requestId) {
-    const auto request = tus.requests.find(requestId);
-    if (request == tus.requests.end())
-        return nullptr;
-
-    return is_valid_title_context(tus, request->second.title_context_id) ? &request->second : nullptr;
-}
-
-int get_tss_data(NpTusState &tus, const char *export_name, SceInt32 requestId, SceInt32 slotId,
-    np::SceNpTssDataStatus *dataStatus, SceSize dataStatusSize, bool async) {
-    std::lock_guard lock(tus.access_mutex);
-    if (!tus.inited)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED);
-
-    auto *request = get_request(tus, requestId);
-    if (!request)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ID);
-    if (!dataStatus)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT);
-    if (dataStatusSize != sizeof(*dataStatus) || slotId < 0 || slotId > 15)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT);
-    if (request->result)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_TRANSACTION_ALREADY_END);
-
-    *dataStatus = {};
-    request->result = static_cast<SceInt32>(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
-    LOG_WARN_ONCE("Stubbed {} import called. TSS content is unavailable without PSN storage.", export_name);
-    return async ? 0 : RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
-}
-
-int get_tss_small_storage(NpTusState &tus, const char *export_name, SceInt32 requestId, void *data,
-    SceSize maxSize, SceSize *contentLength, const void *option, bool async) {
-    std::lock_guard lock(tus.access_mutex);
-    if (!tus.inited)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED);
-
-    auto *request = get_request(tus, requestId);
-    if (!request)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ID);
-    if (!data || !contentLength)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT);
-    if (option || maxSize > 64 * 1024)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT);
-    if (request->result)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_TRANSACTION_ALREADY_END);
-
-    *contentLength = 0;
-    request->result = static_cast<SceInt32>(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
-    LOG_WARN_ONCE("Stubbed {} import called. TSS content is unavailable without PSN storage.", export_name);
-    return async ? 0 : RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
-}
-
-int get_async_result(NpTusState &tus, const char *export_name, SceInt32 requestId, SceInt32 *result) {
-    std::lock_guard lock(tus.access_mutex);
-    if (!tus.inited)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED);
-
-    const auto *request = get_request(tus, requestId);
-    if (!request)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ID);
-    if (!result || !request->result)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT);
-
-    *result = *request->result;
-    return 0;
-}
-
-EXPORT(int, sceNpTssGetData, SceInt32 requestId, SceInt32 slotId, np::SceNpTssDataStatus *dataStatus,
-    SceSize dataStatusSize, void *data, SceSize recvSize, const void *option) {
-    return get_tss_data(emuenv.np.tus_state, export_name, requestId, slotId, dataStatus, dataStatusSize, false);
-}
-
-EXPORT(int, sceNpTssGetDataAsync, SceInt32 requestId, SceInt32 slotId, np::SceNpTssDataStatus *dataStatus,
-    SceSize dataStatusSize, void *data, SceSize recvSize, const void *option) {
-    return get_tss_data(emuenv.np.tus_state, export_name, requestId, slotId, dataStatus, dataStatusSize, true);
+EXPORT(int, sceNpTssGetDataAsync) {
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTssGetDataNoLimit) {
-    STUBBED("TSS content is unavailable, returning NO_RESOURCE");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTssGetDataNoLimitAsync) {
-    STUBBED("TSS content is unavailable, returning NO_RESOURCE without starting a request");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpTssGetSmallStorage, SceInt32 requestId, void *data, SceSize maxSize, SceSize *contentLength, const void *option) {
-    return get_tss_small_storage(emuenv.np.tus_state, export_name, requestId, data, maxSize, contentLength, option, false);
+EXPORT(int, sceNpTssGetSmallStorage, SceInt32 requestId, char *pBuffer, SceSize bSize, SceSize *contentLength, void *optionPtr) {
+    std::string buffer = "";
+    strcpy(pBuffer, buffer.c_str());
+    *contentLength = buffer.size();
+
+    // TSS files come from PSN and are unavailable unless dumped
+    LOG_WARN_ONCE("Stubbed {} import called. ({})", export_name, "Returning empty string w/ NO_RESOURCE for TSS Content");
+    return SCE_NP_COMMUNITY_ERROR_NO_RESOURCE;
 }
 
-EXPORT(int, sceNpTssGetSmallStorageAsync, SceInt32 requestId, void *data, SceSize maxSize, SceSize *contentLength, const void *option) {
-    return get_tss_small_storage(emuenv.np.tus_state, export_name, requestId, data, maxSize, contentLength, option, true);
+EXPORT(int, sceNpTssGetSmallStorageAsync, SceInt32 requestId, char *pBuffer, SceSize bSize, SceSize *contentLength, void *optionPtr) {
+    std::string buffer = "";
+    strcpy(pBuffer, buffer.c_str());
+    *contentLength = buffer.size();
+
+    // TSS files come from PSN and are unavailable unless dumped
+    LOG_WARN_ONCE("Stubbed {} import called. ({})", export_name, "Returning empty string w/ NO_RESOURCE for TSS Content");
+    return SCE_NP_COMMUNITY_ERROR_NO_RESOURCE;
 }
 
 EXPORT(int, sceNpTssGetStorage) {
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTssGetStorageAsync) {
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpTusAbortRequest, SceInt32 requestId) {
-    auto &tus = emuenv.np.tus_state;
-    std::lock_guard lock(tus.access_mutex);
-    if (!tus.inited)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED);
-
-    auto *request = get_request(tus, requestId);
-    if (!request)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ID);
-
-    if (!request->result)
-        request->result = static_cast<SceInt32>(SCE_NP_COMMUNITY_ERROR_ABORTED);
-    return 0;
+EXPORT(int, sceNpTusAbortRequest) {
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusAddAndGetVariable) {
@@ -225,8 +144,7 @@ EXPORT(int, sceNpTusAddAndGetVariable) {
 }
 
 EXPORT(int, sceNpTusAddAndGetVariableAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusAddAndGetVariableVUser) {
@@ -234,55 +152,19 @@ EXPORT(int, sceNpTusAddAndGetVariableVUser) {
 }
 
 EXPORT(int, sceNpTusAddAndGetVariableVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusChangeModeForOtherSaveDataOwners) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpTusCreateRequest, SceInt32 titleCtxId) {
-    auto &tus = emuenv.np.tus_state;
-    std::lock_guard lock(tus.access_mutex);
-    if (!tus.inited)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED);
-    if (!is_valid_title_context(tus, titleCtxId))
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ID);
-
-    if (tus.requests.size() >= SCE_NP_TUS_MAX_CTX_NUM)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_TOO_MANY_OBJECTS);
-
-    const SceUID requestId = emuenv.kernel.get_next_uid();
-    if (requestId <= 0)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
-
-    if (!tus.requests.try_emplace(requestId, NpTusRequest{ titleCtxId, std::nullopt }).second)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
-
-    STUBBED("Simulated request handle, no network request is started");
-    return requestId;
+EXPORT(int, sceNpTusCreateRequest) {
+    return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpTusCreateTitleCtx, const np::CommunicationID *communicationId,
-    const np::SceNpCommunicationPassphrase *passphrase, const np::SceNpId *selfNpId) {
-    auto &tus = emuenv.np.tus_state;
-    std::lock_guard lock(tus.access_mutex);
-    if (!tus.inited)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED);
-
-    if (tus.title_contexts.size() >= SCE_NP_TUS_MAX_CTX_NUM)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_TOO_MANY_OBJECTS);
-
-    const SceUID titleCtxId = emuenv.kernel.get_next_uid();
-    if (titleCtxId <= 0)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
-
-    if (!tus.title_contexts.try_emplace(titleCtxId, true).second)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
-
-    STUBBED("Simulated title context, communication credentials and user defaults are not resolved");
-    return titleCtxId;
+EXPORT(int, sceNpTusCreateTitleCtx) {
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusDeleteMultiSlotData) {
@@ -290,8 +172,7 @@ EXPORT(int, sceNpTusDeleteMultiSlotData) {
 }
 
 EXPORT(int, sceNpTusDeleteMultiSlotDataAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusDeleteMultiSlotDataVUser) {
@@ -299,8 +180,7 @@ EXPORT(int, sceNpTusDeleteMultiSlotDataVUser) {
 }
 
 EXPORT(int, sceNpTusDeleteMultiSlotDataVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusDeleteMultiSlotVariable) {
@@ -308,8 +188,7 @@ EXPORT(int, sceNpTusDeleteMultiSlotVariable) {
 }
 
 EXPORT(int, sceNpTusDeleteMultiSlotVariableAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusDeleteMultiSlotVariableVUser) {
@@ -317,40 +196,15 @@ EXPORT(int, sceNpTusDeleteMultiSlotVariableVUser) {
 }
 
 EXPORT(int, sceNpTusDeleteMultiSlotVariableVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpTusDeleteRequest, SceInt32 requestId) {
-    auto &tus = emuenv.np.tus_state;
-    std::lock_guard lock(tus.access_mutex);
-    if (!tus.inited)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED);
-
-    auto *request = get_request(tus, requestId);
-    if (!request)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ID);
-
-    tus.requests.erase(requestId);
-    LOG_DEBUG("sceNpTusDeleteRequest: requestId: {}", requestId);
-    return 0;
+EXPORT(int, sceNpTusDeleteRequest) {
+    return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpTusDeleteTitleCtx, SceInt32 titleCtxId) {
-    auto &tus = emuenv.np.tus_state;
-    std::lock_guard lock(tus.access_mutex);
-    if (!tus.inited)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED);
-
-    if (!is_valid_title_context(tus, titleCtxId))
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ID);
-
-    std::erase_if(tus.requests, [titleCtxId](const auto &request) {
-        return request.second.title_context_id == titleCtxId;
-    });
-    tus.title_contexts.erase(titleCtxId);
-    LOG_DEBUG("sceNpTusDeleteTitleCtx: titleCtxId: {}", titleCtxId);
-    return 0;
+EXPORT(int, sceNpTusDeleteTitleCtx) {
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetData) {
@@ -358,8 +212,7 @@ EXPORT(int, sceNpTusGetData) {
 }
 
 EXPORT(int, sceNpTusGetDataAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetDataVUser) {
@@ -367,8 +220,7 @@ EXPORT(int, sceNpTusGetDataVUser) {
 }
 
 EXPORT(int, sceNpTusGetDataVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetFriendsDataStatus) {
@@ -376,8 +228,7 @@ EXPORT(int, sceNpTusGetFriendsDataStatus) {
 }
 
 EXPORT(int, sceNpTusGetFriendsDataStatusAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetFriendsVariable) {
@@ -385,8 +236,7 @@ EXPORT(int, sceNpTusGetFriendsVariable) {
 }
 
 EXPORT(int, sceNpTusGetFriendsVariableAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetMultiSlotDataStatus) {
@@ -394,8 +244,7 @@ EXPORT(int, sceNpTusGetMultiSlotDataStatus) {
 }
 
 EXPORT(int, sceNpTusGetMultiSlotDataStatusAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetMultiSlotDataStatusVUser) {
@@ -403,8 +252,7 @@ EXPORT(int, sceNpTusGetMultiSlotDataStatusVUser) {
 }
 
 EXPORT(int, sceNpTusGetMultiSlotDataStatusVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetMultiSlotVariable) {
@@ -412,8 +260,7 @@ EXPORT(int, sceNpTusGetMultiSlotVariable) {
 }
 
 EXPORT(int, sceNpTusGetMultiSlotVariableAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetMultiSlotVariableVUser) {
@@ -421,8 +268,7 @@ EXPORT(int, sceNpTusGetMultiSlotVariableVUser) {
 }
 
 EXPORT(int, sceNpTusGetMultiSlotVariableVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetMultiUserDataStatus) {
@@ -430,8 +276,7 @@ EXPORT(int, sceNpTusGetMultiUserDataStatus) {
 }
 
 EXPORT(int, sceNpTusGetMultiUserDataStatusAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetMultiUserDataStatusVUser) {
@@ -439,8 +284,7 @@ EXPORT(int, sceNpTusGetMultiUserDataStatusVUser) {
 }
 
 EXPORT(int, sceNpTusGetMultiUserDataStatusVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetMultiUserVariable) {
@@ -448,8 +292,7 @@ EXPORT(int, sceNpTusGetMultiUserVariable) {
 }
 
 EXPORT(int, sceNpTusGetMultiUserVariableAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusGetMultiUserVariableVUser) {
@@ -457,27 +300,15 @@ EXPORT(int, sceNpTusGetMultiUserVariableVUser) {
 }
 
 EXPORT(int, sceNpTusGetMultiUserVariableVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpTusInit, SceInt32 threadPriority, SceInt32 cpuAffinityMask, const void *option) {
-    auto &tus = emuenv.np.tus_state;
-    std::lock_guard lock(tus.access_mutex);
-    if (tus.inited)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_ALREADY_INITIALIZED);
-
-    if (option)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT);
-
-    tus.title_contexts.clear();
-    tus.requests.clear();
-    tus.inited = true;
-    return STUBBED("Simulated TUS initialization, worker priority and affinity are ignored");
+EXPORT(int, sceNpTusInit) {
+    return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpTusPollAsync, SceInt32 requestId, SceInt32 *result) {
-    return get_async_result(emuenv.np.tus_state, export_name, requestId, result);
+EXPORT(int, sceNpTusPollAsync) {
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusSetData) {
@@ -485,8 +316,7 @@ EXPORT(int, sceNpTusSetData) {
 }
 
 EXPORT(int, sceNpTusSetDataAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusSetDataVUser) {
@@ -494,8 +324,7 @@ EXPORT(int, sceNpTusSetDataVUser) {
 }
 
 EXPORT(int, sceNpTusSetDataVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusSetMultiSlotVariable) {
@@ -503,8 +332,7 @@ EXPORT(int, sceNpTusSetMultiSlotVariable) {
 }
 
 EXPORT(int, sceNpTusSetMultiSlotVariableAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusSetMultiSlotVariableVUser) {
@@ -512,8 +340,7 @@ EXPORT(int, sceNpTusSetMultiSlotVariableVUser) {
 }
 
 EXPORT(int, sceNpTusSetMultiSlotVariableVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusSetTimeout) {
@@ -521,15 +348,7 @@ EXPORT(int, sceNpTusSetTimeout) {
 }
 
 EXPORT(int, sceNpTusTerm) {
-    auto &tus = emuenv.np.tus_state;
-    std::lock_guard lock(tus.access_mutex);
-    if (!tus.inited)
-        return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED);
-
-    tus.title_contexts.clear();
-    tus.requests.clear();
-    tus.inited = false;
-    return 0;
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusTryAndSetVariable) {
@@ -537,8 +356,7 @@ EXPORT(int, sceNpTusTryAndSetVariable) {
 }
 
 EXPORT(int, sceNpTusTryAndSetVariableAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceNpTusTryAndSetVariableVUser) {
@@ -546,10 +364,9 @@ EXPORT(int, sceNpTusTryAndSetVariableVUser) {
 }
 
 EXPORT(int, sceNpTusTryAndSetVariableVUserAsync) {
-    STUBBED("TUS operation is unavailable, no asynchronous request is started");
-    return RET_ERROR(SCE_NP_COMMUNITY_ERROR_NO_RESOURCE);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpTusWaitAsync, SceInt32 requestId, SceInt32 *result) {
-    return get_async_result(emuenv.np.tus_state, export_name, requestId, result);
+EXPORT(int, sceNpTusWaitAsync) {
+    return UNIMPLEMENTED();
 }

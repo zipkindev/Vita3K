@@ -26,15 +26,14 @@
 #include <config/version.h>
 #include <modules/module_parent.h>
 #include <renderer/functions.h>
+#include <util/android_driver.h>
 #include <util/log.h>
-#include <util/sysinfo.h>
+#include <util/mem_snapshot.h>
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
-#include <fmt/format.h>
 
-#include <sys/system_properties.h>
-
+#include <cstdlib>
 #include <filesystem>
 #include <span>
 #include <vector>
@@ -54,28 +53,17 @@ std::string format_app_version() {
     return version;
 }
 
-std::string get_system_property(const char *key) {
-    char value[PROP_VALUE_MAX] = {};
-    __system_property_get(key, value);
-    return value;
-}
-
-std::string get_os_version() {
-    return fmt::format("Android {} (API {})", get_system_property("ro.build.version.release"),
-        get_system_property("ro.build.version.sdk"));
-}
-
 bool initialize_session(const fs::path &storage_path, Root &root_paths, std::unique_ptr<EmuEnvState> &emuenv) {
     try {
-        const fs::path vita_path = storage_path / "vita";
+        const fs::path vita_path = storage_path / "vita" / "";
 
         root_paths.set_static_assets_path({});
         root_paths.set_vita_fs_path(vita_path);
         root_paths.set_log_path(storage_path);
         root_paths.set_config_path(storage_path);
         root_paths.set_shared_path(storage_path);
-        root_paths.set_cache_path(storage_path / "cache");
-        root_paths.set_patch_path(storage_path / "patch");
+        root_paths.set_cache_path(storage_path / "cache" / "");
+        root_paths.set_patch_path(storage_path / "patch" / "");
 
         if (!fs::exists(root_paths.get_vita_fs_path()))
             fs::create_directories(root_paths.get_vita_fs_path());
@@ -91,23 +79,33 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
             return false;
 
         LOG_INFO("{}", window_title);
-        LOG_INFO("OS: {}", get_os_version());
-        LOG_INFO("Device: {} {}", get_system_property("ro.product.manufacturer"), get_system_property("ro.product.model"));
-        LOG_INFO("CPU: {}", util::get_system_info());
-        LOG_INFO("Available ram memory: {} MiB", SDL_GetSystemRAM());
 
         emuenv = std::make_unique<EmuEnvState>();
 
         Config cfg{};
         char arg0[] = "vita3k";
         char *argv[] = { arg0, nullptr };
-        if (config::init_config(cfg, 1, argv, root_paths, false) != Success) {
+        if (config::init_config(cfg, 1, argv, root_paths) != Success) {
             LOG_ERROR("Failed to initialise config.");
             emuenv.reset();
             return false;
         }
 
         fs::create_directories(cfg.get_vita_fs_path());
+
+#ifdef NDEBUG
+        const char *build_kind = "release/optimized (NDEBUG)";
+#else
+        const char *build_kind = "debug/unoptimized";
+#endif
+        LOG_INFO("BUILD IDENTITY: {} | compiled {} {} (this TU)", build_kind, __DATE__, __TIME__);
+        android_driver::log_device_identity();
+        mem_diag::log_memory_snapshot("session-start");
+
+        if (!cfg.tu_debug.empty()) {
+            setenv("TU_DEBUG", cfg.tu_debug.c_str(), 1);
+            LOG_INFO("TU_DEBUG set to '{}' for the Turnip driver", cfg.tu_debug);
+        }
 
         if (!app::init(*emuenv, cfg, root_paths)) {
             LOG_ERROR("Failed to initialise emulated environment.");
@@ -116,6 +114,11 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
         }
 
         emuenv->vulkan_device_info = std::make_unique<renderer::VulkanDeviceInfo>(renderer::enumerate_vulkan_devices());
+
+        if (emuenv->cfg.controller_binds.empty() || emuenv->cfg.controller_binds.size() != 15
+            || emuenv->cfg.controller_axis_binds.empty() || emuenv->cfg.controller_axis_binds.size() != 6) {
+            app::reset_controller_binding(*emuenv);
+        }
 
         init_libraries(*emuenv);
 
@@ -138,8 +141,6 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
 
 bool prepare_frontend_runtime() {
     SDL_SetMainReady();
-
-    SDL_SetAppMetadata(window_title, app_version, "org.vita3k.emulator");
 
     if (SDL_WasInit(SDL_INIT_CAMERA) & SDL_INIT_CAMERA)
         return true;
@@ -171,6 +172,44 @@ JNIEXPORT jboolean JNICALL
 Java_org_vita3k_emulator_NativeLib_prepareFrontend(JNIEnv *, jclass) {
     return prepare_frontend_runtime() ? JNI_TRUE : JNI_FALSE;
 }
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_onTrimMemory(JNIEnv *, jclass, jint level) {
+    // Android is warning it may reclaim memory and/or kill us
+    LOG_INFO("[ANDROID MEMORY] onTrimMemory level={} - OS under memory pressure, an OOM kill may follow", static_cast<int>(level));
+    mem_diag::log_memory_snapshot("onTrimMemory");
+    logging::flush();
+
+    constexpr int trim_running_low = 10;
+    if (static_cast<int>(level) < trim_running_low)
+        return;
+
+    // Hand the request to the render thread - it owns every GPU object involved. Keep the highest
+    // level seen until it is serviced.
+    EmuEnvState *emuenv = android_session_state().emuenv.get();
+    if (!emuenv || !emuenv->renderer)
+        return;
+    std::atomic<int> &pending = emuenv->renderer->memory_trim_level;
+    int seen = pending.load(std::memory_order_relaxed);
+    while (static_cast<int>(level) > seen
+        && !pending.compare_exchange_weak(seen, static_cast<int>(level), std::memory_order_relaxed))
+        ;
+}
+
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_logDiagnostics(JNIEnv *env, jclass, jstring text_str) {
+    const std::string text = jstring_to_string(env, text_str);
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find('\n', start);
+        const std::string line = text.substr(start, (end == std::string::npos) ? std::string::npos : end - start);
+        if (!line.empty())
+            LOG_INFO("[ANDROID DIAG] {}", line);
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    logging::flush();
+}
 
 JNIEXPORT jboolean JNICALL
 Java_org_vita3k_emulator_NativeLib_init(JNIEnv *env, jclass, jstring storage_path_str) {
@@ -182,7 +221,7 @@ Java_org_vita3k_emulator_NativeLib_init(JNIEnv *env, jclass, jstring storage_pat
     }
 
     const std::string storage = jstring_to_string(env, storage_path_str);
-    const fs::path storage_path = fs::path(storage);
+    const fs::path storage_path = fs::path(storage) / "";
     Root root_paths;
     std::unique_ptr<EmuEnvState> emuenv;
     if (!initialize_session(storage_path, root_paths, emuenv))
@@ -191,6 +230,23 @@ Java_org_vita3k_emulator_NativeLib_init(JNIEnv *env, jclass, jstring storage_pat
     session.root_paths = std::move(root_paths);
     session.emuenv = std::move(emuenv);
     session.app_session_controller = std::make_unique<app::AppSessionController>(*session.emuenv);
+
+    if (jclass diag_class = env->FindClass("org/vita3k/emulator/AndroidDiagnostics")) {
+        const jmethodID diag_method = env->GetStaticMethodID(diag_class, "logStartupDiagnostics", "()V");
+        if (diag_method != nullptr)
+            env->CallStaticVoidMethod(diag_class, diag_method);
+        else
+            LOG_ERROR("[ANDROID DIAG] logStartupDiagnostics method not found - exit-reason reporting is broken");
+        if (env->ExceptionCheck()) {
+            LOG_ERROR("[ANDROID DIAG] logStartupDiagnostics threw - exit-reason reporting is broken");
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(diag_class);
+    } else {
+        LOG_ERROR("[ANDROID DIAG] AndroidDiagnostics class not found (R8-stripped? check proguard-rules.pro) - exit-reason reporting is broken");
+        if (env->ExceptionCheck())
+            env->ExceptionClear();
+    }
 
     LOG_INFO("Vita3K Android initialised.");
     return JNI_TRUE;

@@ -17,10 +17,12 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
 #include <renderer/state.h>
 #include <renderer/types.h>
+#include <util/sync_wait_profile.h>
 
 #include <display/state.h>
 #include <renderer/gl/functions.h>
@@ -72,6 +74,7 @@ COMMAND(handle_notification) {
             *val = notif.value;
     }
     renderer.notification_ready.notify_all();
+    note_gpu_event();
 }
 
 COMMAND(handle_set_screen_filter) {
@@ -124,13 +127,30 @@ void finish(State &state, Context *context) {
     // Push a callback request on the queue and wait for it to be treated
     if (state.current_backend == Backend::Vulkan && state.features.enable_memory_mapping) {
         auto &vk_state = static_cast<vulkan::VKState &>(state);
-        std::promise<void> promise;
-        auto callback = [&]() {
-            promise.set_value();
-        };
-        vk_state.request_queue.push(vulkan::CallbackRequest{ new vulkan::CallbackRequestFunction(callback) });
-        promise.get_future().wait();
+        auto promise = std::make_shared<std::promise<void>>();
+        std::future<void> future = promise->get_future();
+        vk_state.request_queue.push(vulkan::CallbackRequest{
+            new vulkan::CallbackRequestFunction([promise]() { promise->set_value(); }), /* wait_for_gpu = */ true });
+
+        while (future.wait_for(std::chrono::milliseconds(5)) != std::future_status::ready) {
+            if (state.render_abort.load(std::memory_order_relaxed) || vk_state.request_queue.is_aborted())
+                return;
+        }
     }
+}
+
+// A list abandoned around or after a wait began may carry the signal that the wait is blocked on
+bool signal_may_be_lost(State &state, const int64_t wait_start_epoch_ms) {
+    if (!recover_from_abandoned_lists)
+        return false;
+    // a signal this late is a wedge rather than a slow frame, and an abandon this old can still be ours
+    constexpr int64_t MIN_WAIT_MS = 2000;
+    constexpr int64_t ABANDON_WINDOW_MS = 60000;
+    const int64_t abandoned = state.last_abandon_epoch_ms.load(std::memory_order_relaxed);
+    if (abandoned == 0)
+        return false;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    return now - wait_start_epoch_ms >= MIN_WAIT_MS && abandoned + ABANDON_WINDOW_MS >= wait_start_epoch_ms;
 }
 
 int wait_for_status(State &state, int *status, int signal, bool wake_on_equal) {
@@ -141,16 +161,31 @@ int wait_for_status(State &state, int *status, int signal, bool wake_on_equal) {
         return *status;
     }
 
+    util::SyncWaitScope measured_wait(util::WaitKind::RendererStatus,
+        { reinterpret_cast<uintptr_t>(status), static_cast<uint32_t>(signal) });
     // unblock threads if shutting down
-    state.command_finish_one.wait(lock, [&]() {
+    const auto ready = [&]() {
         return state.render_abort.load(std::memory_order_relaxed)
             || ((*status == signal) ^ wake_on_unequal);
-    });
-    return *status;
+    };
+    const int64_t wait_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    while (!state.command_finish_one.wait_for(lock, std::chrono::milliseconds(250), ready)) {
+        if (!signal_may_be_lost(state, wait_start_ms))
+            continue;
+        // the command that would complete this status was abandoned, so a stale status beats never returning
+        static std::atomic<uint32_t> released{ 0 };
+        const uint32_t n = released.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8 || (n & 1023) == 0)
+            LOG_ERROR("[CMDLOST] a command list was abandoned while waiting for its completion status; releasing the waiter (#{})", n);
+        break;
+    }
+    return measured_wait.finish(*status);
 }
 
 SyncWaitResult wishlist(SceGxmSyncObject *sync_object, const uint32_t timestamp, const int32_t timeout_micros) {
     std::unique_lock<std::mutex> lock(sync_object->lock);
+    util::SyncWaitScope measured_wait(util::WaitKind::RendererSync,
+        { reinterpret_cast<uintptr_t>(sync_object), timestamp, timeout_micros });
     if (sync_object->timestamp_current < timestamp) {
         const auto &pred = [&]() {
             return sync_object->being_deleted || sync_object->timestamp_current >= timestamp;
@@ -159,12 +194,36 @@ SyncWaitResult wishlist(SceGxmSyncObject *sync_object, const uint32_t timestamp,
         if (timeout_micros == -1) {
             sync_object->cond.wait(lock, pred);
         } else if (!sync_object->cond.wait_for(lock, std::chrono::microseconds(timeout_micros), pred)) {
+            measured_wait.result(static_cast<int32_t>(SyncWaitResult::TimedOut));
             return SyncWaitResult::TimedOut;
         }
     }
-    if (sync_object->being_deleted)
+    if (sync_object->being_deleted) {
+        measured_wait.result(static_cast<int32_t>(SyncWaitResult::Shutdown));
         return SyncWaitResult::Shutdown;
+    }
+    measured_wait.result(static_cast<int32_t>(SyncWaitResult::Ready));
     return SyncWaitResult::Ready;
+}
+
+namespace {
+std::mutex gpu_event_mutex;
+std::condition_variable gpu_event_cond;
+uint64_t gpu_events = 0;
+} // namespace
+
+void note_gpu_event() {
+    {
+        const std::lock_guard<std::mutex> lock(gpu_event_mutex);
+        gpu_events++;
+    }
+    gpu_event_cond.notify_all();
+}
+
+uint64_t wait_gpu_event(const uint64_t seen, const uint32_t timeout_ms) {
+    std::unique_lock<std::mutex> lock(gpu_event_mutex);
+    gpu_event_cond.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] { return gpu_events != seen; });
+    return gpu_events;
 }
 
 void subject_done(SceGxmSyncObject *sync_object, const uint32_t timestamp) {
@@ -175,6 +234,7 @@ void subject_done(SceGxmSyncObject *sync_object, const uint32_t timestamp) {
     }
     // maybe notify_one is enough
     sync_object->cond.notify_all();
+    note_gpu_event();
 }
 
 void submit_command_list(State &state, renderer::Context *context, CommandList &command_list) {

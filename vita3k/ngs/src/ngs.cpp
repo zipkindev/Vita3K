@@ -22,6 +22,7 @@
 #include <ngs/state.h>
 #include <ngs/system.h>
 #include <util/lock_and_find.h>
+#include <util/log.h>
 
 #include <util/vector_utils.h>
 
@@ -41,7 +42,7 @@ bool Patch::is_active() const {
 }
 
 void VoiceInputManager::init(const uint32_t granularity, const uint16_t total_input) {
-    inputs.resize(total_input);
+    inputs.resize(std::max<uint16_t>(1, total_input));
 
     for (auto &input : inputs) {
         // FLTP and maximum channel count
@@ -162,7 +163,14 @@ void Voice::init(Rack *mama) {
     for (uint32_t i = 0; i < MAX_OUTPUT_PORT; i++)
         patches[i].resize(mama->patches_per_output);
 
-    inputs.init(rack->system->granularity, 1);
+    uint16_t input_count = 0;
+    if (size_inputs_by_input_mixer_count) {
+        for (const auto &module : mama->modules) {
+            if (module && module->module_id() == input_mixer_module_id)
+                input_count++;
+        }
+    }
+    inputs.init(rack->system->granularity, std::max<uint16_t>(1, input_count));
     voice_mutex = std::make_unique<std::mutex>();
 }
 
@@ -208,6 +216,10 @@ Ptr<Patch> Voice::patch(const MemState &mem, const int32_t index, int32_t subind
 
     // Initialize the matrix
     memset(patch->volume_matrix, 0, sizeof(patch->volume_matrix));
+    if (default_patch_volume_is_unity) {
+        patch->volume_matrix[0][0] = 1.0f;
+        patch->volume_matrix[1][1] = 1.0f;
+    }
 
     return patches[index][subindex];
 }
@@ -318,24 +330,35 @@ bool Voice::set_preset(const MemState &mem, const SceNgsVoicePreset *preset) {
 
 void Voice::invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, Ptr<void> callback, Ptr<void> user_data,
     const uint32_t module_id, const uint32_t reason1, const uint32_t reason2, Address reason_ptr) {
+    const SceNgsCallbackInfo info{
+        Ptr<void>(this, mem), Ptr<void>(rack, mem), module_id, reason1, reason2, Ptr<void>(reason_ptr), user_data
+    };
+    ngs::invoke_callback(kernel, mem, thread_id, callback, info);
+}
+
+void invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, Ptr<void> callback, const SceNgsCallbackInfo &info) {
     if (!callback) {
         return;
     }
 
+    // the thread can be gone by the time a deferred callback runs
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
-    const Address callback_info_addr = stack_alloc(*thread->cpu, sizeof(SceNgsCallbackInfo));
+    if (!thread) {
+        return;
+    }
 
-    SceNgsCallbackInfo *info = Ptr<SceNgsCallbackInfo>(callback_info_addr).get(mem);
-    info->rack_handle = Ptr<void>(rack, mem);
-    info->voice_handle = Ptr<void>(this, mem);
-    info->module_id = module_id;
-    info->callback_reason = reason1;
-    info->callback_reason_2 = reason2;
-    info->callback_ptr = Ptr<void>(reason_ptr);
-    info->userdata = user_data;
+    const Address callback_info_addr = stack_alloc(*thread->cpu, sizeof(SceNgsCallbackInfo));
+    *Ptr<SceNgsCallbackInfo>(callback_info_addr).get(mem) = info;
 
     thread->run_callback(callback.address(), { callback_info_addr });
     stack_free(*thread->cpu, sizeof(SceNgsCallbackInfo));
+}
+
+SceNgsCallbackInfo Rack::release_callback_info(const MemState &mem) {
+    SceNgsCallbackInfo info{};
+    info.rack_handle = Ptr<void>(this, mem);
+    info.userdata = user_data;
+    return info;
 }
 
 uint32_t System::get_required_memspace_size(SceNgsSystemInitParams *parameters) {
@@ -367,7 +390,8 @@ void deinit(State &ngs, MemState &mem) {
     ngs.definitions = Ptr<VoiceDefinition>(0);
 }
 
-bool init_system(State &ngs, const MemState &mem, SceNgsSystemInitParams *parameters, Ptr<void> memspace, const uint32_t memspace_size) {
+bool init_system(State &ngs, MemState &mem, SceNgsSystemInitParams *parameters, Ptr<void> memspace, const uint32_t memspace_size) {
+    pin_to_arena(mem, memspace.address(), memspace_size);
     // Reserve first memory allocation for our System struct
     System *sys = memspace.cast<System>().get(mem);
     sys = new (sys) System(memspace, memspace_size);
@@ -387,7 +411,7 @@ bool init_system(State &ngs, const MemState &mem, SceNgsSystemInitParams *parame
     return true;
 }
 
-void release_system(State &ngs, const MemState &mem, System *system) {
+void release_system(State &ngs, MemState &mem, System *system) {
     // this function assumes no ngs mutex is being held
     for (Rack *rack : system->racks) {
         if (!rack)
@@ -396,16 +420,21 @@ void release_system(State &ngs, const MemState &mem, System *system) {
             system->voice_scheduler.deque_voice(voice.get(mem));
             voice.get(mem)->~Voice();
         }
+        const Address rack_memspace = rack->memspace.address();
         rack->~Rack();
+        unpin_from_arena(mem, rack_memspace);
     }
 
     system->racks.clear();
 
     vector_utils::erase_first(ngs.systems, system);
+    const Address memspace = system->memspace.address();
     system->~System();
+    unpin_from_arena(mem, memspace);
 }
 
-bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo *init_info, const SceNgsRackDescription *description) {
+bool init_rack(State &ngs, MemState &mem, System *system, SceNgsBufferInfo *init_info, const SceNgsRackDescription *description) {
+    pin_to_arena(mem, init_info->data.address(), init_info->size);
     Rack *rack = init_info->data.cast<Rack>().get(mem);
     rack = new (rack) Rack(system, init_info->data, init_info->size);
 
@@ -423,9 +452,11 @@ bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo
     rack->channels_per_voice = description->channels_per_voice;
     rack->max_patches_per_input = description->max_patches_per_input;
     rack->patches_per_output = description->patches_per_output;
+    rack->user_data = description->user_data;
 
     // Alloc spaces for voice
     rack->voices.resize(description->voice_count);
+    LOG_DEBUG("[NGSLIFE] init_rack {} ({} voices)", fmt::ptr(rack), description->voice_count);
     rack->vdef = description->definition.get(mem);
 
     for (auto &voice : rack->voices) {
@@ -458,10 +489,48 @@ bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo
     return true;
 }
 
-void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack) {
+void release_rack(State &ngs, MemState &mem, System *system, Rack *rack) {
+    LOG_DEBUG("[NGSLIFE] release_rack {} ({} voices)", fmt::ptr(rack), rack ? rack->voices.size() : 0);
     // this function should only be called outside of ngs update and with the scheduler mutex acquired (except when releasing the system)
     if (!rack)
         return;
+
+    // patches of other racks point at voices about to be destroyed
+    for (Rack *source_rack : system->racks) {
+        if (!source_rack || source_rack == rack)
+            continue;
+
+        for (const auto &voice : source_rack->voices) {
+            Voice *source = voice.get(mem);
+            if (!source)
+                continue;
+
+            const std::lock_guard<std::mutex> guard(*source->voice_mutex);
+            for (const auto &output : source->patches) {
+                for (const Ptr<Patch> &handle : output) {
+                    Patch *patch = handle.get(mem);
+                    const Voice *dest = patch ? patch->dest.get(mem) : nullptr;
+                    if (dest && dest->rack == rack) {
+                        patch->output_sub_index = -1;
+                        patch->dest = Ptr<Voice>();
+                        patch->dest_index = -1;
+                    }
+                }
+            }
+        }
+    }
+
+    // finished callbacks queued for voices about to be destroyed
+    {
+        std::queue<OperationPending> kept;
+        auto &pending = system->voice_scheduler.operations_pending;
+        for (; !pending.empty(); pending.pop()) {
+            const OperationPending &op = pending.front();
+            if (op.type != PendingType::VoiceFinished || op.finished_data.voice->rack != rack)
+                kept.push(op);
+        }
+        pending.swap(kept);
+    }
 
     // remove all queued voices
     for (const auto &voice : rack->voices) {
@@ -480,7 +549,9 @@ void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack) {
     vector_utils::erase_first(system->racks, rack);
 
     // free pointer memory
+    const Address memspace = rack->memspace.address();
     rack->~Rack();
+    unpin_from_arena(mem, memspace);
 }
 
 Ptr<VoiceDefinition> get_voice_definition(State &ngs, MemState &mem, ngs::BussType type) {

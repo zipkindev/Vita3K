@@ -35,12 +35,11 @@
 #include <cctype>
 #include <exception>
 #include <iostream>
-#include <map>
 #include <vector>
 
 namespace config {
 static bool is_numeric_scalar(const YAML::Node &node) {
-    if (!node.IsDefined() || !node.IsScalar())
+    if (!node.IsScalar())
         return false;
 
     const std::string value = node.Scalar();
@@ -151,6 +150,8 @@ static void check_members(Config &self, const Config &rhs) {
         self.run_app_path = rhs.run_app_path;
     if (rhs.recompile_shader_path.has_value())
         self.recompile_shader_path = rhs.recompile_shader_path;
+    if (rhs.decode_at9_path.has_value())
+        self.decode_at9_path = rhs.decode_at9_path;
     if (rhs.delete_title_id.has_value())
         self.delete_title_id = rhs.delete_title_id;
     if (rhs.pkg_path.has_value())
@@ -165,9 +166,7 @@ static void check_members(Config &self, const Config &rhs) {
     self.load_config = rhs.load_config;
     self.fullscreen = rhs.fullscreen;
     self.console = rhs.console;
-    self.frontend = rhs.frontend;
     self.app_args = rhs.app_args;
-    self.launch_uri = rhs.launch_uri;
     self.load_app_list = rhs.load_app_list;
     self.self_path = rhs.self_path;
 }
@@ -217,7 +216,7 @@ static YAML::Node get(const Config &self) {
 
 // Load a function to the node network, and then update the members
 static bool load_new_config(Config &self, const fs::path &path) {
-    std::ifstream fin(path);
+    fs::ifstream fin(path);
     YAML::Node yaml_node = YAML::Load(fin);
     const bool legacy_keyboard_bindings = has_legacy_keyboard_bindings(yaml_node);
     update_members(self, yaml_node);
@@ -240,7 +239,7 @@ static std::set<std::string> get_file_set(const fs::path &loc, bool dirs_only = 
             cur_set.insert(it->path().stem().string());
         }
 
-        std::error_code err{};
+        boost::system::error_code err{};
         it.increment(err);
     }
     return cur_set;
@@ -308,7 +307,7 @@ ExitCode serialize_config(Config &cfg, const fs::path &output_path) {
     emitter << out_node;
     emitter << YAML::EndDoc;
 
-    std::ofstream fo(output);
+    fs::ofstream fo(output);
     if (!fo) {
         return InvalidApplicationPath;
     }
@@ -319,7 +318,7 @@ ExitCode serialize_config(Config &cfg, const fs::path &output_path) {
     return Success;
 }
 
-ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths, bool portable) {
+ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths) {
     // Always generate the default configuration file
     Config command_line{};
     // Load config path configuration by default; otherwise, move the default to the config path
@@ -331,10 +330,7 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
 
     // Declare all options
     CLI::App app{ "Vita3K Command Line Interface" }; // "--help,-h" is automatically generated
-#ifdef _WIN32
-    // Elsewhere this would take absolute paths for options
     app.allow_windows_style_options();
-#endif
     app.allow_extras();
     app.enabled_by_default();
     app.get_formatter()->column_width(38);
@@ -353,18 +349,15 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
        ->default_val(false)->group("Input");
     input->add_option("--app-args,-Z", command_line.app_args, "Argument for app, use ', ' to separate arguments.")
         ->default_str("")->group("Input");
-    input->add_option("--launch-uri", command_line.launch_uri, "URI the app gets from sceAppMgrGetAppParam, as if another app launched it with it, like psgm:play?titleid=PCSA00000&arg=1")
-        ->default_str("")->group("Input");
     input->add_option("--load-app-list,-a", command_line.load_app_list, "Starts the emulator with load app list.")
        ->default_val(false)->group("Input");
-    const std::map<std::string, Frontend> frontends{ { "qt", Frontend::qt }, { "sdl", Frontend::sdl } };
-    input->add_option("--frontend", command_line.frontend, "Frontend to use: qt for the full interface, sdl for a plain window that runs the app given by -r and quits with it")
-        ->transform(CLI::CheckedTransformer(frontends, CLI::ignore_case))->default_str("qt")->group("Input");
     input->add_option("--self,-S", command_line.self_path, "Path to the self to run inside Title ID")
         ->default_str("eboot.bin")->group("Input");
     input->add_option("--installed-path,-r", command_line.run_app_path, "Path to the installed app to run")
         ->default_str({})->check(CLI::IsMember(get_file_set(cfg.get_vita_fs_path() / "ux0/app")))->group("Input");
     input->add_option("--recompile-shader,-s", command_line.recompile_shader_path, "Recompile the given PS Vita shader (GXP format) to SPIR_V / GLSL and quit")
+        ->default_str({})->group("Input");
+    input->add_option("--decode-at9", command_line.decode_at9_path, "Replay an at9tap dump (v<ptr>_c<config>.at9raw) through the AT9 decoder, print per-superframe peaks and quit")
         ->default_str({})->group("Input");
     input->add_option("--deleted-id,-d", command_line.delete_title_id, "Title ID of installed app to delete")
         ->default_str({})->check(CLI::IsMember(get_file_set(cfg.get_vita_fs_path() / "ux0/app")))->group("Input");
@@ -397,7 +390,7 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
         ->group("Modules");
     config->add_option("--log-level,-l", command_line.log_level, "Logging level:\nTRACE = 0\nDEBUG = 1\nINFO = 2\nWARN = 3\nERROR = 4\nCRITICAL = 5\nOFF = 6")
         ->check(CLI::Range( 0, 6 ))->group("Logging");
-    config->add_flag("--log-active-shaders", command_line.log_active_shaders, "Log Active Shaders")
+    config->add_flag("--log-active-shaders,-S", command_line.log_active_shaders, "Log Active Shaders")
         ->group("Logging");
     config->add_flag("--log-uniforms,-U", command_line.log_uniforms, "Log Uniforms")
         ->group("Logging");
@@ -424,6 +417,10 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
 
     if (command_line.recompile_shader_path.has_value()) {
         cfg.recompile_shader_path = std::move(command_line.recompile_shader_path);
+        return QuitRequested;
+    }
+    if (command_line.decode_at9_path.has_value()) {
+        cfg.decode_at9_path = std::move(command_line.decode_at9_path);
         return QuitRequested;
     }
     if (command_line.delete_title_id.has_value()) {
@@ -464,8 +461,7 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
 
     // Merge configurations
     merge(cfg, command_line);
-    // In portable mode, override the VitaFS path to be within the portable directory
-    if (portable || cfg.vita_fs_path.empty())
+    if (cfg.vita_fs_path.empty())
         cfg.set_vita_fs_path(root_paths.get_vita_fs_path());
 
     if (!cfg.console) {

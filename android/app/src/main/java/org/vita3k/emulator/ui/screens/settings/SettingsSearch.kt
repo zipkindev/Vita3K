@@ -63,6 +63,8 @@ internal fun rememberSettingsSearchEntries(
             add(entry(SettingsCategory.Gpu, R.string.settings_gpu_disable_surface_sync, R.string.settings_gpu_disable_surface_sync_desc))
         }
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_async_pipeline, R.string.settings_gpu_async_pipeline_desc))
+        add(entry(SettingsCategory.Gpu, R.string.settings_gpu_accurate_scheduling, R.string.settings_gpu_accurate_scheduling_desc))
+        add(entry(SettingsCategory.Gpu, R.string.settings_gpu_guest_cores, R.string.settings_gpu_guest_cores_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_screen_filter, R.string.settings_gpu_screen_filter_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_resolution, R.string.settings_gpu_resolution_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_anisotropic, R.string.settings_gpu_anisotropic_desc))
@@ -70,6 +72,7 @@ internal fun rememberSettingsSearchEntries(
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_texture_format, R.string.settings_gpu_texture_format_desc, keywords = "png dds export textures"))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_import_textures, R.string.settings_gpu_import_textures_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_shader_cache, R.string.settings_gpu_shader_cache_desc))
+        add(entry(SettingsCategory.Gpu, R.string.settings_gpu_clear_shader_cache, R.string.settings_gpu_clear_shader_cache_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_spirv_shader, R.string.settings_gpu_spirv_shader_desc))
         add(entry(SettingsCategory.Gpu, R.string.settings_gpu_fps_hack, R.string.settings_gpu_fps_hack_desc, keywords = "fps framerate 30 60 game hack"))
         if (!isPerApp && showTurboModeOption) {
@@ -103,6 +106,7 @@ internal fun rememberSettingsSearchEntries(
         add(entry(SettingsCategory.Controls, R.string.settings_controls_l2r2, R.string.settings_controls_l2r2_desc, scope = SettingsScope.Global, keywords = "touch triggers shoulder buttons"))
         add(entry(SettingsCategory.Controls, R.string.settings_controls_l3r3, R.string.settings_controls_l3r3_desc, scope = SettingsScope.Global, keywords = "touch stick clicks l3 r3"))
         add(entry(SettingsCategory.Controls, R.string.settings_controls_touch_switch, R.string.settings_controls_touch_switch_desc, scope = SettingsScope.Global, keywords = "front rear touchscreen switch"))
+        add(entry(SettingsCategory.Controls, R.string.settings_controls_touch_switch_tilt, R.string.settings_controls_touch_switch_tilt_desc, scope = SettingsScope.Global, keywords = "tilt gyro motion touchscreen switch"))
         add(entry(SettingsCategory.Controls, R.string.settings_controls_hide_toggle, R.string.settings_controls_hide_toggle_desc, scope = SettingsScope.Global, keywords = "hide overlay button toggle"))
         add(entry(SettingsCategory.Controls, R.string.settings_controls_scale, R.string.settings_controls_scale_desc, scope = SettingsScope.Global, keywords = "overlay size"))
         add(entry(SettingsCategory.Controls, R.string.settings_controls_opacity, R.string.settings_controls_opacity_desc, scope = SettingsScope.Global, keywords = "overlay transparency"))

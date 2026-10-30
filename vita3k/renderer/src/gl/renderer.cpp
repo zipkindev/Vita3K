@@ -261,7 +261,7 @@ bool GLState::init() {
 }
 
 void GLState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
-    texture_cache.init(cfg.hashless_texture_cache, texture_folder(), game_id);
+    texture_cache.init(true, texture_folder(), game_id);
 }
 
 bool create(std::unique_ptr<Context> &context) {
@@ -794,19 +794,14 @@ std::vector<uint32_t> GLState::dump_frame(DisplayState &display, uint32_t &width
 }
 
 int GLState::get_supported_filters() {
-    return static_cast<int>(Filter::NEAREST) | static_cast<int>(Filter::BILINEAR)
-        | static_cast<int>(Filter::BICUBIC) | static_cast<int>(Filter::FXAA);
+    // actually it's not even bilinear, it's either bilinear or nearest depending on the last use of the texture..
+    // TODO: add bicubic filter and allow disabling bilinear.
+    return static_cast<int>(Filter::BILINEAR) | static_cast<int>(Filter::FXAA);
 }
 
 void GLState::set_screen_filter(const std::string_view &filter) {
-    if (filter == "Nearest")
-        screen_renderer.filter = ScreenRenderer::Filter::Nearest;
-    else if (filter == "FXAA")
-        screen_renderer.filter = ScreenRenderer::Filter::FXAA;
-    else if (filter == "Bicubic")
-        screen_renderer.filter = ScreenRenderer::Filter::Bicubic;
-    else
-        screen_renderer.filter = ScreenRenderer::Filter::Bilinear;
+    // we only support bilinear and fxaa
+    screen_renderer.enable_fxaa = (filter == "FXAA");
 }
 
 int GLState::get_max_anisotropic_filtering() {

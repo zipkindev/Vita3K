@@ -149,6 +149,17 @@ bool USSETranslatorVisitor::vmov(
         return false;
     }
 
+    const auto holds_raw_lanes = [](const RegisterBank bank) {
+        return bank == RegisterBank::TEMP || bank == RegisterBank::PRIMATTR || bank == RegisterBank::SECATTR || bank == RegisterBank::OUTPUT
+            || bank == RegisterBank::INDEXED1 || bank == RegisterBank::INDEXED2;
+    };
+    bool raw_f16_lanes = move_data_type == DataType::F16 && (!is_conditional || compare_op != spv::OpAny) && holds_raw_lanes(inst.opr.dest.bank)
+        && holds_raw_lanes(inst.opr.src1.bank) && (!is_conditional || holds_raw_lanes(inst.opr.src2.bank));
+    for (int i = 0; i < 4; i++) {
+        if ((dest_mask & (1 << i)) && static_cast<int>(inst.opr.src1.swizzle[i]) >= static_cast<int>(SwizzleChannel::C_0))
+            raw_f16_lanes = false;
+    }
+
     // Recompile
 
     m_b.setDebugSourceLocation(m_recompiler.cur_pc, nullptr);
@@ -188,8 +199,15 @@ bool USSETranslatorVisitor::vmov(
 
     LOG_DISASM("{}", disasm_str);
 
+    Operand move_src1 = inst.opr.src1;
+    Operand move_src2 = inst.opr.src2;
+    if (raw_f16_lanes) {
+        move_src1.type = DataType::UINT16;
+        move_src2.type = DataType::UINT16;
+    }
+
     spv::Id source_to_compare_with_0 = spv::NoResult;
-    spv::Id source_1 = load(inst.opr.src1, dest_mask, src1_repeat_offset);
+    spv::Id source_1 = load(move_src1, dest_mask, src1_repeat_offset);
     spv::Id source_2 = spv::NoResult;
     spv::Id result = spv::NoResult;
 
@@ -200,7 +218,7 @@ bool USSETranslatorVisitor::vmov(
 
     if (is_conditional) {
         source_to_compare_with_0 = load(inst.opr.src0, dest_mask, src0_repeat_offset);
-        source_2 = load(inst.opr.src2, dest_mask, src2_repeat_offset);
+        source_2 = load(move_src2, dest_mask, src2_repeat_offset);
         spv::Id result_type = m_b.getTypeId(source_2);
         spv::Id v0_comp_type = is_test_unsigned ? m_b.makeUintType(32) : (is_test_signed ? m_b.makeIntType(32) : m_b.makeFloatType(32));
         spv::Id v0_type = utils::make_vector_or_scalar_type(m_b, v0_comp_type, m_b.getNumComponents(source_2));
@@ -213,6 +231,14 @@ bool USSETranslatorVisitor::vmov(
             // First compare source0 with vector 0
             spv::Id cond_result = m_b.createOp(compare_op, utils::make_vector_or_scalar_type(m_b, m_b.makeBoolType(), m_b.getNumComponents(source_to_compare_with_0)),
                 { source_to_compare_with_0, v0 });
+
+            // SPIR-V before 1.4 requires OpSelect's condition to have the same component count as the result
+            const int result_comps = m_b.getNumComponents(source_2);
+            if (m_b.getNumComponents(cond_result) == 1 && result_comps > 1) {
+                const spv::Id bvec_type = m_b.makeVectorType(m_b.makeBoolType(), result_comps);
+                const std::vector<spv::Id> cond_comps(result_comps, cond_result);
+                cond_result = m_b.createCompositeConstruct(bvec_type, cond_comps);
+            }
 
             // For each component, if the compare result is true, move the equivalent component from source1 to dest,
             // else the same thing with source2
@@ -269,7 +295,34 @@ bool USSETranslatorVisitor::vmov(
         result = source_1;
     }
 
+    // a raw move copies whole words so each destination word keeps the type its source word was stored with
+    const int move_size = static_cast<int>(get_data_type_size(move_data_type));
+    const SceGxmParameterType declared_output = m_program.get_fragment_output_type();
+    const DataType declared_type = (declared_output == SCE_GXM_PARAMETER_TYPE_F16) ? DataType::F16 : ((declared_output == SCE_GXM_PARAMETER_TYPE_F32) ? DataType::F32 : DataType::UNK);
+    bool copies_output_word0 = false;
+    bool output_word0_declared = declared_type != DataType::UNK;
+    for (int i = 0; i < 4; i++) {
+        m_raw_move_types[i] = DataType::UNK;
+        if (!(dest_mask & (1 << i)))
+            continue;
+        const int channel = static_cast<int>(inst.opr.src1.swizzle[i]);
+        if (channel < 4) {
+            const DataType source_type = word_store_type(inst.opr.src1, src1_repeat_offset, channel, move_size);
+            if (!is_conditional || word_store_type(inst.opr.src2, src2_repeat_offset, channel, move_size) == source_type)
+                m_raw_move_types[i] = source_type;
+        }
+        if (inst.opr.dest.bank == RegisterBank::OUTPUT && static_cast<int>(inst.opr.dest.num) + dest_repeat_offset + (i * move_size) / 4 == 0) {
+            copies_output_word0 = true;
+            output_word0_declared = output_word0_declared && m_raw_move_types[i] == declared_type;
+        }
+    }
+    m_raw_move_keeps_declared = copies_output_word0 && output_word0_declared;
+
+    m_store_is_raw_move = true;
+    m_store_raw_f16_lanes = raw_f16_lanes;
     store(inst.opr.dest, result, dest_mask, dest_repeat_offset);
+    m_store_raw_f16_lanes = false;
+    m_store_is_raw_move = false;
 
     END_REPEAT()
 
@@ -520,7 +573,78 @@ bool USSETranslatorVisitor::vpck(
         source = utils::convert_to_int(m_b, m_util_funcs, source, inst.opr.dest.type, scale);
     }
 
-    store(inst.opr.dest, source, dest_mask, dest_repeat_offset);
+    const int type_size = get_data_type_size(inst.opr.dest.type);
+    const uint32_t base_reg = (inst.opr.dest.num + dest_repeat_offset) & 0xFFFFFF;
+    const auto byte_key = [&](uint32_t word) {
+        return (static_cast<uint32_t>(inst.opr.dest.bank) << 24) | (word & 0xFFFFFF);
+    };
+    const auto bytes_written = [&](uint32_t word) -> std::uint8_t {
+        const auto ite = m_vpck_written_bytes.find(byte_key(word));
+        return (ite == m_vpck_written_bytes.end()) ? 0 : ite->second;
+    };
+
+    Imm4 store_mask = dest_mask;
+    if (is_integer_data_type(inst.opr.dest.type) && type_size < 4) {
+        const int pack = (type_size == 1) ? 4 : 2;
+        Imm4 expanded = 0;
+        for (int s = 0; s < 4; s += pack) {
+            Imm4 slot_bits = ((1 << pack) - 1) << s;
+            if (dest_mask & slot_bits)
+                expanded |= slot_bits;
+        }
+
+        Imm4 zero_lanes = 0;
+        for (int i = 0; i < 4; i++) {
+            if (!(expanded & (1 << i)) || (dest_mask & (1 << i)))
+                continue;
+            const uint32_t byte_off = i * type_size;
+            const std::uint8_t lane_bytes = static_cast<std::uint8_t>(((1u << type_size) - 1) << (byte_off % 4));
+            if ((bytes_written(base_reg + byte_off / 4) & lane_bytes) == 0)
+                zero_lanes |= static_cast<Imm4>(1 << i);
+        }
+        const Imm4 target_mask = dest_mask | zero_lanes;
+
+        if (zero_lanes != 0) {
+            spv::Id comp_type = m_b.isScalar(source) ? m_b.getTypeId(source) : m_b.getContainedTypeId(m_b.getTypeId(source));
+            spv::Id zero_val = m_b.isUintType(comp_type) ? m_b.makeUintConstant(0) : m_b.makeIntConstant(0);
+
+            std::vector<spv::Id> comps;
+            int src_idx = 0;
+            for (int i = 0; i < 4; i++) {
+                if (!(target_mask & (1 << i)))
+                    continue;
+                if (dest_mask & (1 << i)) {
+                    if (m_b.getNumComponents(source) == 1)
+                        comps.push_back(source);
+                    else
+                        comps.push_back(m_b.createCompositeExtract(source, comp_type, src_idx));
+                    src_idx++;
+                } else {
+                    comps.push_back(zero_val);
+                }
+            }
+
+            if (comps.size() == 1) {
+                source = comps[0];
+            } else {
+                source = m_b.createCompositeConstruct(utils::make_vector_or_scalar_type(m_b, comp_type, static_cast<int>(comps.size())), comps);
+            }
+            store_mask = target_mask;
+        }
+    }
+
+    for (int i = 0; i < 4; i++) {
+        if (!(store_mask & (1 << i)))
+            continue;
+        const uint32_t byte_off = i * type_size;
+        const std::uint8_t lane_bytes = static_cast<std::uint8_t>(((type_size >= 4) ? 0xFu : ((1u << type_size) - 1)) << (byte_off % 4));
+        m_vpck_written_bytes[byte_key(base_reg + byte_off / 4)] |= lane_bytes;
+    }
+
+    m_store_from_vpck = true;
+    store(inst.opr.dest, source, store_mask, dest_repeat_offset);
+    m_store_from_vpck = false;
+
     END_REPEAT()
 
     reset_repeat_multiplier();
@@ -679,8 +803,23 @@ bool USSETranslatorVisitor::vldst(
         if (offset % 4 != 0)
             continue;
 
+        // The slot a texture occupies in the texture buffer is chosen by the shader compiler and is not the texture unit
+        const int slot = offset / 4;
+        int texture_unit = slot;
+        const SceGxmDependentSampler *tb_layout = m_program.texture_buffer_dependent_sampler();
+        for (uint32_t i = 0; i < m_program.texture_buffer_dependent_sampler_count; i++) {
+            if (tb_layout[i].resource_index_layout_offset % 4 != 0)
+                continue;
+            if (tb_layout[i].sa_offset / 4 == slot) {
+                texture_unit = tb_layout[i].resource_index_layout_offset / 4;
+                break;
+            }
+        }
+        if (texture_unit != slot)
+            LOG_INFO("Texture buffer slot {} holds texture unit {}", slot, texture_unit);
+
         to_store.type = DataType::INT32;
-        store(to_store, m_b.makeIntConstant(offset / 4), 0b1);
+        store(to_store, m_b.makeIntConstant(texture_unit), 0b1);
         continue;
     } else if (inst.opr.src0.bank == RegisterBank::SECATTR && inst.opr.src0.num == m_spirv_params.literal_buffer_sa_offset) {
         // We are reading the literal buffer
@@ -706,13 +845,16 @@ bool USSETranslatorVisitor::vldst(
     // Maybe that's just how the memory map operates. I'm not sure. However the literals on all shader so far is that
     // Another thing is that, when moe expand is not enable, there seems to be 4 bytes added before fetching... No absolute prove.
     // Maybe moe expand means it's not fetching after all? Dunno
-    // also for the thread buffer, this value is 128 times bigger
-    uint32_t REG_INDEX_BASE = is_thread_buffer_access ? 0x1000000 : 0x10000;
+    // a thread buffer register offset holds the per-thread stride in its upper half and the byte offset in its lower half
+    constexpr uint32_t REG_INDEX_BASE = 0x10000;
     spv::Id reg_index_base_cst = m_b.makeIntConstant(REG_INDEX_BASE);
     spv::Id i32_type = m_b.makeIntType(32);
 
     if (inst.opr.src1.bank != shader::usse::RegisterBank::IMMEDIATE) {
-        source_1 = m_b.createBinOp(spv::OpISub, m_b.getTypeId(source_1), source_1, reg_index_base_cst);
+        if (is_thread_buffer_access)
+            source_1 = m_b.createBinOp(spv::OpBitwiseAnd, m_b.getTypeId(source_1), source_1, m_b.makeIntConstant(0xFFFF));
+        else
+            source_1 = m_b.createBinOp(spv::OpISub, m_b.getTypeId(source_1), source_1, reg_index_base_cst);
     }
 
     if (!moe_expand) {
@@ -738,10 +880,15 @@ bool USSETranslatorVisitor::vldst(
         }
 
         if (m_spirv_params.thread_buffer_base != 0)
-            source_1 = m_b.createBinOp(spv::OpIAdd, i32_type, source_1, m_spirv_params.thread_buffer_base);
+            source_1 = m_b.createBinOp(spv::OpIAdd, i32_type, source_1, m_b.makeIntConstant(m_spirv_params.thread_buffer_base));
 
-        // get the index in the float array
+        // get the index in the float array, kept inside it
         spv::Id index = m_b.createBinOp(spv::OpShiftRightLogical, i32_type, source_1, m_b.makeUintConstant(2));
+        if (m_spirv_params.thread_buffer_f32_count > 0) {
+            const spv::Id last = m_b.makeIntConstant(static_cast<int>(m_spirv_params.thread_buffer_f32_count - 1));
+            const spv::Id inside = m_b.createBinOp(spv::OpULessThanEqual, m_b.makeBoolType(), index, last);
+            index = m_b.createTriOp(spv::OpSelect, i32_type, inside, index, last);
+        }
         spv::Id float_ptr = utils::create_access_chain(m_b, spv::StorageClassPrivate, m_spirv_params.thread_buffer, { index });
         if (is_store) {
             spv::Id value = load(to_store, 0b1);

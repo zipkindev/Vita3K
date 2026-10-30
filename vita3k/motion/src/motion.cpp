@@ -24,6 +24,10 @@
 #include <util/log.h>
 
 #include <SDL3/SDL_gamepad.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <numbers>
 
 void set_display_rotation(MotionState &state, int rotation) {
@@ -132,6 +136,14 @@ void MotionState::start_sensor_sampling() {
 
 void MotionState::reset_runtime() {
     stop_sensor_sampling();
+    synthetic_tilt = false;
+    synthetic_rotation = {};
+    synthetic_rotation_rate = {};
+    synthetic_turn = 0.0f;
+    synthetic_turn_rate = 0.0f;
+    synthetic_gyro = {};
+    synthetic_yaw = 0.0f;
+    synthetic_timestamp = 0;
     motion_data.ResetQuaternion();
     motion_data.ResetRotations();
     last_counter = 0;
@@ -139,6 +151,21 @@ void MotionState::reset_runtime() {
     last_accel_timestamp = 0;
     last_updated_gyro_timestamp = 0;
     last_updated_accel_timestamp = 0;
+}
+
+static Util::Quaternion<SceFloat> tilt_quaternion(const Util::Vec3f &rotation) {
+    const float angle = rotation.Length();
+    if (angle <= 0.0f)
+        return { {}, 1.0f };
+    return Util::MakeQuaternion(rotation / angle, angle);
+}
+
+static Util::Quaternion<SceFloat> pose_quaternion(const Util::Vec3f &rotation, const float turn) {
+    return Util::MakeQuaternion({ 0.0f, 0.0f, 1.0f }, turn) * tilt_quaternion(rotation);
+}
+
+static Util::Quaternion<SceFloat> synthetic_orientation(const MotionState &state) {
+    return Util::MakeQuaternion({ 0.0f, 0.0f, 1.0f }, state.synthetic_yaw) * pose_quaternion(state.synthetic_rotation, state.synthetic_turn);
 }
 
 SceFVector3 get_acceleration(const MotionState &state) {
@@ -151,6 +178,9 @@ SceFVector3 get_acceleration(const MotionState &state) {
 }
 
 SceFVector3 get_gyroscope(const MotionState &state) {
+    if (state.synthetic_tilt)
+        return { state.synthetic_gyro.x, state.synthetic_gyro.y, state.synthetic_gyro.z };
+
     Util::Vec3f gyroscope = state.motion_data.GetGyroscope() * 2.f * std::numbers::pi_v<float>;
     return {
         gyroscope.x,
@@ -160,6 +190,9 @@ SceFVector3 get_gyroscope(const MotionState &state) {
 }
 
 Util::Quaternion<SceFloat> get_orientation(const MotionState &state) {
+    if (state.synthetic_tilt)
+        return synthetic_orientation(state);
+
     auto quat = state.motion_data.GetOrientation();
     return {
         { -quat.xyz[1], -quat.w, quat.xyz[0] },
@@ -264,9 +297,97 @@ void handle_motion_event(EmuEnvState &emuenv, int32_t sensor_type, const SDL_Gam
     handle_motion_event<SDL_GamepadSensorEvent>(emuenv, sensor_type, sensor);
 }
 
+void set_touch_tilt(MotionState &state, const CtrlState &ctrl_state, const bool active, const float x, const float y) {
+    if (!state.is_sampling)
+        return;
+
+    if (ctrl_state.has_motion_support || state.has_device_motion_support) {
+        if (state.synthetic_tilt) {
+            const std::lock_guard<std::mutex> guard(state.mutex);
+            state.synthetic_tilt = false;
+            state.synthetic_rotation = {};
+            state.synthetic_rotation_rate = {};
+            state.synthetic_turn = 0.0f;
+            state.synthetic_turn_rate = 0.0f;
+            state.synthetic_gyro = {};
+        }
+        return;
+    }
+
+    if (!active && !state.synthetic_tilt)
+        return;
+
+    constexpr float max_tilt = std::numbers::pi_v<float> / 4.0f;
+    constexpr float max_turn = 2.0f * std::numbers::pi_v<float> / 3.0f;
+    constexpr float response = 15.0f;
+    const float reach = std::sqrt(x * x + y * y);
+    Util::Vec3f target;
+    if (active && reach > 0.0f) {
+        const float angle = std::min(reach, 1.0f) * max_tilt;
+        target = { y / reach * angle, x / reach * angle, 0.0f };
+    }
+    const float target_turn = active ? -std::clamp(x, -1.0f, 1.0f) * max_turn : 0.0f;
+    const uint64_t now = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    const std::lock_guard<std::mutex> guard(state.mutex);
+    float dt = 1.0f / 60.0f;
+    if (!state.synthetic_tilt) {
+        state.synthetic_tilt = true;
+        state.synthetic_rotation = {};
+        state.synthetic_rotation_rate = {};
+        state.synthetic_turn = 0.0f;
+        state.synthetic_turn_rate = 0.0f;
+    } else if (now > state.synthetic_timestamp) {
+        dt = std::min(static_cast<float>(now - state.synthetic_timestamp) / 1000000.0f, 0.1f);
+    }
+    state.synthetic_timestamp = now;
+
+    const Util::Vec3f error = state.synthetic_rotation - target;
+    const Util::Vec3f slope = state.synthetic_rotation_rate + error * response;
+    const float decay = std::exp(-response * dt);
+    Util::Vec3f next_error = (error + slope * dt) * decay;
+    Util::Vec3f next_rate = (state.synthetic_rotation_rate - slope * (response * dt)) * decay;
+    if (next_error.Length() < 1e-5f && next_rate.Length() < 1e-4f) {
+        next_error = {};
+        next_rate = {};
+    }
+
+    const float turn_error = state.synthetic_turn - target_turn;
+    const float turn_slope = state.synthetic_turn_rate + turn_error * response;
+    float next_turn_error = (turn_error + turn_slope * dt) * decay;
+    float next_turn_rate = (state.synthetic_turn_rate - turn_slope * (response * dt)) * decay;
+    if (std::abs(next_turn_error) < 1e-5f && std::abs(next_turn_rate) < 1e-4f) {
+        next_turn_error = 0.0f;
+        next_turn_rate = 0.0f;
+    }
+
+    const auto previous = pose_quaternion(state.synthetic_rotation, state.synthetic_turn);
+    state.synthetic_rotation = target + next_error;
+    state.synthetic_rotation_rate = next_rate;
+    state.synthetic_turn = target_turn + next_turn_error;
+    state.synthetic_turn_rate = next_turn_rate;
+    const auto current = pose_quaternion(state.synthetic_rotation, state.synthetic_turn);
+
+    auto step = previous.Inverse() * current;
+    if (step.w < 0.0f)
+        step = { -step.xyz, -step.w };
+    const float half_sine = step.xyz.Length();
+    state.synthetic_gyro = half_sine > 0.0f ? step.xyz * (2.0f * std::atan2(half_sine, step.w) / half_sine / dt) : Util::Vec3f{};
+
+    state.motion_data.SetAcceleration(Util::QuaternionRotate(current.Inverse(), Util::Vec3f{ 0.0f, 0.0f, -1.0f }));
+    state.last_updated_accel_timestamp = now;
+}
+
 void refresh_motion(MotionState &state, CtrlState &ctrl_state) {
     if (!state.is_sampling)
         return;
+
+    if (state.synthetic_tilt) {
+        state.motion_data.UpdateBasicOrientation();
+        state.last_accel_timestamp = state.last_updated_accel_timestamp;
+        state.last_counter++;
+        return;
+    }
 
     if (!ctrl_state.has_motion_support && !state.has_device_motion_support)
         return;

@@ -20,6 +20,8 @@
 #include <renderer/commands.h>
 #include <renderer/types.h>
 
+#include <functional>
+#include <memory>
 #include <string>
 
 struct MemState;
@@ -37,11 +39,16 @@ struct State;
 struct VertexProgram;
 struct YUVConversionCache;
 
-bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend, GXPPtrMap &gxp_ptr_map);
+bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend, GXPPtrMap &gxp_ptr_map, SceGxmOutputRegisterFormat output_format = SCE_GXM_OUTPUT_REGISTER_FORMAT_DECLARED, SceGxmMultisampleMode multisample_mode = SCE_GXM_MULTISAMPLE_NONE);
 bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgram &program, GXPPtrMap &gxp_ptr_map, const std::vector<SceGxmVertexAttribute> &attributes);
+void warm_pipeline(State &state, const std::shared_ptr<ProgramBinding> &vertex, const std::shared_ptr<ProgramBinding> &fragment, bool actual_pair = false);
 void create(SceGxmSyncObject *sync, State &state);
-void destroy(SceGxmSyncObject *sync, State &state);
+void destroy(SceGxmSyncObject *sync, State &state, std::function<void()> dealloc = nullptr);
 void finish(State &state, Context *context);
+void note_gpu_event();
+uint64_t wait_gpu_event(uint64_t seen, uint32_t timeout_ms);
+
+bool has_dormant_mappings();
 
 enum class SyncWaitResult {
     Ready,
@@ -63,6 +70,9 @@ SyncWaitResult wishlist(SceGxmSyncObject *sync_object, const uint32_t timestamp,
  */
 void subject_done(SceGxmSyncObject *sync_object, const uint32_t timestamp);
 
+inline constexpr bool recover_from_abandoned_lists = true;
+bool signal_may_be_lost(State &state, int64_t wait_start_epoch_ms);
+
 int wait_for_status(State &state, int *status, int signal, bool wake_on_equal);
 void reset_command_list(CommandList &command_list);
 void submit_command_list(State &state, renderer::Context *context, CommandList &command_list);
@@ -80,7 +90,7 @@ void set_point_line_width(State &state, Context *ctx, bool is_front, unsigned in
 void set_polygon_mode(State &state, Context *ctx, bool is_front, SceGxmPolygonMode mode);
 void set_stencil_func(State &state, Context *ctx, bool is_front, SceGxmStencilFunc func, SceGxmStencilOp stencilFail, SceGxmStencilOp depthFail, SceGxmStencilOp depthPass, unsigned char compareMask, unsigned char writeMask);
 void set_stencil_ref(State &state, Context *ctx, bool is_front, unsigned char sref);
-void set_program(State &state, Context *ctx, Ptr<const void> program, const bool is_fragment);
+void set_program(State &state, Context *ctx, Ptr<const void> program, const std::shared_ptr<ProgramBinding> &binding, bool is_fragment);
 void set_cull_mode(State &state, Context *ctx, SceGxmCullMode cull);
 void set_texture(State &state, Context *ctx, const std::uint32_t tex_index, const SceGxmTexture tex);
 void set_viewport_real(State &state, Context *ctx, float xOffset, float yOffset, float zOffset, float xScale, float yScale, float zScale);
@@ -94,11 +104,17 @@ void set_visibility_index(State &state, Context *ctx, bool enable, uint32_t inde
 
 void set_context(State &state, Context *ctx, RenderTarget *target, SceGxmColorSurface *color_surface, SceGxmDepthStencilSurface *depth_stencil_surface);
 void set_vertex_stream(State &state, Context *ctx, const std::size_t index, const std::size_t data_len, const Ptr<const void> stream);
+void stream_snapshot_kick(MemState &mem, CommandList &list);
+const uint8_t *stream_snapshot_get(uint64_t handle, uint32_t size);
+int64_t coarse_now_ms();
+void stream_snapshot_disable_for_program(uint32_t program_addr, uint32_t program_flags);
+void stream_snapshot_reset();
 void draw(State &state, Context *ctx, SceGxmPrimitiveType prim_type, SceGxmIndexFormat index_type, Ptr<const void> index_data, const std::uint32_t index_count, const std::uint32_t instance_count);
 void transfer_copy(State &state, uint32_t colorKeyValue, uint32_t colorKeyMask, SceGxmTransferColorKeyMode colorKeyMode, const SceGxmTransferImage *images, SceGxmTransferType srcType, SceGxmTransferType destType);
 void transfer_downscale(State &state, const SceGxmTransferImage *src, const SceGxmTransferImage *dest);
 void transfer_fill(State &state, uint32_t fillColor, const SceGxmTransferImage *dest);
 void sync_surface_data(State &state, Context *ctx, const SceGxmNotification vertex_notification, const SceGxmNotification fragment_notification);
+int sync_guest_range(State &state, Address address, uint32_t size);
 
 bool create_context(State &state, std::unique_ptr<Context> &context);
 void destroy_context(State &state, std::unique_ptr<Context> &context);
@@ -110,6 +126,7 @@ void destroy_render_target_during_shutdown(State &state, std::unique_ptr<RenderT
 Command *generic_command_allocate();
 void generic_command_free(Command *cmd);
 void destroy_command_payload(Command &cmd);
+void append_command_list(Context &destination, const CommandList &source);
 
 template <typename... Args>
 bool add_command(Context *ctx, const CommandOpcode opcode, int *status, Args... arguments) {
@@ -140,14 +157,15 @@ bool add_state_set_command(Context *ctx, const GXMState state, Args... arguments
 
 template <typename... Args>
 int send_single_command(State &state, Context *ctx, const CommandOpcode opcode, bool wait, Args... arguments) {
-    // Make a temporary command list
-    int status = CommandErrorCodePending; // Pending.
+    auto status = std::make_shared<int>(CommandErrorCodePending); // Pending.
     auto cmd = make_command(ctx ? ctx->alloc_func : generic_command_allocate, ctx ? ctx->free_func : generic_command_free,
-        opcode, wait ? &status : nullptr, arguments...);
+        opcode, wait ? status.get() : nullptr, arguments...);
 
     if (!cmd) {
         return CommandErrorArgumentsTooLarge;
     }
+    if (wait)
+        cmd->status_keepalive = status;
 
     CommandList list;
     list.first = cmd;
@@ -156,7 +174,7 @@ int send_single_command(State &state, Context *ctx, const CommandOpcode opcode, 
     // Submit it
     submit_command_list(state, ctx, list);
     if (wait)
-        return wait_for_status(state, &status, CommandErrorCodePending, false);
+        return wait_for_status(state, status.get(), CommandErrorCodePending, false);
     else
         return 0;
 }
@@ -175,7 +193,7 @@ namespace texture {
 // Paletted textures.
 void palette_texture_to_rgba_4(uint32_t *dst, const uint8_t *src, uint32_t width, uint32_t height, const uint32_t *palette);
 void palette_texture_to_rgba_8(uint32_t *dst, const uint8_t *src, uint32_t width, uint32_t height, const uint32_t *palette);
-void yuv420_texture_to_rgb(YUVConversionCache &cache, uint8_t *dst, const uint8_t *src, uint32_t width, uint32_t height, uint32_t layout_width, uint32_t layout_height, bool is_p3);
+void yuv420_texture_to_rgb(YUVConversionCache &cache, uint8_t *dst, const uint8_t *src, uint32_t width, uint32_t height, uint32_t layout_width, uint32_t layout_height, bool is_p3, bool v_plane_first);
 const uint32_t *get_texture_palette(const SceGxmTexture &texture, const MemState &mem);
 
 // Assume fmt is a bcn format
@@ -255,13 +273,6 @@ void convert_U8U3U3U2_to_U8U8U8U8(void *dest, const void *data, const uint32_t w
 void convert_x8u24_to_u24x8(void *dest, const void *data, const uint32_t width, const uint32_t height);
 void convert_f32m_to_f32(void *dest, const void *data, const uint32_t width, const uint32_t height);
 void convert_u2f10f10f10_to_f16f16f16f16(void *dest, const void *data, const uint32_t width, const uint32_t height, const SceGxmTextureFormat format);
-
-// U1U5U5U5 textures keep their 1-bit field in bit 15 (ABGR, ARGB, 1BGR, 1RGB) or in
-// bit 0 (U5U5U5U1_RGBA/BGRA, U5U5U5X1_RGB1/BGR1, for which this returns true).
-// Uploads rotate the texels so that each backend sees a single layout.
-bool is_u5u5u5u1(const SceGxmTextureFormat format);
-void convert_u5u5u5u1_to_u1u5u5u5(void *dest, const void *data, const uint32_t width, const uint32_t height);
-void convert_u1u5u5u5_to_u5u5u5u1(void *dest, const void *data, const uint32_t width, const uint32_t height);
 
 void swizzled_texture_to_linear_texture(uint8_t *dest, const uint8_t *src, uint16_t width, uint16_t height, uint8_t bits_per_pixel);
 void tiled_texture_to_linear_texture(uint8_t *dest, const uint8_t *src, uint16_t width, uint16_t height, uint8_t bits_per_pixel);

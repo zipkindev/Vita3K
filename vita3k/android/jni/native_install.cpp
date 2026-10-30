@@ -78,11 +78,15 @@ Java_org_vita3k_emulator_NativeLib_installPkg(JNIEnv *env, jclass, jstring path_
 
 JNIEXPORT jboolean JNICALL
 Java_org_vita3k_emulator_NativeLib_installArchive(JNIEnv *env, jclass, jstring path_str, jobject callback, jboolean force_reinstall) {
-    auto *emuenv = get_emuenv();
-    if (!emuenv)
-        return JNI_FALSE;
-
     const std::string path = jstring_to_string(env, path_str);
+    LOG_INFO("installArchive: '{}' force_reinstall={}", path, static_cast<bool>(force_reinstall));
+
+    auto *emuenv = get_emuenv();
+    if (!emuenv) {
+        LOG_ERROR("installArchive: no emulator session initialised - cannot install");
+        return JNI_FALSE;
+    }
+
     ScopedJniCallback progress_callback(env, callback, "onProgress", "(ILjava/lang/String;)V");
 
     auto progress_fn = [&progress_callback](ArchiveContents contents) {
@@ -97,10 +101,34 @@ Java_org_vita3k_emulator_NativeLib_installArchive(JNIEnv *env, jclass, jstring p
 
     const auto reinstall_fn = [force_reinstall](const std::string &, const std::string &) -> bool { return static_cast<bool>(force_reinstall); };
     const auto result = install_archive(*emuenv, fs::path(path), progress_fn, reinstall_fn);
-    if (!result.empty())
+    bool any_installed = false;
+    for (const auto &content : result) {
+        LOG_INFO("installArchive: content '{}' [{}] -> {}", content.title, content.title_id, content.state ? "installed" : "FAILED");
+        any_installed |= content.state;
+    }
+    if (any_installed)
         app::scan_apps(*emuenv);
 
-    return result.empty() ? JNI_FALSE : JNI_TRUE;
+    return any_installed ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_org_vita3k_emulator_NativeLib_archiveInstallOrder(JNIEnv *env, jclass, jobjectArray paths_array) {
+    const jsize count = env->GetArrayLength(paths_array);
+    std::vector<fs::path> paths;
+    paths.reserve(count);
+    for (jsize i = 0; i < count; i++) {
+        const auto path_str = static_cast<jstring>(env->GetObjectArrayElement(paths_array, i));
+        paths.emplace_back(jstring_to_string(env, path_str));
+        env->DeleteLocalRef(path_str);
+    }
+
+    const std::vector<size_t> order = archive_install_order(paths);
+    std::vector<jint> indices(order.begin(), order.end());
+    jintArray result = env->NewIntArray(count);
+    if (result && count > 0)
+        env->SetIntArrayRegion(result, 0, count, indices.data());
+    return result;
 }
 
 JNIEXPORT jboolean JNICALL
@@ -137,7 +165,7 @@ Java_org_vita3k_emulator_NativeLib_findPkgZrif(JNIEnv *env, jclass, jstring pkg_
 JNIEXPORT jstring JNICALL
 Java_org_vita3k_emulator_NativeLib_convertRifToZrif(JNIEnv *env, jclass, jstring path_str) {
     const std::string path = jstring_to_string(env, path_str);
-    std::ifstream binfile(path, std::ios::in | std::ios::binary | std::ios::ate);
+    fs::ifstream binfile(path, std::ios::in | std::ios::binary | std::ios::ate);
     if (!binfile.is_open()) {
         LOG_ERROR("Failed to open license from path: {}", path);
         return env->NewStringUTF("");

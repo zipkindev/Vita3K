@@ -21,18 +21,7 @@
 
 #include <util/fs.h>
 
-#include <cstdint>
 #include <optional>
-#include <string>
-#include <vector>
-
-// The frontend that runs the emulator
-enum class Frontend {
-    // The full Qt interface
-    qt,
-    // A plain SDL window that runs the app given on the command line and quits with it
-    sdl,
-};
 
 // Configuration File options
 struct Config {
@@ -40,6 +29,7 @@ struct Config {
     std::optional<fs::path> content_path;
     std::optional<std::string> run_app_path;
     std::optional<std::string> recompile_shader_path;
+    std::optional<std::string> decode_at9_path;
     std::optional<std::string> delete_title_id;
     std::optional<std::string> pkg_path;
     std::optional<std::string> pkg_zrif;
@@ -49,14 +39,12 @@ struct Config {
     // Setting not present in the YAML file
     fs::path config_path = {};
     std::string app_args;
-    std::string launch_uri;
     std::string self_path;
     bool overwrite_config = true;
     bool load_config = false;
     bool fullscreen = false;
     bool console = false;
     bool load_app_list = false;
-    Frontend frontend = Frontend::qt;
 
     fs::path get_vita_fs_path() const {
         return fs_utils::utf8_to_path(vita_fs_path);
@@ -84,14 +72,17 @@ struct Config {
 #ifdef __ANDROID__
         std::string custom_driver_name{};
 #endif
-        bool high_accuracy = false;
+        bool high_accuracy = true;
         float resolution_multiplier = 1.0f;
         bool disable_surface_sync = false;
         std::string screen_filter = "Bilinear";
-        std::string memory_mapping = "double-buffer";
+        std::string memory_mapping = VITA3K_DEFAULT_MEMORY_MAPPING;
         bool v_sync = true;
         int anisotropic_filtering = 1;
-        bool async_pipeline_compilation = true;
+        bool async_pipeline_compilation = false;
+        bool accurate_thread_scheduling = true;
+        int preempt_on_wake_us = 1000;
+        int guest_cores = 3;
         bool import_textures = false;
         bool export_textures = false;
         bool export_as_png = false;
@@ -99,6 +90,14 @@ struct Config {
         bool shader_cache = true;
         bool spirv_shader = false;
         bool texture_cache = true;
+        int decoded_texture_cache_mb = 0;
+        bool parallel_texture_decode = true;
+        bool decoded_texture_telemetry = false;
+        bool automatic_texture_preparation = false;
+        bool jit_compile_telemetry = false;
+        bool sync_wait_telemetry = false;
+        bool pipeline_telemetry = false;
+        bool jit_preparation = false;
         bool stretch_the_display_area = false;
         bool fullscreen_hd_res_pixel_perfect = false;
         int file_loading_delay = 0;
@@ -111,7 +110,7 @@ struct Config {
         bool log_active_shaders = false;
         bool log_uniforms = false;
         bool color_surface_debug = false;
-        bool validation_layer = true;
+        bool validation_layer = false;
         bool tracy_primitive_impl = false;
         std::vector<std::string> tracy_advanced_profiling_modules;
     };

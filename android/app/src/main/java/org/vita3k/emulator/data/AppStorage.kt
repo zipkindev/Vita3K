@@ -6,6 +6,7 @@ import java.io.File
 internal object AppStorage {
     private const val PREFS_NAME = "vita3k_app"
     private const val KEY_INITIAL_SETUP_COMPLETED = "initial_setup_completed"
+    private const val KEY_APPS_VIEW_MODE = "apps_view_mode"
     private const val DEFAULT_STORAGE_DIR_NAME = "vita"
 
     fun storageRootPath(context: Context): String {
@@ -25,6 +26,19 @@ internal object AppStorage {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_INITIAL_SETUP_COMPLETED, completed)
+            .apply()
+    }
+
+    fun appsViewMode(context: Context): ViewMode =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_APPS_VIEW_MODE, null)
+            ?.let { name -> runCatching { ViewMode.valueOf(name) }.getOrNull() }
+            ?: ViewMode.LIST
+
+    fun setAppsViewMode(context: Context, mode: ViewMode) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_APPS_VIEW_MODE, mode.name)
             .apply()
     }
 }

@@ -54,6 +54,14 @@ struct MotionState {
 
     bool has_device_motion_support = false;
     bool is_sampling = false;
+    bool synthetic_tilt = false;
+    Util::Vec3f synthetic_rotation;
+    Util::Vec3f synthetic_rotation_rate;
+    float synthetic_turn = 0.0f;
+    float synthetic_turn_rate = 0.0f;
+    Util::Vec3f synthetic_gyro;
+    float synthetic_yaw = 0.0f;
+    uint64_t synthetic_timestamp = 0;
 
     void init();
     void clear_device_motion_support();

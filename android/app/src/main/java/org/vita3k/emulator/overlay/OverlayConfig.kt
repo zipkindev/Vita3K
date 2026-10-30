@@ -9,7 +9,8 @@ data class OverlayConfig(
     val overlayMask: Int = DEFAULT_OVERLAY_MASK,
     val overlayScale: Int = 100,
     val overlayOpacity: Int = 100,
-    val hideOverlayWhenControllerConnected: Boolean = true
+    val hideOverlayWhenControllerConnected: Boolean = true,
+    val touchSwitchTilt: Boolean = false
 ) {
     val controlsVisible: Boolean
         get() = overlayMask != 0

@@ -235,6 +235,7 @@ public:
     virtual std::unique_ptr<ModuleRuntimeState> create_runtime_state() const { return nullptr; }
     virtual void on_state_change(const MemState &mem, ModuleData &v, const VoiceState previous) {}
     virtual void on_param_change(const MemState &mem, ModuleData &data) {}
+    virtual void on_key_on(const MemState &mem, ModuleData &data) {}
     virtual void cleanup_voice_state(ModuleData &data) {}
 
     virtual void initialize_voice_data(ModuleData &data) const {
@@ -263,6 +264,9 @@ struct VoiceProduct {
     uint8_t *data;
 };
 
+inline constexpr bool size_inputs_by_input_mixer_count = true;
+inline constexpr uint32_t input_mixer_module_id = 0x5CE0;
+
 struct VoiceInputManager {
     using PCMInput = std::vector<uint8_t>;
     using PCMInputs = std::vector<PCMInput>;
@@ -285,6 +289,7 @@ struct Voice {
     bool is_paused;
     bool is_keyed_off;
     uint32_t frame_count;
+    uint32_t play_count = 0;
 
     using Patches = std::vector<Ptr<Patch>>;
 
@@ -327,9 +332,11 @@ struct Rack : public MempoolObject {
 
     std::vector<Ptr<Voice>> voices;
     std::vector<std::unique_ptr<Module>> modules;
+    Ptr<void> user_data;
 
     explicit Rack(System *mama, const Ptr<void> memspace, const uint32_t memspace_size);
 
+    SceNgsCallbackInfo release_callback_info(const MemState &mem);
     static uint32_t get_required_memspace_size(MemState &mem, SceNgsRackDescription *description);
 };
 
@@ -345,16 +352,20 @@ struct System : public MempoolObject {
     static uint32_t get_required_memspace_size(SceNgsSystemInitParams *parameters);
 };
 
-bool deliver_data(const MemState &mem, const std::vector<Voice *> &voice_queue, Voice *source, const uint8_t output_port,
-    const VoiceProduct &data_to_deliver);
+bool deliver_data(const MemState &mem, const std::vector<Voice *> &voice_queue, Voice *source, const uint8_t output_port, const VoiceProduct &data_to_deliver);
 
-bool init_system(State &ngs, const MemState &mem, SceNgsSystemInitParams *parameters, Ptr<void> memspace, const uint32_t memspace_size);
-void release_system(State &ngs, const MemState &mem, System *system);
-bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo *init_info, const SceNgsRackDescription *description);
-void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack);
+inline constexpr bool default_patch_volume_is_unity = true;
+
+bool init_system(State &ngs, MemState &mem, SceNgsSystemInitParams *parameters, Ptr<void> memspace, const uint32_t memspace_size);
+void release_system(State &ngs, MemState &mem, System *system);
+bool init_rack(State &ngs, MemState &mem, System *system, SceNgsBufferInfo *init_info, const SceNgsRackDescription *description);
+void release_rack(State &ngs, MemState &mem, System *system, Rack *rack);
+void invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, Ptr<void> callback, const SceNgsCallbackInfo &info);
 
 void voice_definition_init(State &ngs, MemState &mem);
 Ptr<VoiceDefinition> get_voice_definition(State &ngs, MemState &mem, ngs::BussType type);
 void apply_voice_definition(VoiceDefinition *definition, std::vector<std::unique_ptr<ngs::Module>> &mods);
 uint32_t get_voice_definition_size(VoiceDefinition *definition);
+
+inline constexpr bool null_buffer_ends_stream = true;
 } // namespace ngs

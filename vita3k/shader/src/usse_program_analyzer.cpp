@@ -15,11 +15,14 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <gxm/functions.h>
 #include <gxm/types.h>
 #include <shader/gxp_parser.h>
+#include <shader/usse_decoder_helpers.h>
 #include <shader/usse_program_analyzer.h>
 #include <shader/usse_types.h>
 
+#include <bitset>
 #include <cassert>
 #include <queue>
 
@@ -68,10 +71,6 @@ bool does_write_to_predicate(const std::uint64_t inst, std::uint8_t &pred) {
 
 std::uint8_t get_predicate(const std::uint64_t inst) {
     switch (inst >> 59) {
-    // VMAD2
-    case 0b00000:
-        return ((inst >> 32) & ~0xFCFFFFFF) >> 24;
-
     // V32NMAD, V16NMAD, VMAD
     case 0b00001:
     case 0b00010:
@@ -81,6 +80,7 @@ std::uint8_t get_predicate(const std::uint64_t inst) {
     }
 
     // VMAD normal version, predicates only occupied two bits
+    case 0b00000:
     case 0b00100:
     case 0b00101: {
         uint8_t predicate = ((inst >> 32) & ~0xFCFFFFFF) >> 24;
@@ -161,6 +161,18 @@ std::uint8_t get_predicate(const std::uint64_t inst) {
     return ((inst >> 32) & ~0xF8FFFFFFU) >> 24;
 }
 
+bool uses_pn_predicate(const std::uint64_t inst) {
+    switch (inst >> 59) {
+    // V32NMAD, V16NMAD, VMAD: get_predicate turns their pN into no predicate
+    case 0b00001:
+    case 0b00010:
+    case 0b00011:
+        return static_cast<ExtVecPredicate>(((inst >> 32) & ~0xF8FFFFFFU) >> 24) == ExtVecPredicate::PN;
+    default:
+        return get_predicate(inst) == static_cast<std::uint8_t>(ExtPredicate::PN);
+    }
+}
+
 bool is_buffer_fetch_or_store(const std::uint64_t inst, int &base, int &cursor, int &offset, int &size) {
     // TODO: Is there any exception? Like any instruction use pre or post increment addressing mode.
     cursor = 0;
@@ -200,6 +212,141 @@ int get_uniform_buffer_sizes(const SceGxmProgram &program, UniformBufferSizes &s
     }
 
     return max_used_idx;
+}
+
+static std::uint8_t usse_bits(const std::uint64_t inst, const int lowest, const int count) {
+    return static_cast<std::uint8_t>((inst >> lowest) & ((1ull << count) - 1));
+}
+
+// A program can index a uniform buffer with data it computes and nothing bounds that by the declared size
+std::uint32_t get_dynamic_uniform_buffers(const SceGxmProgram &program) {
+    // the buffers whose address each register may hold, for the temp, primattr, output, secattr and fpinternal banks
+    std::array<std::array<std::uint32_t, 256>, 5> reach{};
+    std::array<int, 256> buffer_of_base;
+    buffer_of_base.fill(-1);
+    std::bitset<256> other_base;
+    std::uint32_t all_buffers = 0;
+
+    const SceGxmProgramParameterContainer *container = gxp::get_container_by_index(program, 19);
+    const std::uint32_t base_sa = container ? container->base_sa_offset : 0;
+    const SceGxmUniformBufferInfo *buffer_infos = program.uniform_buffer();
+    for (std::uint32_t i = 0; i < program.uniform_buffer_count; i++) {
+        const std::uint32_t sa = base_sa + buffer_infos[i].ldst_base_offset;
+        if (sa >= buffer_of_base.size())
+            continue;
+        if (buffer_infos[i].reside_buffer < SCE_GXM_REAL_MAX_UNIFORM_BUFFER) {
+            buffer_of_base[sa] = buffer_infos[i].reside_buffer;
+            reach[static_cast<int>(RegisterBank::SECATTR)][sa] |= 1u << buffer_infos[i].reside_buffer;
+            all_buffers |= 1u << buffer_infos[i].reside_buffer;
+        } else {
+            other_base.set(sa);
+        }
+    }
+    if (all_buffers == 0)
+        return 0;
+
+    const auto slot = [&](const Operand &op, const int offset) -> std::uint32_t * {
+        const int bank = static_cast<int>(op.bank);
+        const int num = op.num + offset;
+        if (bank > static_cast<int>(RegisterBank::FPINTERNAL) || num >= 256)
+            return nullptr;
+        return &reach[bank][num];
+    };
+
+    std::uint32_t dynamic = 0;
+    const auto scan = [&](const std::uint64_t *code, const std::uint64_t count, const bool secondary) {
+        for (std::uint64_t i = 0; i < count; i++) {
+            const std::uint64_t inst = code[i];
+            const std::uint32_t opcode = static_cast<std::uint32_t>(inst >> 59);
+            Operand dest;
+            std::array<Operand, 3> srcs;
+            int src_count = 0;
+            int repeat = 0;
+            switch (opcode) {
+            case 0b10000: // SOP2
+            case 0b10001: // SOP3
+            case 0b10010: // SOP2M
+            case 0b10011: // I8MAD
+            case 0b10100: // I16MAD
+            case 0b10101: // I32MAD
+            case 0b11010: // I32MAD2
+            case 0b01010: // VBW
+            case 0b01011:
+            case 0b01100:
+            case 0b01101:
+            case 0b01110: {
+                decode_dest(dest, usse_bits(inst, 21, 7), usse_bits(inst, 32, 2), usse_bits(inst, 51, 1), false, 7, secondary);
+                decode_src12(srcs[src_count++], usse_bits(inst, 7, 7), usse_bits(inst, 30, 2), usse_bits(inst, 49, 1), false, 7, secondary);
+                decode_src12(srcs[src_count++], usse_bits(inst, 0, 7), usse_bits(inst, 28, 2), usse_bits(inst, 48, 1), false, 7, secondary);
+                if (opcode == 0b10001 || (opcode >= 0b10011 && opcode <= 0b10101) || opcode == 0b11010)
+                    decode_src0(srcs[src_count++], usse_bits(inst, 14, 7), usse_bits(inst, 34, 1), opcode == 0b11010 ? usse_bits(inst, 47, 1) : 0, false, 7, secondary);
+                if (opcode >= 0b01010 && opcode <= 0b01110)
+                    repeat = usse_bits(inst, 44, 4);
+                else if (opcode != 0b10001 && opcode != 0b10010)
+                    repeat = usse_bits(inst, 44, 3);
+                break;
+            }
+            case 0b00111: { // VMOV
+                const std::uint8_t data_type = usse_bits(inst, 40, 3);
+                const bool double_regs = data_type >= static_cast<std::uint8_t>(DataType::C10) && data_type <= static_cast<std::uint8_t>(DataType::F32);
+                const std::uint8_t reg_bits = double_regs ? 7 : 6;
+                decode_dest(dest, usse_bits(inst, 18, 6), usse_bits(inst, 32, 2), usse_bits(inst, 51, 1), double_regs, reg_bits, secondary);
+                decode_src12(srcs[src_count++], usse_bits(inst, 6, 6), usse_bits(inst, 30, 2), usse_bits(inst, 49, 1), double_regs, reg_bits, secondary);
+                if (usse_bits(inst, 46, 2) != 0)
+                    decode_src12(srcs[src_count++], usse_bits(inst, 0, 6), usse_bits(inst, 28, 2), usse_bits(inst, 48, 1), double_regs, reg_bits, secondary);
+                repeat = usse_bits(inst, 44, 2);
+                break;
+            }
+            case 0b11101: // LDR
+            case 0b11110: { // STR
+                Operand base, offset, load_offset;
+                decode_src0(base, usse_bits(inst, 14, 7), usse_bits(inst, 34, 1), usse_bits(inst, 50, 1), false, 7, secondary);
+                decode_src12(offset, usse_bits(inst, 7, 7), usse_bits(inst, 30, 2), usse_bits(inst, 49, 1), false, 7, secondary);
+                decode_src12(load_offset, usse_bits(inst, 0, 7), usse_bits(inst, 28, 2), usse_bits(inst, 48, 1), false, 7, secondary);
+                if (base.bank == RegisterBank::SECATTR && other_base.test(base.num))
+                    continue;
+                const bool register_offset = offset.bank != RegisterBank::IMMEDIATE || (opcode == 0b11101 && load_offset.bank != RegisterBank::IMMEDIATE);
+                if (base.bank == RegisterBank::SECATTR && buffer_of_base[base.num] >= 0) {
+                    if (!register_offset)
+                        continue;
+                    dynamic |= 1u << buffer_of_base[base.num];
+                } else {
+                    // an address that cannot be traced may reach any of the buffers
+                    const std::uint32_t *base_reach = slot(base, 0);
+                    dynamic |= (base_reach && *base_reach) ? *base_reach : all_buffers;
+                }
+                continue;
+            }
+            default:
+                continue;
+            }
+            for (int r = 0; r <= repeat; r++) {
+                std::uint32_t from = 0;
+                for (int s = 0; s < src_count; s++) {
+                    if (const std::uint32_t *src_reach = slot(srcs[s], r))
+                        from |= *src_reach;
+                }
+                std::uint32_t *dest_reach = slot(dest, r);
+                if (from && dest_reach)
+                    *dest_reach |= from;
+            }
+        }
+    };
+
+    const std::uint64_t *secondary = program.secondary_program_start();
+    const std::uint64_t secondary_count = program.secondary_program_end() > secondary ? program.secondary_program_end() - secondary : 0;
+    // twice so an address that reaches a register only later in the code (a loop) is also seen by the reads before it
+    for (int pass = 0; pass < 2; pass++) {
+        scan(secondary, secondary_count, true);
+        scan(program.primary_program_start(), program.primary_program_instr_count, false);
+    }
+
+    std::uint32_t blocks = 0;
+    for (std::uint32_t buffer = 0; buffer < SCE_GXM_REAL_MAX_UNIFORM_BUFFER; buffer++) {
+        if (dynamic & (1u << buffer))
+            blocks |= 1u << (buffer < SCE_GXM_MAX_UNIFORM_BUFFERS ? buffer + SCE_GXM_UNIFORM_BUFFER_OFFSET : SCE_GXM_DEFAULT_UNIFORM_BUFFER_CONTAINER_INDEX);
+    }
+    return blocks;
 }
 
 void get_attribute_informations(const SceGxmProgram &program, AttributeInformationMap &locmap) {
@@ -441,16 +588,23 @@ void analyze(USSEBlockNode &root, USSEOffset end_offset, const AnalyzeReadFuncti
                     // Some ifs may be trying to jump to parent's merge point. It's also means there's no more content
                     // further in this block.
                     if (branch_from_result->second.pred == 0) {
-                        // Execution changed direction, follow it
+                        // Execution changed direction, follow it. Emit the code before the branch.
                         current_code->size = baddr - current_code->offset;
                         request.block_node->add_children(current_code_inst);
 
-                        baddr = branch_from_result->second.dest - 1;
+                        const std::uint32_t follow_dest = branch_from_result->second.dest;
 
-                        std::unique_ptr<USSEBaseNode> current_code_inst = std::make_unique<USSECodeNode>(request.block_node);
-                        USSECodeNode *current_code = reinterpret_cast<USSECodeNode *>(current_code_inst.get());
+                        if (follow_dest > request.end_offset) {
+                            current_code_inst = nullptr;
+                            break;
+                        }
 
-                        current_code->offset = baddr;
+                        baddr = follow_dest - 1;
+
+                        current_code_inst = std::make_unique<USSECodeNode>(request.block_node);
+                        current_code = reinterpret_cast<USSECodeNode *>(current_code_inst.get());
+
+                        current_code->offset = follow_dest;
                     } else {
                         bool else_exist = false;
                         auto branch_from_else_result = branches_from.find(branch_from_result->second.dest - 1);
@@ -558,7 +712,9 @@ void analyze(USSEBlockNode &root, USSEOffset end_offset, const AnalyzeReadFuncti
 
                 std::uint8_t predicate_writed_to = 0;
                 if (does_write_to_predicate(inst, predicate_writed_to)) {
-                    is_predicate_invalidated = ((predicate_writed_to + 1) == current_code->condition) || ((predicate_writed_to + 5) == current_code->condition);
+                    static constexpr ExtPredicate negated[] = { ExtPredicate::NEGP0, ExtPredicate::NEGP1, ExtPredicate::NEGP2, ExtPredicate::PN };
+                    is_predicate_invalidated = ((predicate_writed_to + 1) == current_code->condition)
+                        || (predicate_writed_to < 4 && static_cast<std::uint8_t>(negated[predicate_writed_to]) == current_code->condition);
                 }
 
                 std::uint32_t offset_end = 0;

@@ -20,10 +20,10 @@
 #include <cstdint>
 #include <cstring>
 
-#include <gxm/functions.h>
 #include <gxm/types.h>
 #include <renderer/functions.h>
 #include <renderer/pvrt-dec.h>
+#include <renderer/pvrtc-cache.h>
 #include <util/log.h>
 
 namespace renderer::texture {
@@ -159,6 +159,12 @@ uint32_t decompress_compressed_texture(SceGxmTextureBaseFormat fmt, void *dest, 
         pvr::PVRTDecompressPVRTC(data, (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP) || (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP), width, height,
             (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP) || (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP), static_cast<uint8_t *>(dest));
 
+        const auto cache = pvr::PVRTCDecodeCacheStats();
+        if (cache.requests == 1 || cache.requests % 1024 == 0)
+            LOG_INFO("PVRTC-DECODE requests={} hits={} misses={} bypasses={} evictions={} decodes={} decode_ms={:.3f} resident_bytes={} entries={} budget_bytes={}",
+                cache.requests, cache.hits, cache.misses, cache.bypasses, cache.evictions, cache.decodes,
+                cache.decode_ns / 1e6, cache.resident_bytes, cache.entries, cache.budget_bytes);
+
         const bool is_2bpp = (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP) || (fmt == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP);
 
         const uint32_t num_xword = (width + (is_2bpp ? 7 : 3)) / (is_2bpp ? 8 : 4);
@@ -232,39 +238,6 @@ void convert_U8U3U3U2_to_U8U8U8U8(void *dest, const void *data, const uint32_t w
             dst[row * width + col] = value;
         }
     }
-}
-
-bool is_u5u5u5u1(const SceGxmTextureFormat format) {
-    if (gxm::get_base_format(format) != SCE_GXM_TEXTURE_BASE_FORMAT_U1U5U5U5)
-        return false;
-
-    switch (format & SCE_GXM_TEXTURE_SWIZZLE_MASK) {
-    case SCE_GXM_TEXTURE_SWIZZLE4_RGBA:
-    case SCE_GXM_TEXTURE_SWIZZLE4_BGRA:
-    case SCE_GXM_TEXTURE_SWIZZLE4_RGB1:
-    case SCE_GXM_TEXTURE_SWIZZLE4_BGR1:
-        return true;
-    default:
-        return false;
-    }
-}
-
-void convert_u5u5u5u1_to_u1u5u5u5(void *dest, const void *data, const uint32_t width, const uint32_t height) {
-    auto dst = static_cast<uint16_t *>(dest);
-    auto src = static_cast<const uint16_t *>(data);
-
-    // move the 1-bit field from bit 0 to bit 15, the 5-bit fields keep their order
-    for (uint32_t i = 0; i < width * height; ++i)
-        dst[i] = static_cast<uint16_t>((src[i] >> 1) | (src[i] << 15));
-}
-
-void convert_u1u5u5u5_to_u5u5u5u1(void *dest, const void *data, const uint32_t width, const uint32_t height) {
-    auto dst = static_cast<uint16_t *>(dest);
-    auto src = static_cast<const uint16_t *>(data);
-
-    // move the 1-bit field from bit 15 to bit 0, the 5-bit fields keep their order
-    for (uint32_t i = 0; i < width * height; ++i)
-        dst[i] = static_cast<uint16_t>((src[i] << 1) | (src[i] >> 15));
 }
 
 void convert_f32m_to_f32(void *dest, const void *data, const uint32_t width, const uint32_t height) {
@@ -488,8 +461,12 @@ static void decompress_block_bc1(const uint8_t *block_storage, uint32_t *image) 
     b0 |= b0 >> 5;
     b1 |= b1 >> 5;
 
-    std::uint32_t c0 = 0xFF000000 | (b0 << 16) | (g0 << 8) | r0;
-    std::uint32_t c1 = 0xFF000000 | (b1 << 16) | (g1 << 8) | r1;
+    std::uint32_t colors[4] = {
+        0xFF000000 | (b0 << 16) | (g0 << 8) | r0,
+        0xFF000000 | (b1 << 16) | (g1 << 8) | r1,
+        0,
+        0
+    };
 
     if (n0 > n1) {
         std::uint8_t r2 = static_cast<uint8_t>((2 * r0 + r1 + 1) / 3);
@@ -499,52 +476,20 @@ static void decompress_block_bc1(const uint8_t *block_storage, uint32_t *image) 
         std::uint8_t b2 = static_cast<uint8_t>((2 * b0 + b1 + 1) / 3);
         std::uint8_t b3 = static_cast<uint8_t>((2 * b1 + b0 + 1) / 3);
 
-        std::uint32_t c2 = 0xFF000000 | (b2 << 16) | (g2 << 8) | r2;
-        std::uint32_t c3 = 0xFF000000 | (b3 << 16) | (g3 << 8) | r3;
-
-        for (int i = 0; i < 16; ++i) {
-            int index = (block_storage[i / 4] >> (i % 4 * 2)) & 0x03;
-            switch (index) {
-            case 0:
-                image[i] = c0;
-                break;
-            case 1:
-                image[i] = c1;
-                break;
-            case 2:
-                image[i] = c2;
-                break;
-            case 3:
-                image[i] = c3;
-                break;
-            }
-        }
+        colors[2] = 0xFF000000 | (b2 << 16) | (g2 << 8) | r2;
+        colors[3] = 0xFF000000 | (b3 << 16) | (g3 << 8) | r3;
     } else {
         // Transparent decode
         std::uint8_t r2 = static_cast<uint8_t>((r0 + r1) / 2);
         std::uint8_t g2 = static_cast<uint8_t>((g0 + g1) / 2);
         std::uint8_t b2 = static_cast<uint8_t>((b0 + b1) / 2);
 
-        std::uint32_t c2 = 0xFF000000 | (b2 << 16) | (g2 << 8) | r2;
-
-        for (int i = 0; i < 16; ++i) {
-            int index = (block_storage[i / 4] >> (i % 4 * 2)) & 0x03;
-            switch (index) {
-            case 0:
-                image[i] = c0;
-                break;
-            case 1:
-                image[i] = c1;
-                break;
-            case 2:
-                image[i] = c2;
-                break;
-            case 3:
-                image[i] = 0x00000000;
-                break;
-            }
-        }
+        colors[2] = 0xFF000000 | (b2 << 16) | (g2 << 8) | r2;
     }
+
+    const std::uint32_t indices = block_storage[0] | (block_storage[1] << 8) | (block_storage[2] << 16) | (static_cast<std::uint32_t>(block_storage[3]) << 24);
+    for (int i = 0; i < 16; ++i)
+        image[i] = colors[(indices >> (2 * i)) & 0x03];
 }
 
 /**
@@ -746,9 +691,8 @@ void decompress_bc_image(uint32_t width, uint32_t height, const uint8_t *block_s
                 decompress_func(block_storage, temp_block_result);
 
                 const uint32_t offset = j * 4 * line_size + i * 4;
-                for (uint32_t delta = 0; delta < 16; delta++) {
-                    img[offset + (delta % 4) + ((delta / 4) * line_size)] = temp_block_result[delta];
-                }
+                for (uint32_t row = 0; row < 4; row++)
+                    memcpy(&img[offset + row * line_size], &temp_block_result[row * 4], 4 * sizeof(T));
 
                 block_storage += block_size;
             }

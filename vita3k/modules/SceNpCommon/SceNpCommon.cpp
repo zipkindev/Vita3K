@@ -20,9 +20,19 @@
 #include <io/state.h>
 #include <kernel/state.h>
 #include <np/common.h>
+#include <util/fs.h>
+#include <util/hash.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceNpCommon);
+
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <mutex>
+#include <random>
+#include <string>
+#include <vector>
 
 enum SceNpUtilErrorCode {
     SCE_NP_UTIL_Ok = 0x0,
@@ -48,12 +58,118 @@ struct SceNpAuthRequestParameter {
     Ptr<void> cbArg;
 };
 
+constexpr size_t NP_TICKET_SIZE = 256;
+static std::string np_auth_service_id;
+
+static std::string np_online_id(EmuEnvState &emuenv) {
+    static std::mutex mutex;
+    const std::lock_guard<std::mutex> lock(mutex);
+    const fs::path user_path = emuenv.vita_fs_path / "ux0/user" / emuenv.io.user_id;
+    const fs::path secret_path = user_path / "np_secret.bin";
+    std::vector<uint8_t> secret;
+    if (!fs_utils::read_data(secret_path, secret) || secret.size() != 16) {
+        std::random_device rd;
+        secret.resize(16);
+        for (auto &b : secret)
+            b = static_cast<uint8_t>(rd());
+        boost::system::error_code ec;
+        fs::create_directories(user_path, ec);
+        fs::ofstream file(secret_path, fs::ofstream::binary);
+        file.write(reinterpret_cast<const char *>(secret.data()), static_cast<std::streamsize>(secret.size()));
+        if (file.good())
+            LOG_INFO("Created the NP ticket secret {}", fs_utils::path_to_utf8(secret_path));
+        else
+            LOG_ERROR("Could not save the NP ticket secret {}, the online ID will change next session", fs_utils::path_to_utf8(secret_path));
+    }
+    const Sha256Hash hash = sha256(secret.data(), secret.size());
+    std::string id = "v3k";
+    for (size_t i = 0; i < 13; i++)
+        id += "0123456789abcdefghjkmnpqrstvwxyz"[hash[i] & 31];
+    const fs::path id_path = user_path / "np_online_id.txt";
+    const std::string id_line = id + "\n";
+    fs_utils::dump_data(id_path, id_line.data(), id_line.size());
+    LOG_INFO("NP ticket online ID for user {} is in {}", emuenv.io.user_name, fs_utils::path_to_utf8(id_path));
+    return id;
+}
+
+static std::vector<uint8_t> make_np_ticket(const std::string &online_id, const std::string &service_id) {
+    std::vector<uint8_t> t(NP_TICKET_SIZE, 0);
+    size_t pos = 0;
+    const auto u16 = [&](uint16_t v) {
+        t[pos++] = static_cast<uint8_t>(v >> 8);
+        t[pos++] = static_cast<uint8_t>(v);
+    };
+    const auto u32 = [&](uint32_t v) {
+        u16(static_cast<uint16_t>(v >> 16));
+        u16(static_cast<uint16_t>(v));
+    };
+    const auto u64 = [&](uint64_t v) {
+        u32(static_cast<uint32_t>(v >> 32));
+        u32(static_cast<uint32_t>(v));
+    };
+    const auto str = [&](const std::string &s, size_t n) {
+        for (size_t i = 0; i < n; i++)
+            t[pos++] = i < s.size() ? static_cast<uint8_t>(s[i]) : 0;
+    };
+    uint64_t user_id = 0xCBF29CE484222325ull;
+    for (const char c : online_id)
+        user_id = (user_id ^ static_cast<uint8_t>(c)) * 0x100000001B3ull;
+    const uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+
+    t[pos++] = 0x31;
+    t[pos++] = 0x00;
+    u16(0);
+    u32(NP_TICKET_SIZE - 8);
+    u16(0x3000);
+    u16(156);
+    u16(0x0008);
+    u16(20);
+    u64(user_id);
+    pos += 12;
+    u16(0x0001);
+    u16(4);
+    u32(0x100);
+    u16(0x0007);
+    u16(8);
+    u64(now);
+    u16(0x0007);
+    u16(8);
+    u64(now + 60 * 60 * 1000);
+    u16(0x0002);
+    u16(8);
+    u64(user_id);
+    u16(0x0004);
+    u16(32);
+    str(online_id, 32);
+    u16(0x0008);
+    u16(4);
+    str("us", 4);
+    u16(0x0004);
+    u16(4);
+    str("un", 4);
+    u16(0x0008);
+    u16(24);
+    str(service_id, 24);
+    u16(0x0001);
+    u16(4);
+    u32(0);
+    u16(0x3002);
+    u16(static_cast<uint16_t>(NP_TICKET_SIZE - pos - 2));
+    u16(0x0008);
+    u16(4);
+    u32(0);
+    u16(0x0008);
+    u16(static_cast<uint16_t>(NP_TICKET_SIZE - pos - 2));
+    return t;
+}
+
 EXPORT(int, sceNpAuthCreateStartRequest, const SceNpAuthRequestParameter *param) {
     TRACY_FUNC(sceNpAuthCreateStartRequest, param);
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
     // todo: this callback function should be called from sceNpCheckCallback
     STUBBED("Immediately call ticket callback");
-    thread->run_callback(param->ticketCb.address(), { 1, 1, param->cbArg.address() });
+    np_auth_service_id = param->serviceId ? param->serviceId.get(emuenv.mem) : "";
+    thread->run_callback(param->ticketCb.address(), { 1, static_cast<uint32_t>(NP_TICKET_SIZE), param->cbArg.address() });
     return 1;
 }
 
@@ -77,9 +193,12 @@ EXPORT(int, sceNpAuthGetEntitlementIdList) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpAuthGetTicket) {
-    TRACY_FUNC(sceNpAuthGetTicket);
-    return UNIMPLEMENTED();
+EXPORT(int, sceNpAuthGetTicket, int id, void *buf, SceSize len) {
+    TRACY_FUNC(sceNpAuthGetTicket, id, buf, len);
+    const std::vector<uint8_t> ticket = make_np_ticket(np_online_id(emuenv), np_auth_service_id);
+    if (buf)
+        memcpy(buf, ticket.data(), std::min<size_t>(len, ticket.size()));
+    return 0;
 }
 
 EXPORT(int, sceNpAuthGetTicketParam) {

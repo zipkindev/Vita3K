@@ -21,6 +21,9 @@
 #include <motion/functions.h>
 #include <motion/motion.h>
 
+#include <cmath>
+#include <numbers>
+
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceMotion);
 
@@ -82,7 +85,7 @@ EXPORT(int, sceMotionGetSensorState, SceMotionSensorState *sensorState, int numR
         return RET_ERROR(SCE_MOTION_ERROR_NULL_PARAMETER);
     }
 
-    if ((emuenv.ctrl.has_motion_support || emuenv.motion.has_device_motion_support) && !emuenv.cfg.disable_motion) {
+    if ((emuenv.ctrl.has_motion_support || emuenv.motion.has_device_motion_support || emuenv.motion.synthetic_tilt) && !emuenv.cfg.disable_motion) {
         std::lock_guard<std::mutex> guard(emuenv.motion.mutex);
         sensorState->accelerometer = get_acceleration(emuenv.motion);
         sensorState->gyro = get_gyroscope(emuenv.motion);
@@ -119,7 +122,7 @@ EXPORT(int, sceMotionGetState, SceMotionState *motionState) {
         return RET_ERROR(SCE_MOTION_ERROR_NULL_PARAMETER);
     }
 
-    if ((emuenv.ctrl.has_motion_support || emuenv.motion.has_device_motion_support) && !emuenv.cfg.disable_motion) {
+    if ((emuenv.ctrl.has_motion_support || emuenv.motion.has_device_motion_support || emuenv.motion.synthetic_tilt) && !emuenv.cfg.disable_motion) {
         std::lock_guard<std::mutex> guard(emuenv.motion.mutex);
         motionState->timestamp = emuenv.motion.last_accel_timestamp;
 
@@ -202,6 +205,7 @@ EXPORT(int, sceMotionReset) {
     std::lock_guard<std::mutex> guard(emuenv.motion.mutex);
     emuenv.motion.motion_data.ResetQuaternion();
     emuenv.motion.motion_data.ResetRotations();
+    emuenv.motion.synthetic_yaw = 0.0f;
     return SCE_MOTION_OK;
 }
 
@@ -212,7 +216,9 @@ EXPORT(int, sceMotionResetExt) {
 
 EXPORT(int, sceMotionRotateYaw, const float radians) {
     TRACY_FUNC(sceMotionRotateYaw, radians);
+    std::lock_guard<std::mutex> guard(emuenv.motion.mutex);
     emuenv.motion.motion_data.RotateYaw(radians);
+    emuenv.motion.synthetic_yaw = std::remainder(emuenv.motion.synthetic_yaw + radians, 2.0f * std::numbers::pi_v<float>);
     return SCE_MOTION_OK;
 }
 

@@ -19,20 +19,7 @@
 #include "util/log.h"
 
 #include <algorithm>
-#include <cstdint>
-
-// scales S16LE samples in place, used to push the volume past the 1.0 ceiling cubeb enforces natively
-static void apply_extra_gain(uint8_t *buffer, int nb_bytes, float gain) {
-    if (gain == 1.0f)
-        return;
-
-    int16_t *samples = reinterpret_cast<int16_t *>(buffer);
-    const int nb_samples = nb_bytes / sizeof(int16_t);
-    for (int i = 0; i < nb_samples; i++) {
-        const float amplified = samples[i] * gain;
-        samples[i] = static_cast<int16_t>(std::clamp(amplified, static_cast<float>(INT16_MIN), static_cast<float>(INT16_MAX)));
-    }
-}
+#include <cstring>
 
 static long impl_cubeb_audio_callback(cubeb_stream *stream, void *user_data, const void *input, void *output, long nframes) {
     assert(user_data != nullptr);
@@ -67,14 +54,9 @@ static long impl_cubeb_audio_callback(cubeb_stream *stream, void *user_data, con
         bytes_given += bytes_to_copy;
     }
 
-    if (bytes_given < bytes_to_give) {
-        // buffer underrun (e.g. at game startup before any audio has been produced yet):
-        // output silence for the rest instead of leaving stale/uninitialized memory, which
-        // would otherwise be played back as an audible glitch
+    // ran dry so play silence instead of whatever the device buffer held before
+    if (bytes_given < bytes_to_give)
         memset(&output_buffer[bytes_given], 0, bytes_to_give - bytes_given);
-    }
-
-    apply_extra_gain(output_buffer, bytes_given, port->extra_gain.load(std::memory_order_relaxed));
 
     return nframes;
 }
@@ -131,8 +113,10 @@ AudioOutPortPtr CubebAudioAdapter::open_port(int nb_channels, int freq, int nb_s
 
     port->len_bytes = nb_sample * nb_channels * sizeof(uint16_t);
 
-    // allocate enough buffers to be able to satisfy a callback (+1 to make sure one buffer can be ready)
-    const int nb_buffers = (latency + nb_sample - 1) / nb_sample + 1;
+    // allocate enough buffers to satisfy a callback and to hold AUDIO_MIN_QUEUE_MS (+1 to make sure one buffer can be ready)
+    const uint32_t sample_count = static_cast<uint32_t>(nb_sample);
+    const uint32_t min_queue_frames = static_cast<uint32_t>(freq) * AUDIO_MIN_QUEUE_MS / 1000;
+    const int nb_buffers = static_cast<int>(std::max((latency + sample_count - 1) / sample_count, (min_queue_frames + sample_count - 1) / sample_count)) + 1;
     port->audio_buffers.resize(nb_buffers);
     for (AudioBuffer &audio_buffer : port->audio_buffers) {
         // initialize all the buffers
@@ -174,10 +158,7 @@ void CubebAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer)
 
 void CubebAudioAdapter::set_volume(AudioOutPort &out_port, float volume) {
     CubebAudioOutPort &port = static_cast<CubebAudioOutPort &>(out_port);
-    // cubeb rejects volumes outside [0.0, 1.0]. Anything past that is instead
-    // applied to the samples in software by the audio callback (extra_gain).
-    cubeb_stream_set_volume(port.out_stream, std::min(volume, 1.0f));
-    port.extra_gain.store(std::max(volume, 1.0f), std::memory_order_relaxed);
+    cubeb_stream_set_volume(port.out_stream, volume);
 }
 
 void CubebAudioAdapter::switch_state(const bool pause) {

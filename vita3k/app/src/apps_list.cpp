@@ -56,7 +56,7 @@ static int64_t get_path_write_time(const fs::path &path) {
         return -1;
 
     try {
-        return static_cast<int64_t>(fs::last_write_time(path).time_since_epoch().count());
+        return static_cast<int64_t>(fs::last_write_time(path));
     } catch (const std::exception &e) {
         LOG_WARN("Failed to read timestamp for '{}': {}", path, e.what());
         return -1;
@@ -70,7 +70,7 @@ static std::vector<AppCacheSource> collect_app_cache_sources(const EmuEnvState &
 
     std::vector<AppCacheSource> sources;
     for (const auto &entry : fs::directory_iterator(app_path)) {
-        if (entry.path().empty() || !fs::is_directory(entry.path()))
+        if (entry.path().empty() || !fs::is_directory(entry.path()) || entry.path().filename_is_dot() || entry.path().filename_is_dot_dot())
             continue;
         if (entry.path().filename().string().ends_with("_dec"))
             continue;
@@ -323,9 +323,7 @@ void save_apps_cache(EmuEnvState &emuenv) {
 AppEntry read_app_info(EmuEnvState &emuenv, const std::string &title_id) {
     sfo::SfoAppInfo info;
     vfs::FileBuffer param;
-    if (vfs::read_app_file(param, emuenv.vita_fs_path, title_id, "sce_sys/param.sfo")) {
-        sfo::get_param_info(info, param, emuenv.cfg.sys_lang);
-    } else {
+    if (!vfs::read_app_file(param, emuenv.vita_fs_path, title_id, "sce_sys/param.sfo") || !sfo::get_param_info(info, param, emuenv.cfg.sys_lang)) {
         info.app_title_id = title_id;
         info.app_addcont = title_id;
         info.app_savedata = title_id;

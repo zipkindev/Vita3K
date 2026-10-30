@@ -56,12 +56,7 @@ public:
     bool show_gold = true;
     bool show_platinum = true;
 
-    // Sets one of the flags above and filters the rows again
-    void set_filter_flag(bool &flag, bool value) {
-        beginFilterChange();
-        flag = value;
-        endFilterChange(Direction::Rows);
-    }
+    void invalidate() { invalidateFilter(); }
 
 protected:
     bool filterAcceptsRow(int src_row, const QModelIndex &) const override;
@@ -85,6 +80,7 @@ public Q_SLOTS:
 
 private Q_SLOTS:
     void on_app_selection_changed(int app_idx);
+    void apply_filter();
     void show_trophy_context_menu(const QPoint &pos);
     void show_app_context_menu(const QPoint &pos);
 

@@ -17,11 +17,18 @@
 
 #include <cpu/disasm/functions.h>
 #include <cpu/functions.h>
+
+#include <algorithm>
+#include <atomic>
 #include <cpu/impl/dynarmic_cpu.h>
 #include <cpu/impl/interface.h>
 #include <cpu/state.h>
+#include <mem/functions.h>
 #include <mem/ptr.h>
+#include <string>
+#include <util/jit_startup_profile.h>
 #include <util/types.h>
+#include <vector>
 
 #include <memory>
 #include <string>
@@ -39,6 +46,7 @@ SceUID get_thread_id(CPUState &state) {
 }
 
 CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, MemState &mem) {
+    util::JitStartupScope startup(util::JitStartupKind::CpuInit, { static_cast<uint64_t>(thread_id), 0 });
     CPUStatePtr state(new CPUState(), delete_cpu_state);
     state->mem = &mem;
     state->thread_id = thread_id;
@@ -49,6 +57,7 @@ CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, M
 
     state->cpu = std::make_unique<DynarmicCPU>(state.get(), processor_id, cpu_opt);
 
+    startup.result(0);
     return state;
 }
 
@@ -108,10 +117,6 @@ uint32_t read_tpidruro(CPUState &state) {
     return state.cpu->get_tpidruro();
 }
 
-uint32_t read_tpidrurw(CPUState &state) {
-    return state.cpu->get_tpidrurw();
-}
-
 void write_reg(CPUState &state, size_t index, uint32_t value) {
     state.cpu->set_reg(index, value);
 }
@@ -132,10 +137,6 @@ void write_tpidruro(CPUState &state, uint32_t value) {
     state.cpu->set_tpidruro(value);
 }
 
-void write_tpidrurw(CPUState &state, uint32_t value) {
-    state.cpu->set_tpidrurw(value);
-}
-
 bool is_thumb_mode(CPUState &state) {
     return state.cpu->is_thumb_mode();
 }
@@ -146,6 +147,16 @@ bool hit_breakpoint(CPUState &state) {
 
 void trigger_breakpoint(CPUState &state) {
     state.cpu->trigger_breakpoint();
+}
+
+static std::atomic<bool> g_breakpoints_halt{ false };
+
+void set_breakpoints_halt(bool halt) {
+    g_breakpoints_halt.store(halt, std::memory_order_relaxed);
+}
+
+bool breakpoints_halt() {
+    return g_breakpoints_halt.load(std::memory_order_relaxed);
 }
 
 void set_log_code(CPUState &state, bool log) {
@@ -177,10 +188,18 @@ void invalidate_jit_cache(CPUState &state, Address start, size_t length) {
 }
 
 std::string disassemble(CPUState &state, uint64_t at, bool thumb, uint16_t *insn_size) {
-    MemState &mem = *state.mem;
-    const uint8_t *const code = Ptr<const uint8_t>(static_cast<Address>(at)).get(mem);
-    const size_t buffer_size = GiB(4) - at;
-    return disassemble(state.disasm, code, buffer_size, at, thumb, insn_size);
+    uint8_t code[4];
+    size_t code_size = 0;
+    if (at <= GiB(4) - 4 && debug_safe_copy_guest(*state.mem, static_cast<Address>(at), code, 4))
+        code_size = 4;
+    else if (thumb && at <= GiB(4) - 2 && debug_safe_copy_guest(*state.mem, static_cast<Address>(at), code, 2))
+        code_size = 2;
+    if (code_size == 0) {
+        if (insn_size)
+            *insn_size = 0;
+        return "unmapped";
+    }
+    return disassemble(state.disasm, code, code_size, at, thumb, insn_size);
 }
 
 std::string disassemble(CPUState &state, uint64_t at, uint16_t *insn_size) {
@@ -216,4 +235,17 @@ void set_current_cpu_state(CPUState *state) {
 
 CPUState *get_current_cpu_state() {
     return current_cpu_state;
+}
+
+static thread_local uint32_t last_import_nid = 0;
+static thread_local uint32_t last_import_lr = 0;
+
+void set_last_import_call(uint32_t nid, uint32_t lr) {
+    last_import_nid = nid;
+    last_import_lr = lr;
+}
+
+void get_last_import_call(uint32_t &nid, uint32_t &lr) {
+    nid = last_import_nid;
+    lr = last_import_lr;
 }

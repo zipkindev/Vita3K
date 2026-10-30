@@ -283,14 +283,8 @@ static constexpr vk::ComponentMapping swizzle_gba1 = { Swizzle::eG, Swizzle::eB,
 
 namespace color {
 
-static vk::ComponentMapping translate_swizzle1(SceGxmColorSwizzle1Mode mode) {
-    switch (mode) {
-    case SCE_GXM_COLOR_SWIZZLE1_R:
-        return swizzle_r001;
-    default:
-        LOG_ERROR("Unknown swizzle mode {}", log_hex(mode));
-        return swizzle_identity;
-    }
+static vk::ComponentMapping translate_swizzle1(SceGxmColorFormat format) {
+    return swizzle_r001;
 }
 
 static vk::ComponentMapping translate_swizzle2(SceGxmColorSwizzle2Mode mode) {
@@ -363,18 +357,19 @@ static vk::ComponentMapping translate_swizzle4_abgr(SceGxmColorSwizzle4Mode mode
     }
 }
 
-// U1U5U5U5 is stored as eA1R5G5B5UnormPack16 (A in bit 15, R in bits 10-14, B in bits 0-4).
-// GXM names the fields from the most significant bit: ABGR is A1B5G5R5 and ARGB is A1R5G5B5.
-// RGBA/BGRA (U5U5U5U1) match ARGB/ABGR once their 1-bit field is moved to bit 15, which
-// is how their textures are uploaded (see texture::translate_swizzle).
-static vk::ComponentMapping translate_swizzle4_a1r5g5b5(SceGxmColorSwizzle4Mode mode) {
+// Same as translate_swizzle4_abgr but for eA1R5G5B5UnormPack16
+static vk::ComponentMapping translate_swizzle4_a1rgb(SceGxmColorSwizzle4Mode mode) {
     switch (mode) {
-    case SCE_GXM_COLOR_SWIZZLE4_ABGR:
-    case SCE_GXM_COLOR_SWIZZLE4_BGRA:
-        return swizzle_bgra;
     case SCE_GXM_COLOR_SWIZZLE4_ARGB:
-    case SCE_GXM_COLOR_SWIZZLE4_RGBA:
         return swizzle_rgba;
+    case SCE_GXM_COLOR_SWIZZLE4_ABGR:
+        return swizzle_bgra;
+    case SCE_GXM_COLOR_SWIZZLE4_RGBA:
+        LOG_WARN_ONCE("Unsupported color format U5U5U5U1_RGBA, colors will be wrong");
+        return swizzle_rgba;
+    case SCE_GXM_COLOR_SWIZZLE4_BGRA:
+        LOG_WARN_ONCE("Unsupported color format U5U5U5U1_BGRA, colors will be wrong");
+        return swizzle_bgra;
     default:
         LOG_ERROR("Unknown swizzle mode {}", log_hex(mode));
         return {};
@@ -391,7 +386,7 @@ vk::ComponentMapping translate_swizzle(SceGxmColorFormat format) {
     case SCE_GXM_COLOR_BASE_FORMAT_S16:
     case SCE_GXM_COLOR_BASE_FORMAT_F16:
     case SCE_GXM_COLOR_BASE_FORMAT_F32:
-        return translate_swizzle1(static_cast<SceGxmColorSwizzle1Mode>(swizzle));
+        return translate_swizzle1(format);
 
     case SCE_GXM_COLOR_BASE_FORMAT_U8U8:
     case SCE_GXM_COLOR_BASE_FORMAT_S8S8:
@@ -421,7 +416,7 @@ vk::ComponentMapping translate_swizzle(SceGxmColorFormat format) {
         return translate_swizzle4_abgr(static_cast<SceGxmColorSwizzle4Mode>(swizzle));
 
     case SCE_GXM_COLOR_BASE_FORMAT_U1U5U5U5:
-        return translate_swizzle4_a1r5g5b5(static_cast<SceGxmColorSwizzle4Mode>(swizzle));
+        return translate_swizzle4_a1rgb(static_cast<SceGxmColorSwizzle4Mode>(swizzle));
 
     default:
         LOG_ERROR("Unknown format {}", log_hex(base_format));
@@ -472,7 +467,8 @@ vk::Format translate_format(SceGxmColorBaseFormat format) {
     case SCE_GXM_COLOR_BASE_FORMAT_F11F11F10:
         return vk::Format::eB10G11R11UfloatPack32;
     case SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9:
-        return vk::Format::eE5B9G9R9UfloatPack32;
+        // RGB9E5 is sample only on desktop GPUs (color writes silently dropped) so emulate like U2F10F10F10
+        return vk::Format::eR16G16B16A16Sfloat;
     case SCE_GXM_COLOR_BASE_FORMAT_U8U8U8:
         // 24 bit packed RGB is not supported (on many GPUs), use rgba8 instead
         return vk::Format::eR8G8B8A8Unorm;
@@ -496,9 +492,8 @@ vk::Format translate_format(SceGxmColorBaseFormat format) {
     }
 }
 
-vk::Format translate_surface_format(SceGxmColorBaseFormat base_format, bool support_native_rgba4, bool use_shader_interlock) {
-    // Interlock uses a typed rgba8 storage image; SPIR-V has no rgba4 image format.
-    if (base_format == SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4 && (!support_native_rgba4 || use_shader_interlock))
+vk::Format translate_surface_format(SceGxmColorBaseFormat base_format) {
+    if (base_format == SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4)
         return vk::Format::eR8G8B8A8Unorm;
 
     return translate_format(base_format);
@@ -629,30 +624,6 @@ static vk::ComponentMapping translate_swizzle4_abgr(SceGxmTextureSwizzle4Mode mo
     }
 }
 
-// U1U5U5U5 is uploaded as eA1R5G5B5UnormPack16 (A in bit 15, R in bits 10-14, B in bits 0-4).
-// GXM names the fields from the most significant bit: ABGR is A1B5G5R5 and ARGB is A1R5G5B5.
-// The U5U5U5U1/U5U5U5X1 variants (RGBA, BGRA, RGB1, BGR1) keep their 1-bit field in bit 0;
-// the upload moves it to bit 15, which turns them into ARGB, ABGR, 1RGB and 1BGR.
-static vk::ComponentMapping translate_swizzle4_a1r5g5b5(SceGxmTextureSwizzle4Mode mode) {
-    switch (mode) {
-    case SCE_GXM_TEXTURE_SWIZZLE4_ABGR:
-    case SCE_GXM_TEXTURE_SWIZZLE4_BGRA:
-        return swizzle_bgra;
-    case SCE_GXM_TEXTURE_SWIZZLE4_ARGB:
-    case SCE_GXM_TEXTURE_SWIZZLE4_RGBA:
-        return swizzle_rgba;
-    case SCE_GXM_TEXTURE_SWIZZLE4_1BGR:
-    case SCE_GXM_TEXTURE_SWIZZLE4_BGR1:
-        return swizzle_bgr1;
-    case SCE_GXM_TEXTURE_SWIZZLE4_1RGB:
-    case SCE_GXM_TEXTURE_SWIZZLE4_RGB1:
-        return swizzle_rgb1;
-    default:
-        LOG_ERROR("Unknown swizzle mode {}", log_hex(mode));
-        return {};
-    }
-}
-
 static vk::ComponentMapping translate_swizzleyuv420(SceGxmTextureSwizzleYUV420Mode mode) {
     switch (mode) {
     case SCE_GXM_TEXTURE_SWIZZLE_YUV_CSC0:
@@ -680,6 +651,35 @@ static vk::ComponentMapping translate_swizzleyuv422(SceGxmTextureSwizzleYUV422Mo
     default:
         LOG_ERROR("Unknown swizzle mode {}", log_hex(mode));
         return swizzle_identity;
+    }
+}
+
+// Same as translate_swizzle4_abgr but for eA1R5G5B5UnormPack16
+static vk::ComponentMapping translate_swizzle4_a1rgb(SceGxmTextureSwizzle4Mode mode) {
+    switch (mode) {
+    case SCE_GXM_TEXTURE_SWIZZLE4_ARGB:
+        return swizzle_rgba;
+    case SCE_GXM_TEXTURE_SWIZZLE4_ABGR:
+        return swizzle_bgra;
+    case SCE_GXM_TEXTURE_SWIZZLE4_1RGB:
+        return swizzle_rgb1;
+    case SCE_GXM_TEXTURE_SWIZZLE4_1BGR:
+        return swizzle_bgr1;
+    case SCE_GXM_TEXTURE_SWIZZLE4_RGBA:
+        LOG_WARN_ONCE("Unsupported texture format U5U5U5U1_RGBA, colors will be wrong");
+        return swizzle_rgba;
+    case SCE_GXM_TEXTURE_SWIZZLE4_BGRA:
+        LOG_WARN_ONCE("Unsupported texture format U5U5U5U1_BGRA, colors will be wrong");
+        return swizzle_bgra;
+    case SCE_GXM_TEXTURE_SWIZZLE4_RGB1:
+        LOG_WARN_ONCE("Unsupported texture format U5U5U5X1_RGB1, colors will be wrong");
+        return swizzle_rgb1;
+    case SCE_GXM_TEXTURE_SWIZZLE4_BGR1:
+        LOG_WARN_ONCE("Unsupported texture format U5U5U5X1_BGR1, colors will be wrong");
+        return swizzle_bgr1;
+    default:
+        LOG_ERROR("Unknown swizzle mode {}", log_hex(mode));
+        return {};
     }
 }
 
@@ -751,7 +751,7 @@ vk::ComponentMapping translate_swizzle(SceGxmTextureFormat format) {
         return translate_swizzle4_abgr(static_cast<SceGxmTextureSwizzle4Mode>(swizzle));
 
     case SCE_GXM_TEXTURE_BASE_FORMAT_U1U5U5U5:
-        return translate_swizzle4_a1r5g5b5(static_cast<SceGxmTextureSwizzle4Mode>(swizzle));
+        return translate_swizzle4_a1rgb(static_cast<SceGxmTextureSwizzle4Mode>(swizzle));
 
     // YUV420.
     case SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P2:
@@ -843,7 +843,7 @@ vk::Format translate_format(SceGxmTextureBaseFormat base_format) {
     case SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4:
         return vk::Format::eR4G4B4A4UnormPack16;
     case SCE_GXM_TEXTURE_BASE_FORMAT_U1U5U5U5:
-        // U5U5U5U1 variants are converted on upload, see translate_swizzle4_a1r5g5b5
+        // TODO: same as for the color format
         return vk::Format::eA1R5G5B5UnormPack16;
     case SCE_GXM_TEXTURE_BASE_FORMAT_U2U10U10U10:
         // TODO: same as for the color format

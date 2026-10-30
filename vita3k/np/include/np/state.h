@@ -22,15 +22,17 @@
 
 #include <mem/util.h> // Address.
 
+#include <condition_variable>
 #include <map>
 #include <mutex>
-#include <optional>
-#include <unordered_map>
+#include <thread>
 #include <vector>
 
 struct SceNpServiceStateCallback {
     Address pc;
     Address data;
+    bool delivered = false;
+    uint32_t last_state = 0;
 };
 
 typedef std::map<int, SceNpServiceStateCallback> np_callbacks;
@@ -72,17 +74,22 @@ enum SceNpServiceState : uint32_t {
     SCE_NP_SERVICE_STATE_ONLINE = 3
 };
 
-struct NpTusRequest {
-    SceInt32 title_context_id = 0;
-    std::optional<SceInt32> result;
+struct SceNpMatching2ContextEvent {
+    uint32_t ctx_id;
+    uint32_t event;
+    uint32_t cause;
+    uint32_t error_code;
 };
 
-struct NpTusState {
-    bool inited = false;
-    std::mutex access_mutex;
-    // Simulated handles and immediate TSS failures; no PSN authentication or storage.
-    std::unordered_map<SceUID, bool> title_contexts;
-    std::unordered_map<SceUID, NpTusRequest> requests;
+struct NpMatching2State {
+    std::mutex mutex;
+    Address context_cb_pc = 0;
+    Address context_cb_arg = 0;
+    uint32_t next_ctx_id = 1;
+    std::vector<SceNpMatching2ContextEvent> pending;
+    std::condition_variable cond;
+    std::thread host_thread;
+    bool stop = false;
 };
 
 struct NpState {
@@ -91,6 +98,6 @@ struct NpState {
     SceUID state_cb_id;
 
     NpTrophyState trophy_state;
-    NpTusState tus_state;
+    NpMatching2State matching2;
     np::CommunicationID comm_id;
 };

@@ -25,6 +25,8 @@
 #include <cstdint>
 #include <memory>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
 namespace ddspp {
 struct Descriptor;
@@ -44,9 +46,13 @@ struct YUVConversionCache {
 
 enum class Backend : uint32_t;
 static constexpr size_t TextureCacheSize = 1024;
+inline constexpr bool move_duplicate_texture_content = true;
+inline constexpr bool move_into_rewritten_address = true;
 
 typedef std::array<uint32_t, 4> TextureGxmDataRepr;
 struct TextureCacheInfo {
+    // scene in which this texture's contents were last hashed
+    uint64_t last_hash_scene = 0;
     uint64_t hash = 0;
     SceGxmTexture texture;
     int index = 0;
@@ -57,10 +63,16 @@ struct TextureCacheInfo {
     // used for texture importation
     bool is_imported = false;
     bool is_srgb = false;
+    // content hash of the palette of a paletted texture
+    uint64_t palette_hash = 0;
     uint16_t width = 0;
     uint16_t height = 0;
     uint16_t mip_count = 0;
     SceGxmTextureBaseFormat format;
+    // the content this entry's image holds (so a texture moved elsewhere can take the entry over)
+    uint64_t registered_hash = 0;
+    uint64_t registered_palette_hash = 0;
+    bool content_registered = false;
 };
 
 struct SamplerCacheInfo {
@@ -93,7 +105,7 @@ protected:
     // contain the decrypted header when loading dds
     ddspp::Descriptor *dds_descriptor = nullptr;
     // file being written to when exporting dds
-    std::ofstream output_file;
+    fs::ofstream output_file;
     // used when exporting dds
     bool export_dds_swap_rb = false;
 
@@ -105,6 +117,8 @@ protected:
 public:
     Backend backend;
     bool use_protect = false;
+    // Scene the renderer is currently replaying
+    uint64_t current_scene = 0;
     YUVConversionCache yuv_conversion_cache;
     // use a separate sampler cache
     bool use_sampler_cache = false;
@@ -113,6 +127,32 @@ public:
     // used to quickly get the info from a hash of a gxm_texture
     unordered_map_fast<TextureGxmDataRepr, TextureCacheInfo *> texture_lookup;
     lru::Queue<TextureCacheInfo> texture_queue;
+
+    // cached entries by the content their image holds
+    struct ContentKey {
+        uint64_t hash = 0;
+        uint64_t palette_hash = 0;
+        // the cache key without the data address
+        TextureGxmDataRepr shape{};
+        bool operator==(const ContentKey &other) const = default;
+    };
+    struct ContentKeyHash {
+        size_t operator()(const ContentKey &key) const noexcept {
+            return static_cast<size_t>(key.hash ^ (key.palette_hash * 0x9E3779B97F4A7C15ull) ^ ((static_cast<uint64_t>(key.shape[0]) << 32) | key.shape[1])
+                ^ (static_cast<uint64_t>(key.shape[3]) * 0xC2B2AE3D27D4EB4Full));
+        }
+    };
+    std::unordered_map<ContentKey, TextureCacheInfo *, ContentKeyHash> content_lookup;
+    std::vector<uint8_t> scratch_decompressed;
+    std::vector<uint8_t> scratch_lineared;
+
+    static ContentKey content_key(TextureGxmDataRepr shape, uint64_t hash, uint64_t palette_hash);
+    static ContentKey registered_key(const TextureCacheInfo &info);
+    void remember_content(TextureCacheInfo &info);
+    void forget_content(TextureCacheInfo &info);
+    bool content_left_address(const TextureCacheInfo &info, const MemState &mem);
+    void move_entry(TextureCacheInfo &info, const TextureGxmDataRepr &texture_repr, uint32_t texture_size, uint64_t hash);
+    void erase_key(const TextureCacheInfo &info);
 
     // when use_sampler_cache is set to true, used to quickly get a cached sampler
     unordered_map_fast<uint32_t, SamplerCacheInfo *> sampler_lookup;
@@ -147,6 +187,7 @@ public:
 
     virtual void select(size_t index, const SceGxmTexture &texture) = 0;
     virtual void configure_texture(const SceGxmTexture &texture) = 0;
+    virtual bool upload_cached_pvrt(SceGxmTextureBaseFormat, uint32_t, uint32_t, uint32_t, const void *, int, uint32_t, uint32_t) { return false; }
     virtual void upload_texture_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride) = 0;
     virtual void upload_done() {}
 
@@ -156,7 +197,8 @@ public:
     void cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemState &mem);
 
     // is called by cache_and_bind_texture if use_sampler_cache is set to true
-    int cache_and_bind_sampler(const SceGxmTexture &gxm_texture, bool is_depth = false);
+    virtual bool texture_supports_linear_filter() { return true; }
+    int cache_and_bind_sampler(const SceGxmTexture &gxm_texture, bool force_nearest = false);
 
     // look at the texture folder and update the available imported / exported hashes
     void refresh_available_textures();

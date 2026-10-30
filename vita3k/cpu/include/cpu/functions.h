@@ -39,13 +39,11 @@ uint32_t read_sp(CPUState &state);
 uint32_t read_pc(CPUState &state);
 uint32_t read_lr(CPUState &state);
 uint32_t read_tpidruro(CPUState &state);
-uint32_t read_tpidrurw(CPUState &state);
 void write_reg(CPUState &state, size_t index, uint32_t value);
 void write_sp(CPUState &state, uint32_t value);
 void write_pc(CPUState &state, uint32_t value);
 void write_lr(CPUState &state, uint32_t value);
 void write_tpidruro(CPUState &state, uint32_t value);
-void write_tpidrurw(CPUState &state, uint32_t value);
 bool is_thumb_mode(CPUState &state);
 CPUContext save_context(CPUState &state);
 void load_context(CPUState &state, const CPUContext &ctx);
@@ -67,11 +65,15 @@ std::string disassemble(CPUState &state, uint64_t at, bool thumb, uint16_t *insn
 std::string disassemble(CPUState &state, uint64_t at, uint16_t *insn_size = nullptr);
 bool hit_breakpoint(CPUState &state);
 void trigger_breakpoint(CPUState &state);
+void set_breakpoints_halt(bool halt);
+bool breakpoints_halt();
 void set_log_code(CPUState &state, bool log);
 
 // Thread-local CPU state for signal handler access (exception handlers)
 void set_current_cpu_state(CPUState *state);
 CPUState *get_current_cpu_state();
+void set_last_import_call(uint32_t nid, uint32_t lr);
+void get_last_import_call(uint32_t &nid, uint32_t &lr);
 void set_log_mem(CPUState &state, bool log);
 bool get_log_code(CPUState &state);
 bool get_log_mem(CPUState &state);

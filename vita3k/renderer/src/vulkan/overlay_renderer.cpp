@@ -127,7 +127,10 @@ bool OverlayRenderer::init(VKState &state) {
         cmd.copyBufferToImage(staging.buffer, m_dummy_texture.image, vk::ImageLayout::eTransferDstOptimal, region);
         m_dummy_texture.transition_to(cmd, vkutil::ImageLayout::SampledImage);
 
-        vkutil::end_single_time_command(device, state.general_queue, state.general_command_pool, cmd);
+        {
+            std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+            vkutil::end_single_time_command(device, state.general_queue, state.general_command_pool, cmd);
+        }
         staging.destroy();
     }
 
@@ -207,7 +210,10 @@ bool OverlayRenderer::init(VKState &state) {
             vkutil::ImageLayout::TransferDst, vkutil::ImageLayout::SampledImage, range);
         m_dummy_texture_array.layout = vkutil::ImageLayout::SampledImage;
 
-        vkutil::end_single_time_command(device, state.general_queue, state.general_command_pool, cmd);
+        {
+            std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+            vkutil::end_single_time_command(device, state.general_queue, state.general_command_pool, cmd);
+        }
         staging.destroy();
     }
 
@@ -384,7 +390,7 @@ void OverlayRenderer::destroy() {
         return;
 
     vk::Device device = m_state->device;
-    device.waitIdle();
+    m_state->wait_gpu_idle();
 
     destroy_pipeline();
 

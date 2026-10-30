@@ -22,8 +22,6 @@
 #include <util/align.h>
 #include <util/log.h>
 
-#include <utility>
-
 namespace vkutil {
 
 static vma::Allocator allocator = nullptr;
@@ -39,21 +37,18 @@ void deinit() {
 Image::Image() = default;
 
 Image::Image(Image &&other) noexcept {
-    *this = std::move(other);
+    memcpy(this, &other, sizeof(Image));
+    other.sampler = nullptr;
+    other.view = nullptr;
+    other.image = nullptr;
+    other.layout = ImageLayout::Undefined;
 }
 Image &Image::operator=(Image &&other) noexcept {
-    if (this == &other)
-        return *this;
-    destroy();
-    allocation = other.allocation;
-    image = std::exchange(other.image, nullptr);
-    view = std::exchange(other.view, nullptr);
-    sampler = std::exchange(other.sampler, nullptr);
-    width = other.width;
-    height = other.height;
-    format = other.format;
-    layout = std::exchange(other.layout, ImageLayout::Undefined);
-    destroy_on_deletion = other.destroy_on_deletion;
+    memcpy(this, &other, sizeof(Image));
+    other.sampler = nullptr;
+    other.view = nullptr;
+    other.image = nullptr;
+    other.layout = ImageLayout::Undefined;
     return *this;
 }
 
@@ -86,10 +81,26 @@ Image::~Image() {
     destroy();
 }
 
+vk::ImageViewUsageCreateInfo Image::view_usage(vk::Format view_format) const {
+    auto view_usage = usage;
+    // The sRGB view is for sampling/rendering. Storage access uses a compatible
+    // linear view; inheriting STORAGE here requires unsupported sRGB features.
+    if (view_format == vk::Format::eR8G8B8A8Srgb || view_format == vk::Format::eB8G8R8A8Srgb)
+        view_usage &= ~vk::ImageUsageFlagBits::eStorage;
+    return vk::ImageViewUsageCreateInfo{ .usage = view_usage };
+}
+
 void Image::init_image(vk::ImageUsageFlags usage, vk::ComponentMapping mapping, const vk::ImageCreateFlags image_create_flags, const void *pNext) {
+    this->usage = usage;
+    auto flags = image_create_flags;
+    if ((format == vk::Format::eR8G8B8A8Srgb || format == vk::Format::eB8G8R8A8Srgb)
+        && (usage & vk::ImageUsageFlagBits::eStorage) && (flags & vk::ImageCreateFlagBits::eMutableFormat)) {
+        // A compatible linear view provides STORAGE support for this mutable image.
+        flags |= vk::ImageCreateFlagBits::eExtendedUsage;
+    }
     vk::ImageCreateInfo image_info{
         .pNext = pNext,
-        .flags = image_create_flags,
+        .flags = flags,
         .imageType = vk::ImageType::e2D,
         .format = format,
         .extent = vk::Extent3D{
@@ -121,7 +132,9 @@ void Image::init_image(vk::ImageUsageFlags usage, vk::ComponentMapping mapping, 
         range = vkutil::color_subresource_range;
     }
 
+    const auto intended_usage = view_usage(format);
     vk::ImageViewCreateInfo view_info{
+        .pNext = &intended_usage,
         .image = image,
         .viewType = vk::ImageViewType::e2D,
         .format = format,
@@ -144,17 +157,18 @@ void Image::transition_to_discard(vk::CommandBuffer buffer, ImageLayout new_layo
 Buffer::Buffer() = default;
 
 Buffer::Buffer(Buffer &&other) noexcept {
-    *this = std::move(other);
+    memcpy(this, &other, sizeof(Buffer));
+    other.allocation = nullptr;
+    other.buffer = nullptr;
+    other.size = 0;
+    other.mapped_data = nullptr;
 }
 Buffer &Buffer::operator=(Buffer &&other) noexcept {
-    if (this == &other)
-        return *this;
-    destroy();
-    allocation = std::exchange(other.allocation, nullptr);
-    buffer = std::exchange(other.buffer, nullptr);
-    size = std::exchange(other.size, 0);
-    mapped_data = std::exchange(other.mapped_data, nullptr);
-    destroy_on_deletion = other.destroy_on_deletion;
+    memcpy(this, &other, sizeof(Buffer));
+    other.allocation = nullptr;
+    other.buffer = nullptr;
+    other.size = 0;
+    other.mapped_data = nullptr;
     return *this;
 }
 
@@ -206,14 +220,24 @@ RingBuffer::RingBuffer(vk::BufferUsageFlags usage, const size_t capacity)
 }
 
 void RingBuffer::allocate(const uint32_t data_size) {
-    if (cursor + data_size > capacity)
+    if (cursor + data_size > capacity) {
+        lap_start += capacity;
         cursor = 0;
+    }
 
     data_offset = cursor;
 
     cursor += data_size;
 
     cursor = align(cursor, alignment);
+}
+
+uint64_t RingBuffer::position_after(const uint32_t data_size) const {
+    if (cursor + data_size > capacity)
+        return lap_start + capacity + align(data_size, alignment);
+
+    const uint32_t end = align(cursor + data_size, alignment);
+    return lap_start + (end < capacity ? end : capacity);
 }
 
 void HostRingBuffer::create() {
@@ -230,6 +254,28 @@ void HostRingBuffer::copy(vk::CommandBuffer cmd_buffer, const uint32_t size, con
 
     if (!is_coherent)
         allocator.flushAllocation(buffer.allocation, data_offset + offset, size);
+}
+
+void HostRingBuffer::flush(const uint32_t size) {
+    if (!is_coherent)
+        allocator.flushAllocation(buffer.allocation, data_offset, size);
+}
+
+bool HostRingBuffer::grow(const size_t new_capacity, Buffer &old_buffer) {
+    Buffer larger(new_capacity + (buffer.size - capacity));
+    try {
+        larger.init_buffer(usage, vma_mapped_alloc);
+    } catch (const std::exception &) {
+        return false;
+    }
+
+    old_buffer = std::move(buffer);
+    buffer = std::move(larger);
+    capacity = static_cast<uint32_t>(new_capacity);
+    is_coherent = static_cast<bool>(allocator.getAllocationMemoryProperties(buffer.allocation) & vk::MemoryPropertyFlagBits::eHostCoherent);
+    cursor = 0;
+    lap_start = 0;
+    return true;
 }
 
 void LocalRingBuffer::create() {
@@ -324,7 +370,6 @@ void DestroyQueue::destroy_objects() {
             HANDLE_DESTROY(Fence)
             HANDLE_DESTROY(Semaphore)
             HANDLE_DESTROY(Framebuffer)
-            HANDLE_DESTROY(QueryPool)
             HANDLE_DESTROY(DescriptorPool)
 
         default:

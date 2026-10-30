@@ -28,6 +28,16 @@
 #include <utility>
 #include <vector>
 
+namespace renderer {
+class TextureWorkProfile;
+}
+
+namespace util {
+class SyncWaitProfile;
+class PipelineProfile;
+class JitStartupProfile;
+} // namespace util
+
 // forward declare everything used in EmuEnvState
 namespace sfo {
 struct SfoAppInfo;
@@ -86,6 +96,11 @@ using NIDSet = std::set<uint32_t>;
 /**
  * @brief State of the emulated PlayStation Vita environment
  */
+namespace cpu {
+class JitCompileProfile;
+class JitPreparation;
+} // namespace cpu
+
 struct EmuEnvState {
     // declare this first as the unique_ptr need to be initialized before the references
 private:
@@ -116,9 +131,6 @@ private:
     std::unique_ptr<CompatState> _compat;
     mutable std::mutex _launch_request_mutex;
     std::optional<AppLaunchRequest> _pending_launch_request;
-    // The URI the running app was launched with, until sceAppMgrGetAppParam takes it
-    mutable std::mutex _launch_uri_mutex;
-    std::optional<std::string> _launch_uri;
 
 public:
     // App info contained in its `param.sfo` file
@@ -139,6 +151,12 @@ public:
     std::string self_path{};
     Config &cfg;
     SceUID main_thread_id{};
+    std::shared_ptr<cpu::JitCompileProfile> jit_compile_profile;
+    std::shared_ptr<cpu::JitPreparation> jit_preparation;
+    std::shared_ptr<util::SyncWaitProfile> sync_wait_profile;
+    std::shared_ptr<util::PipelineProfile> pipeline_profile;
+    std::shared_ptr<util::JitStartupProfile> jit_startup_profile;
+    std::shared_ptr<renderer::TextureWorkProfile> texture_work_profile;
     size_t frame_count = 0;
     uint32_t fps = 0;
     uint32_t avg_fps = 0;
@@ -201,22 +219,6 @@ public:
     void clear_app_launch_request() {
         std::scoped_lock lock(_launch_request_mutex);
         _pending_launch_request.reset();
-    }
-
-    void set_launch_uri(std::string uri) {
-        std::scoped_lock lock(_launch_uri_mutex);
-        _launch_uri = std::move(uri);
-    }
-
-    // Returns the launch URI to the first caller only
-    std::optional<std::string> take_launch_uri() {
-        std::scoped_lock lock(_launch_uri_mutex);
-        return std::exchange(_launch_uri, std::nullopt);
-    }
-
-    void clear_launch_uri() {
-        std::scoped_lock lock(_launch_uri_mutex);
-        _launch_uri.reset();
     }
 
     Root get_root_paths() const {

@@ -15,6 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <ngs/modules/atrac9.h>
 #include <ngs/scheduler.h>
 #include <ngs/system.h>
 
@@ -22,6 +23,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
+#include <unordered_map>
+#include <util/log.h>
 #include <util/vector_utils.h>
 
 namespace ngs {
@@ -61,13 +65,29 @@ void VoiceScheduler::deque_insert(const MemState &mem, Voice *voice) {
 }
 
 bool VoiceScheduler::play(const MemState &mem, Voice *voice) {
-    if (voice->state != VOICE_STATE_AVAILABLE)
+    if (voice->state != VOICE_STATE_AVAILABLE) {
+        static std::atomic<uint64_t> refused{ 0 };
+        LOG_WARN("[NGSLIFE] VoicePlay REFUSED #{}: voice={} state={} paused={} keyed_off={} pending={}",
+            refused.fetch_add(1, std::memory_order_relaxed) + 1, fmt::ptr(voice),
+            static_cast<int>(voice->state), voice->is_paused ? 1 : 0, voice->is_keyed_off ? 1 : 0, voice->is_pending ? 1 : 0);
         return false;
+    }
 
     // Transition
     voice->transition(mem, VOICE_STATE_ACTIVE);
+    voice->play_count++;
+
+    for (size_t i = 0; i < voice->rack->modules.size(); i++)
+        if (voice->rack->modules[i])
+            voice->rack->modules[i]->on_key_on(mem, voice->datas[i]);
 
     // Should Enqueue
+    if (voice->is_paused) {
+        static std::atomic<uint64_t> paused_keys{ 0 };
+        const uint64_t n = paused_keys.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 3 || (n % 4096) == 0)
+            LOG_DEBUG("[NGSLIFE] voice={} keyed on while paused ({} so far) - runs at the next resume", fmt::ptr(voice), n);
+    }
     if (!voice->is_paused)
         deque_insert(mem, voice);
 
@@ -108,8 +128,6 @@ bool VoiceScheduler::stop(const MemState &mem, Voice *voice) {
     if (!voice->is_paused)
         deque_voice(voice);
 
-    voice->is_paused = false;
-
     return true;
 }
 
@@ -122,9 +140,105 @@ bool VoiceScheduler::off(const MemState &mem, Voice *voice) {
     return true;
 }
 
-void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID thread_id) {
+void VoiceScheduler::cancel_finished_callback(Voice *voice) {
+    const std::lock_guard<std::recursive_mutex> guard(mutex);
+    std::queue<OperationPending> kept;
+    for (; !operations_pending.empty(); operations_pending.pop()) {
+        const OperationPending &op = operations_pending.front();
+        if (op.type != PendingType::VoiceFinished || op.finished_data.voice != voice)
+            kept.push(op);
+    }
+    operations_pending.swap(kept);
+}
+
+void VoiceScheduler::update(KernelState &kern, MemState &mem, const SceUID thread_id) {
     std::unique_lock<std::recursive_mutex> scheduler_lock(mutex);
     is_updating = true;
+
+    {
+        constexpr bool NGS_CENSUS_VERBOSE = false;
+        static uint32_t census_ticks = 0;
+        if (NGS_CENSUS_VERBOSE && (++census_ticks % 512) == 0 && !queue.empty()) {
+            System *system = queue.front()->rack ? queue.front()->rack->system : nullptr;
+            if (system) {
+                static std::unordered_map<const Voice *, uint32_t> nonavail_since;
+                std::string report;
+                uint32_t total = 0, busy = 0, paused_out_of_queue = 0, stuck = 0;
+                for (Rack *rack : system->racks) {
+                    if (!rack || rack->voices.size() <= 1)
+                        continue;
+                    for (const auto &vp : rack->voices) {
+                        Voice *v = vp.get(mem);
+                        if (!v)
+                            continue;
+                        total++;
+                        if (v->state == VOICE_STATE_AVAILABLE && !v->is_paused) {
+                            nonavail_since.erase(v);
+                            continue;
+                        }
+                        busy++;
+                        const bool in_queue = get_position(v) >= 0;
+                        if (v->is_paused && !in_queue)
+                            paused_out_of_queue++;
+                        auto [it, fresh] = nonavail_since.try_emplace(v, census_ticks);
+                        const uint32_t rounds = (census_ticks - it->second) / 512;
+                        if (rounds >= 12) { // ~66s continuously not reclaimable
+                            stuck++;
+                            const uint32_t mod0 = (!rack->modules.empty() && rack->modules[0]) ? rack->modules[0]->module_id() : 0;
+                            std::string stream;
+                            if ((mod0 == 0x5CAA || mod0 == 0x5CE6) && !v->datas.empty()) {
+                                const auto *st = reinterpret_cast<const SceNgsAT9States *>(v->datas[0].get_state<SceNgsAT9States>());
+                                const auto *pp = v->datas[0].get_parameters<SceNgsAT9Params>(mem);
+                                const int cb = st ? st->current_buffer : -99;
+                                uint64_t in_head = 0;
+                                int in_nonzero = -1;
+                                if (pp && cb >= 0 && cb < 4 && pp->buffer_params[cb].buffer) {
+                                    const uint8_t *ib = pp->buffer_params[cb].buffer.cast<uint8_t>().get(mem);
+                                    const int32_t ilen = std::min<int32_t>(pp->buffer_params[cb].bytes_count, 1280);
+                                    if (ib && ilen > 0) {
+                                        for (int k = 0; k < 8 && k < ilen; k++)
+                                            in_head = (in_head << 8) | ib[k];
+                                        in_nonzero = 0;
+                                        for (int k = 0; k < ilen; k++)
+                                            if (ib[k])
+                                                in_nonzero++;
+                                    }
+                                }
+                                stream = fmt::format(" buf={} buf_bytes={} consumed={} samples_out={} in_head=0x{:016X} in_nonzero={}",
+                                    cb, (pp && cb >= 0 && cb < 4) ? pp->buffer_params[cb].bytes_count : -1,
+                                    st ? st->bytes_consumed_since_key_on : -1, st ? st->samples_generated_total : -1,
+                                    in_head, in_nonzero);
+                            }
+                            float peak = 0.0f;
+                            if (v->products[0].data) {
+                                const float *pd = reinterpret_cast<const float *>(v->products[0].data);
+                                for (int k = 0; k < system->granularity * 2; k++)
+                                    peak = std::max(peak, std::abs(pd[k]));
+                            }
+                            report += fmt::format(" [voice={} rack={} mod0={:#x} state={} paused={} in_queue={} stuck~{}s peak={:.4f}{}]",
+                                fmt::ptr(v), fmt::ptr(rack), mod0, static_cast<int>(v->state), v->is_paused ? 1 : 0,
+                                in_queue ? 1 : 0, rounds * 55 / 10, peak, stream);
+                            constexpr bool FORCE_RELEASE_SILENT_VOICES = false;
+                            if (FORCE_RELEASE_SILENT_VOICES && peak <= 0.0001f && rounds >= 12) {
+                                LOG_WARN("[NGSLIFE] FORCING voice={} back to AVAILABLE (silent {}s)", fmt::ptr(v), rounds * 55 / 10);
+                                if (in_queue)
+                                    deque_voice(v);
+                                v->state = VOICE_STATE_AVAILABLE;
+                                v->is_paused = false;
+                                v->is_pending = false;
+                                v->is_keyed_off = false;
+                                nonavail_since.erase(v);
+                            }
+                        }
+                    }
+                }
+                if (stuck)
+                    LOG_WARN("[NGSLIFE] STUCK VOICES ({} of {} busy, {} total): a voice that never finishes can NEVER be replayed:{}", stuck, busy, total, report);
+                else
+                    LOG_INFO("[NGSLIFE] voice census (rack-wide): total={} busy={} paused_out_of_queue={} stuck=0", total, busy, paused_out_of_queue);
+            }
+        }
+    }
 
     // make a copy of the queue, this way we have no issue if it is modified in a callback
     std::vector<ngs::Voice *> queue_copy = queue;
@@ -151,8 +265,16 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
             }
         }
         if (finished) {
+            {
+                static std::atomic<uint64_t> fin{ 0 };
+                const uint64_t n = fin.fetch_add(1, std::memory_order_relaxed) + 1;
+                if ((n % 128) == 0)
+                    LOG_DEBUG("[NGSLIFE] voice finishes so far: {} (callback={})", n, voice->finished_callback ? "yes" : "NONE");
+            }
             voice->is_keyed_off = true;
             voice->transition(mem, VOICE_STATE_FINALIZING);
+            voice->is_keyed_off = false;
+            stop(mem, voice);
             if (voice->finished_callback) {
                 voice_lock.unlock();
                 scheduler_lock.unlock();
@@ -160,9 +282,6 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
                 scheduler_lock.lock();
                 voice_lock.lock();
             }
-            voice->is_keyed_off = false;
-
-            stop(mem, voice);
         }
 
         for (size_t i = 0; i < voice->rack->vdef->output_count; i++) {
@@ -174,17 +293,34 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
     }
 
     while (!operations_pending.empty()) {
-        OperationPending &op = operations_pending.front();
+        const OperationPending op = operations_pending.front();
+        operations_pending.pop();
 
         switch (op.type) {
-        case PendingType::ReleaseRack:
+        case PendingType::ReleaseRack: {
+            const SceNgsCallbackInfo info = op.release_data.rack->release_callback_info(mem);
             release_rack(*op.release_data.state, mem, op.system, op.release_data.rack);
-            // run callback (we know it is defined)
-            kern.get_thread(thread_id)->run_callback(op.release_data.callback, { Ptr<void>(op.release_data.rack, mem).address() });
+            scheduler_lock.unlock();
+            ngs::invoke_callback(kern, mem, thread_id, Ptr<void>(op.release_data.callback), info);
+            scheduler_lock.lock();
             break;
         }
-
-        operations_pending.pop();
+        case PendingType::VoiceFinished: {
+            Voice *voice = op.finished_data.voice;
+            const bool deliver = voice->state == VOICE_STATE_AVAILABLE && voice->play_count == op.finished_data.play_count && voice->finished_callback;
+            static std::atomic<uint64_t> delivered{ 0 }, dropped{ 0 };
+            const uint64_t n = (deliver ? delivered : dropped).fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 4 || (n % 1024) == 0)
+                LOG_INFO("[NGSLIFE] key-off finished callbacks from sceNgsSystemUpdate: {} delivered, {} dropped (voice keyed on again or no callback)",
+                    delivered.load(std::memory_order_relaxed), dropped.load(std::memory_order_relaxed));
+            if (!deliver)
+                break;
+            scheduler_lock.unlock();
+            voice->invoke_callback(kern, mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, 0);
+            scheduler_lock.lock();
+            break;
+        }
+        }
     }
 
     is_updating = false;

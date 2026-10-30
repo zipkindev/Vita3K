@@ -37,20 +37,30 @@ class DynarmicCPU : public CPUInterface {
     std::shared_ptr<ArmDynarmicCP15> cp15;
 
     std::size_t core_id = 0;
+    uint64_t diagnostic_id = 0;
+    bool diagnostic_rebuild = false;
 
     bool halted = false;
     bool break_ = false;
+    bool crashed = false;
 
     bool log_mem = false;
     bool log_code = false;
+    bool pending_log_code = false;
+    bool pending_log_mem = false;
+    bool has_pending_log_code = false;
+    bool has_pending_log_mem = false;
     bool cpu_opt;
+    bool maybe_exclusive = false;
 
     std::unique_ptr<Dynarmic::A32::Jit> make_jit();
+    void rebuild_jit();
 
 public:
     DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt);
     ~DynarmicCPU() override;
     int run() override;
+    void prepare_jit() override;
     void stop() override;
 
     uint32_t get_reg(uint8_t idx) override;
@@ -70,9 +80,6 @@ public:
 
     uint32_t get_tpidruro() override;
     void set_tpidruro(uint32_t val) override;
-
-    uint32_t get_tpidrurw() override;
-    void set_tpidrurw(uint32_t val) override;
 
     float get_float_reg(uint8_t idx) override;
     void set_float_reg(uint8_t idx, float val) override;

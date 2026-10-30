@@ -23,6 +23,7 @@
 #include <kernel/state.h>
 #include <packages/functions.h>
 #include <renderer/state.h>
+#include <util/lock_and_find.h>
 #include <util/types.h>
 
 #include <util/tracy.h>
@@ -30,8 +31,6 @@ TRACY_MODULE_NAME(SceDisplay);
 
 static int display_wait(EmuEnvState &emuenv, SceUID thread_id, int vcount, const bool is_since_setbuf, const bool is_cb) {
     const auto &thread = emuenv.kernel.get_thread(thread_id);
-    if (is_cb)
-        thread->process_callbacks();
 
     if (emuenv.display.fps_hack)
         // a game can use a vcount of 2 to render as 30fps
@@ -45,10 +44,13 @@ static int display_wait(EmuEnvState &emuenv, SceUID thread_id, int vcount, const
         // the wait is considered starting from the last time the thread resumed
         // from a vblank wait (sceDisplayWait...) and not from the time this function was called
         // but we still need to wait at least for one vblank
-        target_vcount = thread->next_display_wait(emuenv.display.vblank_count + 1, vcount);
+        const uint64_t next_vsync = emuenv.display.vblank_count + 1;
+        const uint64_t min_vsync = thread->last_vblank_waited + vcount;
+        thread->last_vblank_waited = std::max(next_vsync, min_vsync);
+        target_vcount = thread->last_vblank_waited;
     }
 
-    wait_vblank(emuenv.display, thread, target_vcount, is_cb);
+    wait_vblank(emuenv.display, emuenv.kernel, thread, target_vcount, is_cb);
 
     if (emuenv.display.abort.load())
         return SCE_DISPLAY_ERROR_NO_PIXEL_DATA;
@@ -118,6 +120,7 @@ EXPORT(int, _sceDisplayGetResolutionInfoInternal) {
 
 EXPORT(SceInt32, _sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pFrameBuf, SceDisplaySetBufSync sync, uint32_t *pFrameBuf_size) {
     TRACY_FUNC(_sceDisplaySetFrameBuf, pFrameBuf, sync, pFrameBuf_size);
+    emuenv.display.setframe_call_count.fetch_add(1, std::memory_order_relaxed);
     if (!pFrameBuf)
         return SCE_DISPLAY_ERROR_OK;
     if (pFrameBuf->size != sizeof(SceDisplayFrameBuf) && pFrameBuf->size != sizeof(SceDisplayFrameBuf2)) {
@@ -155,6 +158,12 @@ EXPORT(SceInt32, _sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pFrameBuf, Sc
 
     emuenv.display.last_setframe_vblank_count = emuenv.display.vblank_count.load();
     emuenv.frame_count++;
+
+    const uint64_t nflip = emuenv.display.setframe_accept_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    constexpr bool log_first_flips = false;
+    if (log_first_flips && nflip <= 8)
+        LOG_INFO("[FLIPTRACE] flip #{}: base=0x{:X} {}x{} pitch={} sync={} at vblank {}", nflip, pFrameBuf->base.address(),
+            pFrameBuf->width, pFrameBuf->height, pFrameBuf->pitch, static_cast<int>(sync), emuenv.display.vblank_count.load());
 
 #ifdef TRACY_ENABLE
     FrameMarkNamed("SCE frame buffer"); // Tracy - Secondary frame end mark for the emulated frame buffer
@@ -197,7 +206,7 @@ EXPORT(int, sceDisplayGetVcountInternal) {
 EXPORT(SceInt32, sceDisplayRegisterVblankStartCallback, SceUID uid) {
     TRACY_FUNC(sceDisplayRegisterVblankStartCallback, uid);
 
-    const auto cb = emuenv.kernel.objects.find<Callback>(uid);
+    const auto cb = lock_and_find(uid, emuenv.kernel.callbacks, emuenv.kernel.mutex);
     if (!cb)
         return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_VALUE);
 
