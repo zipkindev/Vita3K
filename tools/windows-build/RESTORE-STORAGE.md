@@ -202,6 +202,53 @@ above. Its Windows checkout copy used CRLF line endings; normalized script
 contents matched. Raw machine evidence and protection-ledger contents remain
 outside this public repository.
 
+### Windows privacy build verification: 2026-10-30
+
+[Windows run 41071935435](https://github.com/zipkindev/Vita3K-Go/actions/runs/41071935435) succeeded using merged
+[`afaba9db9749d1b671bc0a0af3d5f2466cefac6b`](https://github.com/zipkindev/Vita3K-Go/commit/afaba9db9749d1b671bc0a0af3d5f2466cefac6b)
+for both source and recipe, with label `master-privacy-verify-20261030.2`.
+The job ran from 10:29:26 to 10:43:03 Eastern on October 30. These are dated build and post-build verification results.
+
+The first full privacy-verification build passed all 38 native tests but blocked
+public packaging because escaped local paths in FFmpeg compiler records were
+mistaken for UNC roots. [PR #50](https://github.com/zipkindev/Vita3K-Go/pull/50) corrected that distinction;
+all 32 Python regressions, formatting and CodeQL checks passed before merge.
+The fresh master run then passed the normal privacy gate and uploaded its
+runtime and diagnostics ZIPs. Actual UNC shares, personal-profile paths and
+private addresses remain blocked; full PDBs are preserved.
+
+| Check | Verified result |
+| --- | --- |
+| Build and tests | Optimized `RelWithDebInfo`/LTO build succeeded; all 38 Windows tests passed. Source and packaging recipe both matched the merged commit above. |
+| Matching full symbols | EXE and full PDB GUID `5896e5ab-cbd4-4a02-b82c-46e405cfb721`, age `1`. The 249,221,120-byte PDB was unchanged from the private original. Windows DbgHelp resolved 27 native full-debug functions with exact address lookups. |
+| Uploaded packages | Downloaded the actual GitHub artifact and verified both ZIP hashes and every manifest hash across 130 public files, including provenance. Public EXE/PDB hashes matched the private local and archived originals byte-for-byte. |
+| Privacy inspection | Scanned 41 public text files and 14 PNG metadata chunks, checked the full PDB, and searched payloads for known personal/network identifiers. No personal-path or internal host/share markers were detected. The executable's PDB reference was the basename `Vita3K.pdb`; public identities contained GUID and age only. |
+| Public evidence | Only source/dependency patches, the dependency manifest, pinned submodules and `public-summary.json` were included. Raw machine logs, CMake caches, Ninja configuration and local evidence scripts were absent. |
+| TrueNAS archiving | The completion hook copied and hash-verified the private package, downloads and raw evidence, with 134 private manifest entries and a verified archive receipt. Independent checks confirmed that archived EXE/PDB hashes matched the preserved build and downloaded public packages. |
+| Automatic cleanup | The hook removed `native-build` after archive verification. `C:` had 42.64 GiB free afterward and 42.74 GiB after temporary candidate files were removed. The archive share remained reachable during the build. |
+
+Full symbols retain neutral build paths and the documented Qt vendor debug-path
+exception. The inspection found no user-specific paths or private host/share
+identifiers. GitHub's
+self-hosted runner/job metadata is separate from package contents. Raw machine
+evidence and credentials remain private.
+
+The archive directory relative to the configured TrueNAS root is
+`Vita3K-Go\master-privacy-verify-20261030.2-41071935435`, with
+`archive-verified.json`, `windows-package`, `windows-downloads` and `build-evidence`.
+The GitHub artifact is
+`windows-master-privacy-verify-20261030.2-41071935435`, subject to the workflow's
+three-day expiration. NAS retention continues to use the 30-day/newest-five
+policy and existing release-preservation rules. Startup reconnect and scheduled
+retention verification remain documented in the earlier dated records.
+
+Verified binary hashes:
+
+```text
+Vita3K.exe  f197ed61dfe22ba258fbc5abcbdaa0fccc207499383ca7daa77ae3b474d14c8e
+Vita3K.pdb  54addac989d9eb6126e17d552bd2cee7715c837cb08ea94ccf4dbd2418e56b65
+```
+
 ## Retention and recovery controls
 
 Unreleased archives must be older than 30 days **and** outside the newest five

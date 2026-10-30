@@ -10,12 +10,16 @@ isolated expiry tests and the post-reboot readiness workflow passed. See the
 [deployment record](RESTORE-STORAGE.md#deployment-verification-2026-10-25) for
 script hashes, test scope and rollback information.
 
-The full Windows build and storage verification passed on 2026-10-30 UTC
-(2026-10-29 Eastern): all 38 tests passed, EXE/PDB identities matched, and all
-134 payload files were verified in TrueNAS and the downloaded GitHub artifact.
-The completion hook removed about 8.9 GiB of compiler output, leaving 41.99 GiB
-free on `C:`. See the [build verification record](RESTORE-STORAGE.md#windows-build-verification-2026-10-30-utc)
-for the pinned source/recipe commits, hashes and retention dry-run results.
+The latest full Windows build and privacy/storage verification passed on
+2026-10-30 Eastern, using merged master `afaba9db` for source and recipe.
+All 38 native tests passed; 130 downloaded public files were hash-verified;
+the unchanged full PDB matched the EXE and resolved 27 native full-debug functions.
+Privacy inspection found no personal-path or internal host/share markers, with
+neutral build paths and the documented Qt vendor debug-path exception retained.
+TrueNAS archiving verified 134 private manifest entries before local compiler
+output was removed, leaving 42.74 GiB free after temporary verification cleanup.
+See the [privacy build verification record](RESTORE-STORAGE.md#windows-privacy-build-verification-2026-10-30)
+for the workflow, privacy-check correction, GUID/age, hashes and scope.
 
 The manual `Windows release package (self-hosted)` workflow uses the dedicated Windows Server 2022 runner. It has no push or pull-request trigger. Only the default branch can dispatch this job. Diagnostic iterations use the local workstation and retain its build directory.
 
