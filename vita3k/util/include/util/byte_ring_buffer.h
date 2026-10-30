@@ -19,12 +19,6 @@ public:
     std::size_t Free() const { return capacity - used; }
     std::size_t Used() const { return used; }
 
-    void Clear() {
-        start = 0;
-        end = 0;
-        used = 0;
-    }
-
     std::size_t Insert(const void *in, std::size_t size) {
         if (Full()) {
             return 0;
@@ -55,17 +49,22 @@ public:
         return removed;
     }
 
-    // Copies up to size bytes, from offset bytes past the oldest one, without removing them
-    std::size_t Peek(void *out, std::size_t size, std::size_t offset = 0) const {
-        if (offset >= used) {
+    std::size_t Peek(void *out, std::size_t size) const {
+        if (Empty()) {
             return 0;
         }
 
-        const std::size_t extractSize = std::min(size, used - offset);
-        const std::size_t from = (start + offset) % capacity;
-        const std::size_t bufTailSize = std::min(capacity - from, extractSize); // Size of stuff to copy between 'from' and buffer end
-        memcpy(out, &buffer[from], bufTailSize);
-        memcpy(static_cast<char *>(out) + bufTailSize, &buffer[0], extractSize - bufTailSize);
+        const std::size_t extractSize = std::min(size, Used());
+        if (start < end) { // Data between 'start' and 'end'-1
+            memcpy(out, &buffer[start], extractSize);
+        } else { // Data between 'start' and buffer end, and potentially between 0 and 'end'-1
+            const std::size_t bufTailSize = std::min(capacity - start, extractSize); // Size of stuff to copy between 'start' and buffer end
+            const std::size_t bufHeadSize = std::min(end, extractSize - bufTailSize); // Size of stuff to copy at buffer start
+
+            assert((bufTailSize + bufHeadSize) == extractSize);
+            memcpy(out, &buffer[start], bufTailSize);
+            memcpy(static_cast<char *>(out) + bufTailSize, &buffer[0], bufHeadSize);
+        }
         return extractSize;
     }
 

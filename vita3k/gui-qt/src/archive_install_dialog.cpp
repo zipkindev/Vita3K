@@ -47,7 +47,7 @@ std::vector<fs::path> archives_in_dir(const fs::path &dir) {
         if (!entry.is_regular_file())
             continue;
         const auto ext = string_utils::tolower(entry.path().extension().string());
-        if (ext == ".zip" || ext == ".vpk" || ext == ".vci")
+        if (ext == ".zip" || ext == ".vpk")
             result.push_back(entry.path());
     }
     return result;
@@ -118,7 +118,8 @@ void ArchiveWorker::run() {
     const int total = static_cast<int>(m_archives.size());
     int done = 0;
 
-    for (const auto &archive_path : m_archives) {
+    for (const size_t index : archive_install_order(m_archives)) {
+        const fs::path &archive_path = m_archives[index];
         const QString archive_name = gui::utils::to_qt_path(archive_path.filename());
         Q_EMIT current_title_changed(archive_name);
         Q_EMIT global_progress(done + 1, total);
@@ -201,7 +202,7 @@ std::vector<fs::path> ArchiveInstallDialog::pick_archives() {
     auto *layout = new QVBoxLayout(&type_picker);
     layout->addWidget(new QLabel(tr("What would you like to install?"), &type_picker));
 
-    auto *btn_file = new QPushButton(tr("Select a file (.zip / .vpk / .vci)..."), &type_picker);
+    auto *btn_file = new QPushButton(tr("Select a file (.zip / .vpk)..."), &type_picker);
     auto *btn_dir = new QPushButton(tr("Select a directory (installs all archives inside)..."), &type_picker);
     auto *btn_cancel = new QPushButton(tr("Cancel"), &type_picker);
     layout->addWidget(btn_file);
@@ -231,7 +232,7 @@ std::vector<fs::path> ArchiveInstallDialog::pick_archives() {
             this,
             tr("Select Archive"),
             QString(),
-            tr("PlayStation Vita commercial software package (NoNpDrm/FAGDec) / PlayStation Vita homebrew software package (*.zip *.vpk *.vci);;PlayStation Vita commercial software package (NoNpDrm/FAGDec) (*.zip);;PlayStation Vita homebrew software package (*.vpk);;Vita Cartridge Image (VCI) File (*.vci)"));
+            tr("PlayStation Vita commercial software package (NoNpDrm/FAGDec) / PlayStation Vita homebrew software package (*.zip *.vpk);;PlayStation Vita commercial software package (NoNpDrm/FAGDec) (*.zip);;PlayStation Vita homebrew software package (*.vpk)"));
         if (path.isEmpty())
             return {};
         return { gui::utils::to_fs_path(path) };
@@ -246,7 +247,7 @@ std::vector<fs::path> ArchiveInstallDialog::pick_archives() {
     auto archives = archives_in_dir(gui::utils::to_fs_path(dir));
     if (archives.empty()) {
         QMessageBox::information(this, tr("No Archives Found"),
-            tr("The selected directory contains no .zip, .vpk, or .vci files."));
+            tr("The selected directory contains no .zip or .vpk files."));
         return {};
     }
     return archives;
@@ -436,7 +437,7 @@ void ArchiveInstallDialog::run_install(const std::vector<fs::path> &archives) {
                             if (r.archive_full_path.empty() || !deleted.insert(r.archive_full_path).second)
                                 continue;
                             // fs::remove throws and crashes the app when the archive is locked so use the non throwing overload
-                            std::error_code error;
+                            boost::system::error_code error;
                             fs::remove(r.archive_full_path, error);
                             if (error)
                                 failed.push_back(r.archive_name);

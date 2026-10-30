@@ -70,6 +70,10 @@ bool USSETranslatorVisitor::vbw(
     inst.opr.src2.type = type;
     inst.opr.dest.type = type;
 
+    inst.opr.src1.index_scale = 1;
+    inst.opr.src2.index_scale = 1;
+    inst.opr.dest.index_scale = 1;
+
     set_repeat_multiplier(1, 1, 1, 1);
 
     BEGIN_REPEAT(repeat_count)
@@ -245,6 +249,13 @@ bool USSETranslatorVisitor::i8mad(
         LOG_ERROR("Custom modifiers for components not handled!");
     }
 
+    inst.opr.src0.index = 0;
+    inst.opr.src1.index = 1;
+    inst.opr.src2.index = 2;
+    inst.opr.dest.index = 3;
+
+    set_repeat_multiplier(1, 1, 1, 1);
+
     BEGIN_REPEAT(repeat_count);
     GET_REPEAT(inst, RepeatMode::SLMSI);
 
@@ -333,6 +344,8 @@ bool USSETranslatorVisitor::i8mad(
 
     END_REPEAT();
 
+    reset_repeat_multiplier();
+
     return true;
 }
 
@@ -407,28 +420,46 @@ bool USSETranslatorVisitor::i16mad(
         }
     }
 
+    inst.opr.src0.index = 0;
+    inst.opr.src1.index = 1;
+    inst.opr.src2.index = 2;
+    inst.opr.dest.index = 3;
+
+    set_repeat_multiplier(1, 1, 1, 1);
+
     BEGIN_REPEAT(repeat_count);
     GET_REPEAT(inst, RepeatMode::SLMSI);
 
-    LOG_DISASM("{:016x}: {}{} {} {} {} {}", m_instr, disasm::s_predicate_str(pred), "IMAD16", disasm::operand_to_str(inst.opr.dest, 0b1),
-        disasm::operand_to_str(inst.opr.src0, 0b1), disasm::operand_to_str(inst.opr.src1, mask_src1) + ((src1_format != 0) ? "-8bits" : ""),
-        disasm::operand_to_str(inst.opr.src2, mask_src2) + ((src2_format != 0) ? "-8bits" : ""));
+    LOG_DISASM("{:016x}: {}{} {} {} {} {} [rpt={}]", m_instr, disasm::s_predicate_str(pred), "IMAD16", disasm::operand_to_str(inst.opr.dest, 0b1, dest_repeat_offset),
+        disasm::operand_to_str(inst.opr.src0, 0b1, src0_repeat_offset), disasm::operand_to_str(inst.opr.src1, mask_src1, src1_repeat_offset) + ((src1_format != 0) ? "-8bits" : ""),
+        std::string(src2_neg ? "-" : "") + disasm::operand_to_str(inst.opr.src2, mask_src2, src2_repeat_offset) + ((src2_format != 0) ? "-8bits" : ""), current_repeat);
 
     inst.opr.src0.swizzle = SWIZZLE_CHANNEL_4_DEFAULT;
-    spv::Id source0 = load(inst.opr.src0, 0b1, src0_repeat_offset);
-    spv::Id source1 = load(inst.opr.src1, mask_src1, src1_repeat_offset);
-    spv::Id source2 = load(inst.opr.src2, mask_src2, src2_repeat_offset);
-
-    spv::Id source0_type = m_b.getTypeId(source0);
-
-    auto mul_result = m_b.createBinOp(spv::OpIMul, source0_type, source0, source1);
-    auto add_result = m_b.createBinOp(spv::OpIAdd, source0_type, mul_result, source2);
-
-    if (add_result != spv::NoResult) {
-        store(inst.opr.dest, add_result, 0b1, dest_repeat_offset);
+    const auto lane_source = [&](const Operand &op, const std::uint8_t low_mask, const int repeat_offset, const int lane) {
+        if (lane == 1 && op.bank == RegisterBank::IMMEDIATE)
+            return is_signed_integer_data_type(op.type) ? m_b.makeIntConstant(0) : m_b.makeUintConstant(0);
+        const int lane_shift = (get_data_type_size(op.type) == 1) ? 2 : 1;
+        return load(op, static_cast<std::uint8_t>(low_mask << (lane_shift * lane)), repeat_offset);
+    };
+    const int lane_count = (inst.opr.dest.bank == RegisterBank::INDEX || inst.opr.dest.bank == RegisterBank::FPINTERNAL) ? 1 : 2;
+    std::vector<spv::Id> lanes;
+    for (int lane = 0; lane < lane_count; lane++) {
+        const spv::Id source0 = lane_source(inst.opr.src0, 0b1, src0_repeat_offset, lane);
+        const spv::Id source1 = lane_source(inst.opr.src1, mask_src1, src1_repeat_offset, lane);
+        const spv::Id source2 = lane_source(inst.opr.src2, mask_src2, src2_repeat_offset, lane);
+        const spv::Id source0_type = m_b.getTypeId(source0);
+        const spv::Id mul_result = m_b.createBinOp(spv::OpIMul, source0_type, source0, source1);
+        lanes.push_back(m_b.createBinOp(src2_neg ? spv::OpISub : spv::OpIAdd, source0_type, mul_result, source2));
     }
 
+    if (lanes.size() == 1)
+        store(inst.opr.dest, lanes[0], 0b1, dest_repeat_offset);
+    else
+        store(inst.opr.dest, m_b.createCompositeConstruct(m_b.makeVectorType(m_b.getTypeId(lanes[0]), 2), lanes), 0b11, dest_repeat_offset);
+
     END_REPEAT();
+
+    reset_repeat_multiplier();
 
     return true;
 }
@@ -562,8 +593,12 @@ bool USSETranslatorVisitor::i32mad2(
         inst.opr.src2.flags |= RegisterFlags::Negative;
     }
 
-    // count is a repeat count, as for the other integer ops: run count + 1 times with the operands
-    // stepped by the last SMLSI increments. Unity's GPU skinning builds store addresses this way.
+    // SMLSI repeat slots: src0/src1/src2/dest are indices 0/1/2/3 in repeat_increase.
+    inst.opr.src0.index = 0;
+    inst.opr.src1.index = 1;
+    inst.opr.src2.index = 2;
+    inst.opr.dest.index = 3;
+
     set_repeat_multiplier(1, 1, 1, 1);
 
     BEGIN_REPEAT(count)
@@ -588,13 +623,10 @@ bool USSETranslatorVisitor::i32mad2(
         store(inst.opr.dest, vsrc2, 0b1, dest_repeat_offset);
     }
 
-    // load() does not step an immediate, so print it unstepped
-    LOG_DISASM("{:016x}: {}{} {} {} {} {} [sn={}]", m_instr, disasm::e_predicate_str(pred), "IMAD", disasm::operand_to_str(inst.opr.dest, 0b1, dest_repeat_offset),
-        disasm::operand_to_str(inst.opr.src0, 0b1, src0_repeat_offset),
-        disasm::operand_to_str(inst.opr.src1, 0b1, inst.opr.src1.bank == RegisterBank::IMMEDIATE ? 0 : src1_repeat_offset),
-        disasm::operand_to_str(inst.opr.src2, 0b1, inst.opr.src2.bank == RegisterBank::IMMEDIATE ? 0 : src2_repeat_offset), sn);
+    LOG_DISASM("{:016x}: {}{} {} {} {} {} [sn={} rpt={}]", m_instr, disasm::e_predicate_str(pred), "IMAD", disasm::operand_to_str(inst.opr.dest, 0b1, dest_repeat_offset),
+        disasm::operand_to_str(inst.opr.src0, 0b1, src0_repeat_offset), disasm::operand_to_str(inst.opr.src1, 0b1, src1_repeat_offset), disasm::operand_to_str(inst.opr.src2, 0b1, src2_repeat_offset), sn, current_repeat);
 
-    END_REPEAT()
+    END_REPEAT();
 
     reset_repeat_multiplier();
 

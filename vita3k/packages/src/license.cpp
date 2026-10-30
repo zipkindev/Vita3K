@@ -52,7 +52,7 @@ bool validate_zrif(const std::string &zRIF) {
 
 static bool open_license(const fs::path &license_path, SceNpDrmLicense &license_buf) {
     memset(&license_buf, 0, sizeof(SceNpDrmLicense));
-    std::ifstream license(license_path, std::ios::in | std::ios::binary);
+    fs::ifstream license(license_path, std::ios::in | std::ios::binary);
     if (license.is_open()) {
         license.read((char *)&license_buf, sizeof(SceNpDrmLicense));
         license.close();
@@ -121,7 +121,7 @@ bool create_license(EmuEnvState &emuenv, const std::string &zRIF) {
 
     // Create a temp license file
     const auto temp_license_path = emuenv.cache_path / "temp_licence.rif";
-    std::ofstream temp_file(temp_license_path, std::ios::out | std::ios::binary);
+    fs::ofstream temp_file(temp_license_path, std::ios::out | std::ios::binary);
     if (!temp_file.is_open()) {
         LOG_ERROR("Failed to create temp license file at: {}", temp_license_path);
         return false;

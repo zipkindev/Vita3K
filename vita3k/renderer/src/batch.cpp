@@ -15,11 +15,14 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <array>
+#include <cpu/functions.h>
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
 #include <renderer/functions.h>
 #include <renderer/state.h>
 #include <renderer/types.h>
+#include <util/sync_wait_profile.h>
 
 #include <renderer/vulkan/types.h>
 
@@ -30,6 +33,7 @@
 #include <overlay/shader_precompile_progress.h>
 #include <util/log.h>
 
+#include <atomic>
 #include <memory>
 #include <thread>
 
@@ -86,6 +90,8 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
         { CommandOpcode::CreateRenderTarget, cmd_handle_create_render_target },
         { CommandOpcode::MemoryMap, cmd_handle_memory_map },
         { CommandOpcode::MemoryUnmap, cmd_handle_memory_unmap },
+        { CommandOpcode::MemoryUnmapFlush, cmd_handle_memory_unmap_flush },
+        { CommandOpcode::SyncGuestRange, cmd_handle_sync_guest_range },
         { CommandOpcode::Draw, cmd_handle_draw },
         { CommandOpcode::TransferCopy, cmd_handle_transfer_copy },
         { CommandOpcode::TransferDownscale, cmd_handle_transfer_downscale },
@@ -105,6 +111,7 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
         state.context = command_list.context;
 
     Command *cmd = command_list.first;
+    uint32_t executed_in_list = 0;
 
     // Take a batch, and execute it. Hope it's not too large
     do {
@@ -112,16 +119,54 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
             break;
         }
 
-        auto handler = handlers.find(cmd->opcode);
-        if (handler == handlers.end()) {
+        static const std::array<CommandHandlerFunc *, 32> handler_table = [&]() {
+            std::array<CommandHandlerFunc *, 32> table{};
+            for (const auto &[op, fn] : handlers)
+                if (static_cast<size_t>(op) < table.size())
+                    table[static_cast<size_t>(op)] = fn;
+            return table;
+        }();
+
+        if (cmd->magic != Command::MAGIC_LIVE) {
+            static std::atomic<uint32_t> stale{ 0 };
+            const uint32_t n = stale.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 8 || (n & 1023) == 0) {
+                const bool recording = state.current_backend == Backend::Vulkan && command_list.context
+                    && reinterpret_cast<vulkan::VKContext *>(command_list.context)->is_recording;
+                const std::string allocator = command_list.context && command_list.context->describe_command_allocator
+                    ? command_list.context->describe_command_allocator()
+                    : std::string("no allocator info");
+                LOG_ERROR("[CMDSTALE] command {} has magic 0x{:X} (opcode {}, flags 0x{:X}) - abandoning the rest of this list (#{})",
+                    fmt::ptr(cmd), cmd->magic, static_cast<int>(cmd->opcode), cmd->flags, n);
+                LOG_ERROR("[CMDSTALE] it was command {} of this list, last opcode executed {}, context {} recording={} | {}",
+                    executed_in_list, state.last_cmd_opcode.load(std::memory_order_relaxed), fmt::ptr(command_list.context), recording, allocator);
+            }
+            // The rest of the list is unreadable and the notifications and statuses it carried will never signal
+            state.last_abandon_epoch_ms.store(duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_relaxed);
+            state.notification_ready.notify_all();
+            state.command_finish_one.notify_all();
+            break;
+        }
+
+        const size_t op_index = static_cast<size_t>(cmd->opcode);
+        CommandHandlerFunc *handler_fn = op_index < handler_table.size() ? handler_table[op_index] : nullptr;
+        if (!handler_fn) {
             LOG_ERROR("Unimplemented command opcode {}", static_cast<int>(cmd->opcode));
         } else {
             CommandHelper helper(cmd);
-            handler->second(state, mem, config, helper, features, command_list.context);
+            state.last_cmd_opcode.store(static_cast<int>(cmd->opcode), std::memory_order_relaxed); // seq-249
+            state.last_cmd_epoch_ms.store(coarse_now_ms(), std::memory_order_relaxed);
+            handler_fn(state, mem, config, helper, features, command_list.context);
         }
+
+        state.progress_counter.fetch_add(1, std::memory_order_relaxed);
+        executed_in_list++;
 
         Command *last_cmd = cmd;
         cmd = cmd->next;
+
+        if (!(last_cmd->flags & Command::FLAG_NO_FREE))
+            last_cmd->magic = 0;
 
         if (command_list.context) {
             command_list.context->free_func(last_cmd);
@@ -143,7 +188,12 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
             return;
 
         // Try to wait for a batch (about 2 or 3ms, game should be fast for this)
-        auto cmd_list = state.command_buffer_queue.top(3);
+        auto cmd_list = [&]() {
+            util::SyncWaitScope span(util::WaitKind::RendererQueue, { reinterpret_cast<uintptr_t>(&state.command_buffer_queue), 0, 3000 });
+            auto list = state.command_buffer_queue.top(3000);
+            span.result(list ? 1 : 0);
+            return list;
+        }();
 
         if (!cmd_list || !is_cmd_ready(mem, *cmd_list)) {
             // beginning of the game or homebrew not using gxm
@@ -245,42 +295,48 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
             state.swap_window();
         }
     }
-    while (!state.render_abort.load(std::memory_order_relaxed)) {
+    try {
+        while (!state.render_abort.load(std::memory_order_relaxed)) {
 #ifdef TRACY_ENABLE
-        ZoneScopedN("Game rendering");
+            ZoneScopedN("Game rendering");
 #endif
-        if (!state.set_current())
-            break;
+            if (!state.set_current())
+                break;
 
-        process_batches(state, state.features, mem, config, 500);
+            process_batches(state, state.features, mem, config, 500);
 
-        if (state.paused.load(std::memory_order_relaxed) && !config.current_config.v_sync)
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            if (state.render_abort.load(std::memory_order_relaxed))
+                break;
 
-        if (state.render_abort.load(std::memory_order_relaxed))
-            break;
+            state.run_render_thread_tasks();
 
-        if (state.overlay_manager) {
-            auto precompile = state.overlay_manager->get<overlay::shader_precompile_progress>();
-            if (precompile) {
-                DisplayFrameInfo peek;
-                {
-                    std::lock_guard<std::mutex> guard(display.display_info_mutex);
-                    peek = display.next_rendered_frame;
-                }
-                if (peek.base) {
-                    state.overlay_manager->remove<overlay::shader_precompile_progress>();
+            if (state.overlay_manager) {
+                auto precompile = state.overlay_manager->get<overlay::shader_precompile_progress>();
+                if (precompile) {
+                    DisplayFrameInfo peek;
+                    {
+                        std::lock_guard<std::mutex> guard(display.display_info_mutex);
+                        peek = display.next_rendered_frame;
+                    }
+                    if (peek.base) {
+                        state.overlay_manager->remove<overlay::shader_precompile_progress>();
+                    }
                 }
             }
-        }
 
-        state.render_frame(display, gxm, mem);
-        state.swap_window();
-        state.async_flip_requested.store(false, std::memory_order_relaxed);
+            state.render_frame(display, gxm, mem);
+            state.swap_window();
+            state.async_flip_requested.store(false, std::memory_order_relaxed);
 
 #ifdef TRACY_ENABLE
-        FrameMark;
+            FrameMark;
 #endif
+        }
+    } catch (const std::exception &e) {
+        // a lost device fails every later submit so stop drawing rather than let it reach std::terminate
+        LOG_CRITICAL("Render thread stopped: {}", e.what());
+        state.render_abort = true;
+        state.command_finish_one.notify_all();
     }
 
     state.done_current();

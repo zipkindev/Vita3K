@@ -1,0 +1,237 @@
+diff --git a/src/dynarmic/backend/x64/a32_emit_x64.cpp b/src/dynarmic/backend/x64/a32_emit_x64.cpp
+index fc8e8bae..8d98a391 100644
+--- a/src/dynarmic/backend/x64/a32_emit_x64.cpp
++++ b/src/dynarmic/backend/x64/a32_emit_x64.cpp
+@@ -207,7 +207,10 @@ void A32EmitX64::EmitCondPrelude(const A32EmitContext& ctx) {
+ 
+ void A32EmitX64::ClearFastDispatchTable() {
+     if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
++        const bool observe = conf.callbacks->IsJitStartupProfilingEnabled();
++        if (observe) conf.callbacks->JitDispatchClearBegin();
+         fast_dispatch_table.fill({});
++        if (observe) conf.callbacks->JitDispatchClearEnd();
+     }
+ }
+ 
+diff --git a/src/dynarmic/backend/x64/a32_emit_x64.h b/src/dynarmic/backend/x64/a32_emit_x64.h
+index 3706b30a..6af96cbb 100644
+--- a/src/dynarmic/backend/x64/a32_emit_x64.h
++++ b/src/dynarmic/backend/x64/a32_emit_x64.h
+@@ -105,6 +105,17 @@ protected:
+         bool recompile;
+     };
+     tsl::robin_map<u64, FastmemPatchInfo> fastmem_patch_info;
++    void InsertFastmemPatch(u64 key, FastmemPatchInfo value) {
++        if (!conf.callbacks->IsJitStartupProfilingEnabled()) {
++            fastmem_patch_info.emplace(key, std::move(value));
++            return;
++        }
++        const auto before = fastmem_patch_info.size(), buckets = fastmem_patch_info.bucket_count();
++        const auto start = conf.callbacks->JitStartupCounter();
++        fastmem_patch_info.emplace(key, std::move(value));
++        const auto end = conf.callbacks->JitStartupCounter();
++        conf.callbacks->JitFastmemInserted(start, end, before, fastmem_patch_info.size(), buckets, fastmem_patch_info.bucket_count());
++    }
+     std::set<DoNotFastmemMarker> do_not_fastmem;
+     std::optional<DoNotFastmemMarker> ShouldFastmem(A32EmitContext& ctx, IR::Inst* inst) const;
+     FakeCall FastmemCallback(u64 rip);
+diff --git a/src/dynarmic/backend/x64/a32_emit_x64_memory.cpp b/src/dynarmic/backend/x64/a32_emit_x64_memory.cpp
+index f2919485..c2e93a7f 100644
+--- a/src/dynarmic/backend/x64/a32_emit_x64_memory.cpp
++++ b/src/dynarmic/backend/x64/a32_emit_x64_memory.cpp
+@@ -132,7 +132,9 @@ void A32EmitX64::GenFastmemFallbacks() {
+ }
+ 
+ #define Axx A32
++#define FASTMEM_INSERT InsertFastmemPatch
+ #include "dynarmic/backend/x64/emit_x64_memory.cpp.inc"
++#undef FASTMEM_INSERT
+ #undef Axx
+ 
+ void A32EmitX64::EmitA32ReadMemory8(A32EmitContext& ctx, IR::Inst* inst) {
+diff --git a/src/dynarmic/backend/x64/a32_interface.cpp b/src/dynarmic/backend/x64/a32_interface.cpp
+index d690aada..6beb08d0 100644
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -201,13 +201,45 @@ private:
+         return GetBasicBlock(A32::LocationDescriptor{GetCurrentLocation()}.SetSingleStepping(true)).entrypoint;
+     }
+ 
++    struct PreparationRejected {};
++    bool preparing_block = false;
++
++public:
++    std::size_t PrepareBlock(u64 value) {
++        ASSERT(!jit_interface->is_executing);
++        if (preparing_block || emitter.GetBasicBlock(IR::LocationDescriptor{value})
++            || Has(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)), HaltReason::CacheInvalidation))
++            return 0;
++        const A32::LocationDescriptor location{IR::LocationDescriptor{value}};
++        if (location.UniqueHash() != value || location.SingleStepping())
++            return 0;
++        const auto before = block_of_code.SpaceRemaining();
++        preparing_block = true;
++        SCOPE_EXIT { preparing_block = false; };
++        try { GetBasicBlock(IR::LocationDescriptor{value}); }
++        catch (const PreparationRejected&) { return 0; }
++        return before - block_of_code.SpaceRemaining();
++    }
++
++private:
+     A32EmitX64::BlockDescriptor GetBasicBlock(IR::LocationDescriptor descriptor) {
+         auto block = emitter.GetBasicBlock(descriptor);
+         if (block)
+             return *block;
+ 
++        const bool profiling = !preparing_block && conf.callbacks->IsJitCompileProfilingEnabled();
++        bool observed_complete = false;
++        if (profiling)
++            conf.callbacks->JitCompileBegin(descriptor.Value());
++        SCOPE_EXIT {
++            if (profiling && !observed_complete)
++                conf.callbacks->JitCompileAborted();
++        };
++
+         constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
+         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
++            if (preparing_block)
++                throw PreparationRejected{};
+             invalidate_entire_cache = true;
+             PerformRequestedCacheInvalidation(HaltReason::CacheInvalidation);
+         }
+@@ -227,7 +259,15 @@ private:
+         }
+         Optimization::IdentityRemovalPass(ir_block);
+         Optimization::VerificationPass(ir_block);
+-        return emitter.Emit(ir_block);
++        if (preparing_block && !conf.callbacks->AllowJitPreparedBlock(descriptor.Value(), A32::LocationDescriptor{ir_block.EndLocation()}.PC()))
++            throw PreparationRejected{};
++        const auto result = emitter.Emit(ir_block);
++        if (profiling) {
++            conf.callbacks->JitCompileComplete(A32::LocationDescriptor{ir_block.EndLocation()}.PC(),
++                result.size);
++            observed_complete = true;
++        }
++        return result;
+     }
+ 
+     void PerformRequestedCacheInvalidation(HaltReason hr) {
+@@ -240,6 +280,8 @@ private:
+                 return;
+             }
+ 
++            if (conf.callbacks->IsJitCompileProfilingEnabled())
++                conf.callbacks->JitCacheInvalidated();
+             jit_state.ResetRSB();
+             if (invalidate_entire_cache) {
+                 block_of_code.ClearCache();
+@@ -280,6 +322,10 @@ HaltReason Jit::Step() {
+     return impl->Step();
+ }
+ 
++std::size_t Jit::PrepareBlock(std::uint64_t descriptor) {
++    return impl->PrepareBlock(descriptor);
++}
++
+ void Jit::ClearCache() {
+     impl->ClearCache();
+ }
+diff --git a/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc b/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
+index 272b896a..93793022 100644
+--- a/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
++++ b/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
+@@ -1,3 +1,7 @@
++#ifndef FASTMEM_INSERT
++#define FASTMEM_INSERT fastmem_patch_info.emplace
++#define UNDEF_FASTMEM_INSERT
++#endif
+ /* This file is part of the dynarmic project.
+  * Copyright (c) 2022 MerryMage
+  * SPDX-License-Identifier: 0BSD
+@@ -104,7 +108,7 @@ void AxxEmitX64::EmitMemoryRead(AxxEmitContext& ctx, IR::Inst* inst) {
+             code.L(*abort);
+             code.call(wrapped_fn);
+ 
+-            fastmem_patch_info.emplace(
++            FASTMEM_INSERT(
+                 mcl::bit_cast<u64>(location),
+                 FastmemPatchInfo{
+                     mcl::bit_cast<u64>(code.getCurr()),
+@@ -191,7 +195,7 @@ void AxxEmitX64::EmitMemoryWrite(AxxEmitContext& ctx, IR::Inst* inst) {
+             code.L(*abort);
+             code.call(wrapped_fn);
+ 
+-            fastmem_patch_info.emplace(
++            FASTMEM_INSERT(
+                 mcl::bit_cast<u64>(location),
+                 FastmemPatchInfo{
+                     mcl::bit_cast<u64>(code.getCurr()),
+@@ -371,7 +375,7 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
+ 
+         const auto location = EmitReadMemoryMov<bitsize>(code, value_idx, src_ptr, ordered);
+ 
+-        fastmem_patch_info.emplace(
++        FASTMEM_INSERT(
+             mcl::bit_cast<u64>(location),
+             FastmemPatchInfo{
+                 mcl::bit_cast<u64>(code.getCurr()),
+@@ -509,7 +513,7 @@ void AxxEmitX64::EmitExclusiveWriteMemoryInline(AxxEmitContext& ctx, IR::Inst* i
+             code.L(*abort);
+             code.call(wrapped_fn);
+ 
+-            fastmem_patch_info.emplace(
++            FASTMEM_INSERT(
+                 mcl::bit_cast<u64>(location),
+                 FastmemPatchInfo{
+                     mcl::bit_cast<u64>(code.getCurr()),
+@@ -543,3 +547,8 @@ void AxxEmitX64::EmitExclusiveWriteMemoryInline(AxxEmitContext& ctx, IR::Inst* i
+ #undef AxxEmitContext
+ #undef AxxJitState
+ #undef AxxUserConfig
++
++#ifdef UNDEF_FASTMEM_INSERT
++#undef FASTMEM_INSERT
++#undef UNDEF_FASTMEM_INSERT
++#endif
+diff --git a/src/dynarmic/interface/A32/a32.h b/src/dynarmic/interface/A32/a32.h
+index e1c5b40f..416aef07 100644
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -34,6 +34,11 @@ public:
+      */
+     HaltReason Step();
+ 
++    // Compile only, while the owner is quiescent. Never runs generated code.
++    // Requires exact code-read validation through AllowJitPreparedBlock.
++    // Returns emitted bytes, or zero for a hit, invalidation, rejection or low headroom.
++    std::size_t PrepareBlock(std::uint64_t descriptor);
++
+     /**
+      * Clears the code cache of all compiled code.
+      * Can be called at any time. Halts execution if called within a callback.
+diff --git a/src/dynarmic/interface/A32/config.h b/src/dynarmic/interface/A32/config.h
+index 360df06e..b556c488 100644
+--- a/src/dynarmic/interface/A32/config.h
++++ b/src/dynarmic/interface/A32/config.h
+@@ -61,6 +61,21 @@ enum class Exception {
+ struct UserCallbacks : public TranslateCallbacks {
+     virtual ~UserCallbacks() = default;
+ 
++    // Optional diagnostic observer. Only x64 actual compilation misses are observed.
++    // Callbacks must not execute guest code, re-enter the JIT, or throw.
++    virtual bool IsJitStartupProfilingEnabled() const noexcept { return false; }
++    virtual std::uint64_t JitStartupCounter() const noexcept { return 0; }
++    virtual void JitFastmemInserted(std::uint64_t, std::uint64_t, std::size_t, std::size_t, std::size_t, std::size_t) noexcept {}
++    virtual void JitDispatchClearBegin() noexcept {}
++    virtual void JitDispatchClearEnd() noexcept {}
++    virtual bool IsJitCompileProfilingEnabled() const noexcept { return false; }
++    virtual void JitCompileBegin(std::uint64_t) noexcept {}
++    virtual void JitCompileComplete(std::uint32_t, std::size_t) noexcept {}
++    virtual void JitCompileAborted() noexcept {}
++    virtual void JitCacheInvalidated() noexcept {}
++    virtual bool AllowJitPreparedBlock(std::uint64_t, std::uint32_t) noexcept { return false; }
++
++
+     // All reads through this callback are 4-byte aligned.
+     // Memory must be interpreted as little endian.
+     std::optional<std::uint32_t> MemoryReadCode(VAddr vaddr) override { return MemoryRead32(vaddr); }

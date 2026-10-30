@@ -201,11 +201,12 @@ EXPORT(int, sceAvcdecDecode, SceAvcdecCtrl *decoder, const SceAvcdecAu *au, SceA
 
     if (decoder->handle == 0)
         return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_PARAM);
-
     const auto state = emuenv.kernel.obj_store.get<VideodecState>();
     const H264DecoderPtr &decoder_info = lock_and_find(decoder->handle, state->decoders, state->mutex);
     if (!decoder_info)
         return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_PARAM);
+
+    picture->numOfOutput = 0;
 
     H264DecoderOptions options = {};
     options.pts_upper = au->pts.upper;
@@ -222,13 +223,30 @@ EXPORT(int, sceAvcdecDecode, SceAvcdecCtrl *decoder, const SceAvcdecAu *au, SceA
         picture->numOfOutput++;
         return 0;
     }
-    bool is_yuvp3 = static_cast<bool>(pPicture->frame.pixelType & SCE_AVCDEC_PIXEL_YUV420_RASTER);
+    const bool is_yuvp3 = static_cast<bool>(pPicture->frame.pixelType & SCE_AVCDEC_PIXEL_YUV420_RASTER);
     decoder_info->set_output_format(is_yuvp3);
-
     decoder_info->configure(&options);
-    const auto send = decoder_info->send(au->es.pBuf.cast<uint8_t>().get(emuenv.mem), au->es.size);
-    decoder_info->set_res(pPicture->frame.frameWidth, pPicture->frame.frameHeight);
-    if (send && decoder_info->receive(output)) {
+    decoder_info->set_res(pPicture->frame.frameWidth, pPicture->frame.frameHeight, pPicture->frame.framePitch);
+
+    const bool empty_au = au->es.size == 0 || !au->es.pBuf;
+    const bool sent = empty_au ? true : decoder_info->send(au->es.pBuf.cast<uint8_t>().get(emuenv.mem), au->es.size);
+    bool got_frame = empty_au ? decoder_info->poll(output) : (sent && decoder_info->receive(output));
+
+    if (!empty_au) {
+        uint32_t up = 0, lo = 0;
+        decoder_info->get_pts(up, lo);
+        const uint64_t out_pts = (static_cast<uint64_t>(up) << 32u) | lo;
+        const uint64_t au_pts = (static_cast<uint64_t>(au->pts.upper) << 32u) | au->pts.lower;
+        if (!(got_frame && out_pts == au_pts)) {
+            const uint64_t hash = H264DecoderState::au_hash(au->es.pBuf.cast<uint8_t>().get(emuenv.mem), au->es.size);
+            if (got_frame && decoder_info->last_send_was_refeed)
+                decoder_info->stash_picture(output, out_pts, pPicture->frame.frameWidth, pPicture->frame.frameHeight, is_yuvp3);
+            if (decoder_info->take_held_picture(output, hash, pPicture->frame.frameWidth, pPicture->frame.frameHeight, is_yuvp3))
+                got_frame = true;
+        }
+    }
+
+    if (got_frame) {
         decoder_info->get_res(pPicture->frame.horizontalSize, pPicture->frame.verticalSize);
         decoder_info->get_pts(pPicture->info.pts.upper, pPicture->info.pts.lower);
         picture->numOfOutput++;
@@ -267,7 +285,6 @@ EXPORT(int, sceAvcdecDecodeAvailableSize, SceAvcdecCtrl *decoder) {
 
     if (decoder->handle == 0)
         return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_PARAM);
-
     const auto state = emuenv.kernel.obj_store.get<VideodecState>();
     const H264DecoderPtr &decoder_info = lock_and_find(decoder->handle, state->decoders, state->mutex);
     if (!decoder_info)
@@ -285,7 +302,6 @@ EXPORT(int, sceAvcdecDecodeFlush, SceAvcdecCtrl *decoder) {
 
     if (decoder->handle == 0)
         return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_PARAM);
-
     const auto state = emuenv.kernel.obj_store.get<VideodecState>();
     const H264DecoderPtr &decoder_info = lock_and_find(decoder->handle, state->decoders, state->mutex);
     if (!decoder_info)
@@ -338,24 +354,44 @@ EXPORT(int, sceAvcdecDecodeStop, SceAvcdecCtrl *decoder, SceAvcdecArrayPicture *
     if (!decoder)
         return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_POINTER);
 
+    if (!picture)
+        return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_POINTER);
+
     if (decoder->handle == 0)
         return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_PARAM);
-
     const auto state = emuenv.kernel.obj_store.get<VideodecState>();
     const H264DecoderPtr &decoder_info = lock_and_find(decoder->handle, state->decoders, state->mutex);
     if (!decoder_info)
         return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_PARAM);
 
-    if (!decoder_info->is_stopped) {
-        SceAvcdecPicture *pPicture = picture->pPicture.get(emuenv.mem)[0].get(emuenv.mem);
+    picture->numOfOutput = 0;
 
-        // we get the values from the last frame, maybe we should slightly increase the pts value?
-        decoder_info->get_res(pPicture->frame.horizontalSize, pPicture->frame.verticalSize);
-        decoder_info->get_pts(pPicture->info.pts.upper, pPicture->info.pts.lower);
+    // Drain on every stop, not only the first after a decode
+    if (picture->numOfElm > 0) {
+        if (!picture->pPicture)
+            return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_POINTER);
 
-        picture->numOfOutput = 1;
-    } else {
-        picture->numOfOutput = 0;
+        Ptr<SceAvcdecPicture> *pictures = picture->pPicture.get(emuenv.mem);
+        for (uint32_t i = 0; i < picture->numOfElm; ++i) {
+            SceAvcdecPicture *pPicture = pictures[i].get(emuenv.mem);
+            if (!pPicture || !pPicture->frame.pPicture[0])
+                break;
+
+            if ((pPicture->frame.pixelType & (SCE_AVCDEC_PIXEL_YUV420_RASTER | SCE_AVCDEC_PIXEL_YUV420_PACKED_RASTER)) == 0) {
+                LOG_ERROR_ONCE("Avcdec rgba output is not implemented");
+                break;
+            }
+
+            decoder_info->set_output_format(static_cast<bool>(pPicture->frame.pixelType & SCE_AVCDEC_PIXEL_YUV420_RASTER));
+            decoder_info->set_res(pPicture->frame.frameWidth, pPicture->frame.frameHeight, pPicture->frame.framePitch);
+            uint8_t *output = pPicture->frame.pPicture[0].cast<uint8_t>().get(emuenv.mem);
+            if (!decoder_info->drain(output))
+                break;
+
+            decoder_info->get_res(pPicture->frame.horizontalSize, pPicture->frame.verticalSize);
+            decoder_info->get_pts(pPicture->info.pts.upper, pPicture->info.pts.lower);
+            ++picture->numOfOutput;
+        }
     }
     decoder_info->is_stopped = true;
 
@@ -380,7 +416,6 @@ EXPORT(int, sceAvcdecDeleteDecoder, SceAvcdecCtrl *decoder) {
 
     if (decoder->handle == 0)
         return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_PARAM);
-
     const auto state = emuenv.kernel.obj_store.get<VideodecState>();
     std::lock_guard<std::mutex> lock(state->mutex);
     state->decoders.erase(decoder->handle);
@@ -410,13 +445,15 @@ EXPORT(int, sceAvcdecQueryDecoderMemSize, uint32_t codec_type, const SceAvcdecQu
     if (query_info->horizontal > 1920 || query_info->vertical > 1088 || query_info->horizontal * query_info->vertical > 1280 * 720 || query_info->numOfRefFrames > 16)
         return RET_ERROR(SCE_AVCDEC_ERROR_INVALID_PARAM);
 
-    std::uint32_t numOfRefFrames = query_info->numOfRefFrames;
-    if (numOfRefFrames == 0) {
-        numOfRefFrames = 1;
-    }
+    // a caller asking for 0 reference frames still needs one frame's worth: returning 0 here would
+    // make the guest allocate nothing for its decoder
+    uint32_t num_of_ref_frames = query_info->numOfRefFrames;
+    if (num_of_ref_frames == 0)
+        num_of_ref_frames = 1;
 
-    decoder_info->frameMemSize = H264DecoderState::buffer_size({ { query_info->horizontal, query_info->vertical } }) * numOfRefFrames;
-    decoder_info->frameMemSize = decoder_info->frameMemSize + 0x3ffffU & 0xfffc0000; // alignment to the next multiple of 0x40000 (256-KiB)
+    decoder_info->frameMemSize = H264DecoderState::buffer_size({ { query_info->horizontal, query_info->vertical } }) * num_of_ref_frames;
+    // alignment to the next multiple of 0x40000 (256-KiB), as the real library reports
+    decoder_info->frameMemSize = (decoder_info->frameMemSize + 0x3FFFFU) & 0xFFFC0000U;
 
     return 0;
 }
@@ -588,8 +625,8 @@ EXPORT(int, sceVideodecQueryInstanceNongameapp) {
 
 EXPORT(int, sceVideodecQueryMemSize) {
     TRACY_FUNC(sceVideodecQueryMemSize);
-    STUBBED("fake size");
-    return 53;
+    STUBBED("estimated size, real one is unknown");
+    return 0x40000;
 }
 
 EXPORT(int, sceVideodecQueryMemSizeInternal) {

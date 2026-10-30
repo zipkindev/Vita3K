@@ -20,6 +20,14 @@
 #include <input/physical_key.h>
 #include <util/system.h>
 
+#ifdef __ANDROID__
+#define VITA3K_DEFAULT_MEMORY_MAPPING "page-table"
+#elif defined(_WIN32)
+#define VITA3K_DEFAULT_MEMORY_MAPPING "external-host"
+#else
+#define VITA3K_DEFAULT_MEMORY_MAPPING "double-buffer"
+#endif
+
 enum ModulesMode {
     AUTOMATIC,
     AUTO_MANUAL,
@@ -89,12 +97,12 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(PhysicalKeyCode, "keyboard-button-psbutton", PhysicalKeyCode::KeyP, keyboard_button_psbutton)                                 \
     code(PhysicalKeyCode, "keyboard-gui-fullscreen", PhysicalKeyCode::F11, keyboard_gui_fullscreen)                                    \
     code(PhysicalKeyCode, "keyboard-gui-toggle-touch", PhysicalKeyCode::KeyT, keyboard_gui_toggle_touch)                               \
+    code(PhysicalKeyCode, "keyboard-gui-tilt", PhysicalKeyCode::Unbound, keyboard_gui_tilt)                                            \
     code(PhysicalKeyCode, "keyboard-toggle-texture-replacement", PhysicalKeyCode::Unbound, keyboard_toggle_texture_replacement)        \
     code(PhysicalKeyCode, "keyboard-take-screenshot", PhysicalKeyCode::Unbound, keyboard_take_screenshot)                              \
     code(PhysicalKeyCode, "keyboard-pinch-modifier", PhysicalKeyCode::Unbound, keyboard_pinch_modifier)                                \
     code(PhysicalKeyCode, "keyboard-alternate-pinch-in", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_in)                        \
     code(PhysicalKeyCode, "keyboard-alternate-pinch-out", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_out)                      \
-    code(PhysicalKeyCode, "keyboard-gui-exit", PhysicalKeyCode::Unbound, keyboard_gui_exit)                                            \
     code(PhysicalKeyCode, "keyboard-button-select-alt", PhysicalKeyCode::Unbound, keyboard_button_select_alt)                          \
     code(PhysicalKeyCode, "keyboard-button-start-alt", PhysicalKeyCode::Unbound, keyboard_button_start_alt)                            \
     code(PhysicalKeyCode, "keyboard-button-up-alt", PhysicalKeyCode::Unbound, keyboard_button_up_alt)                                  \
@@ -122,12 +130,12 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(PhysicalKeyCode, "keyboard-button-psbutton-alt", PhysicalKeyCode::Unbound, keyboard_button_psbutton_alt)                      \
     code(PhysicalKeyCode, "keyboard-gui-fullscreen-alt", PhysicalKeyCode::Unbound, keyboard_gui_fullscreen_alt)                        \
     code(PhysicalKeyCode, "keyboard-gui-toggle-touch-alt", PhysicalKeyCode::Unbound, keyboard_gui_toggle_touch_alt)                    \
+    code(PhysicalKeyCode, "keyboard-gui-tilt-alt", PhysicalKeyCode::Unbound, keyboard_gui_tilt_alt)                                    \
     code(PhysicalKeyCode, "keyboard-toggle-texture-replacement-alt", PhysicalKeyCode::Unbound, keyboard_toggle_texture_replacement_alt)\
     code(PhysicalKeyCode, "keyboard-take-screenshot-alt", PhysicalKeyCode::Unbound, keyboard_take_screenshot_alt)                      \
     code(PhysicalKeyCode, "keyboard-pinch-modifier-alt", PhysicalKeyCode::Unbound, keyboard_pinch_modifier_alt)                        \
     code(PhysicalKeyCode, "keyboard-alternate-pinch-in-alt", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_in_alt)                \
-    code(PhysicalKeyCode, "keyboard-alternate-pinch-out-alt", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_out_alt)              \
-    code(PhysicalKeyCode, "keyboard-gui-exit-alt", PhysicalKeyCode::Unbound, keyboard_gui_exit_alt)
+    code(PhysicalKeyCode, "keyboard-alternate-pinch-out-alt", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_out_alt)
 
 #define CONFIG_INDIVIDUAL(code)                                                                         \
     code(bool, "initial-setup", false, initial_setup)                                                   \
@@ -135,7 +143,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "log-active-shaders", false, log_active_shaders)                                         \
     code(bool, "log-uniforms", false, log_uniforms)                                                     \
     code(bool, "log-compat-warn", false, log_compat_warn)                                               \
-    code(bool, "validation-layer", true, validation_layer)                                              \
+    code(bool, "validation-layer", false, validation_layer)                                              \
     code(bool, "pstv-mode", false, pstv_mode)                                                           \
     code(bool, "show-mode", false, show_mode)                                                           \
     code(bool, "demo-mode", false, demo_mode)                                                           \
@@ -147,20 +155,37 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(std::string, "custom-driver-name", "", custom_driver_name)                                     \
     code(bool, "turbo-mode", false, turbo_mode)                                                         \
     code(int, "gpu-idx", 0, gpu_idx)                                                                    \
-    code(bool, "high-accuracy", false, high_accuracy)                                                   \
+    code(bool, "high-accuracy", true, high_accuracy)                                                   \
+    code(std::string, "tu-debug", "", tu_debug)                                                     \
+    code(bool, "disable-raster-order", false, disable_raster_order)                                \
+    code(bool, "disable-programmable-blending", false, disable_programmable_blending)               \
+    code(bool, "force-full-precision", false, force_full_precision)                                \
+    code(int, "hang-dump-seconds", 0, hang_dump_seconds)                                       \
     code(float, "resolution-multiplier", 1.0f, resolution_multiplier)                                   \
-    code(bool, "disable-surface-sync", true, disable_surface_sync)                                      \
+    code(bool, "disable-surface-sync", false, disable_surface_sync)                                      \
+    code(bool, "surface-sync-clamp-rt", true, surface_sync_clamp_rt)                               \
     code(std::string, "screen-filter", "Bilinear", screen_filter)                                       \
     code(bool, "v-sync", true, v_sync)                                                                  \
     code(int, "anisotropic-filtering", 1, anisotropic_filtering)                                        \
+    code(bool, "jit-compile-telemetry", false, jit_compile_telemetry)                             \
+    code(bool, "sync-wait-telemetry", false, sync_wait_telemetry)                                 \
+    code(bool, "pipeline-telemetry", false, pipeline_telemetry)                                 \
+    code(bool, "jit-preparation", false, jit_preparation)                                      \
+    code(bool, "parallel-texture-decode", true, parallel_texture_decode) \
+    code(bool, "decoded-texture-telemetry", false, decoded_texture_telemetry) \
+    code(bool, "automatic-texture-preparation", false, automatic_texture_preparation)              \
+    code(int, "decoded-texture-cache-mb", 0, decoded_texture_cache_mb)                             \
     code(bool, "texture-cache", true, texture_cache)                                                    \
-    code(bool, "async-pipeline-compilation", true, async_pipeline_compilation)                          \
+    code(bool, "async-pipeline-compilation", false, async_pipeline_compilation)                          \
+    code(bool, "accurate-thread-scheduling", true, accurate_thread_scheduling)                          \
+    code(int, "preempt-on-wake-us", 1000, preempt_on_wake_us)                                             \
+    code(int, "guest-cores", 3, guest_cores)  /* the Vita gives an application three of its four cores */ \
     code(bool, "show-compile-shaders", true, show_compile_shaders)                                      \
     code(bool, "hashless-texture-cache", false, hashless_texture_cache)                                 \
     code(bool, "import-textures", false, import_textures)                                               \
     code(bool, "export-textures", false, export_textures)                                               \
     code(bool, "export-as-png", true, export_as_png)                                                    \
-    code(std::string, "memory-mapping", "double-buffer", memory_mapping)                                \
+    code(std::string, "memory-mapping", VITA3K_DEFAULT_MEMORY_MAPPING, memory_mapping)                   \
     code(bool, "boot-apps-full-screen", false, boot_apps_full_screen)                                   \
     code(bool, "show-live-area-screen", false, show_live_area_screen)                                   \
     code(std::string, "audio-backend", "SDL", audio_backend)                                            \
@@ -175,7 +200,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "delay-background", 4, delay_background)                                                  \
     code(int, "delay-start", 30, delay_start)                                                           \
     code(float, "background-alpha", .300f, background_alpha)                                            \
-    code(int, "log-level", 0 /*SPDLOG_LEVEL_TRACE*/, log_level)                                         \
+    code(int, "log-level", 2 /*SPDLOG_LEVEL_INFO*/, log_level)                                          \
     code(bool, "cpu-opt", true, cpu_opt)                                                                \
     code(std::string, "pref-path", std::string{}, vita_fs_path)                                         \
     code(bool, "discord-rich-presence", true, discord_rich_presence)                                    \
@@ -193,8 +218,8 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(std::string, "user-lang", std::string{}, user_lang)                                            \
     code(bool, "show-welcome", true, show_welcome)                                                      \
     code(bool, "warn-missing-firmware", true, warn_missing_firmware)                                    \
-    code(bool, "check-for-updates", true, check_for_updates)                                            \
-    code(int, "check-for-updates-mode", static_cast<int>(UPDATE_STARTUP_PROMPT), check_for_updates_mode)\
+    code(bool, "check-for-updates", false, check_for_updates)                                           \
+    code(int, "check-for-updates-mode", static_cast<int>(UPDATE_STARTUP_OFF), check_for_updates_mode)   \
     code(int, "file-loading-delay", 0, file_loading_delay)                                              \
     code(bool, "shader-cache", true, shader_cache)                                                      \
     code(bool, "spirv-shader", false, spirv_shader)                                                     \
@@ -210,11 +235,11 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "front-camera-type", 2, front_camera_type)                                                \
     code(std::string, "front-camera-id", std::string{}, front_camera_id)                                \
     code(std::string, "front-camera-image", std::string{}, front_camera_image)                          \
-    code(uint32_t, "front-camera-color", 0, front_camera_color)                                         \
+    code(uint32_t, "front-camera-color", 0xFFFFFFFF, front_camera_color)                                         \
     code(int, "back-camera-type", 2, back_camera_type)                                                  \
     code(std::string, "back-camera-id", std::string{}, back_camera_id)                                  \
     code(std::string, "back-camera-image", std::string{}, back_camera_image)                            \
-    code(uint32_t, "back-camera-color", 0, back_camera_color)                                           \
+    code(uint32_t, "back-camera-color", 0xFFFFFFFF, back_camera_color)                                           \
     code(bool, "tracy-primitive-impl", false, tracy_primitive_impl)
 
 // Vector members produced in the config file

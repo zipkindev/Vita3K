@@ -17,8 +17,6 @@
 
 #pragma once
 
-#include <util/warning.h>
-
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
 #elif defined(__APPLE__)
@@ -92,23 +90,19 @@
 #undef CursorShape
 #endif
 
-namespace VULKAN_HPP_NAMESPACE {
-class ValidationFailedEXTError : public SystemError {
-public:
-    ValidationFailedEXTError(std::string const &message)
-        : SystemError(make_error_code(Result::eErrorValidationFailedEXT), message) {}
-
-    ValidationFailedEXTError(char const *message)
-        : SystemError(make_error_code(Result::eErrorValidationFailedEXT), message) {}
-};
-} // namespace VULKAN_HPP_NAMESPACE
-
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 
-DISABLE_CLANG_WARNING_BEGIN("-Wnullability-completeness")
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnullability-completeness"
+#endif
+
 #include <vk_mem_alloc.hpp>
-DISABLE_CLANG_WARNING_END
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #include <util/fs.h>
 
@@ -172,6 +166,13 @@ static constexpr vma::AllocationCreateInfo vma_mapped_alloc = {
     .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite | vma::AllocationCreateFlagBits::eMapped,
     .usage = vma::MemoryUsage::eAuto,
     .preferredFlags = vk::MemoryPropertyFlagBits::eHostCoherent
+};
+
+static constexpr vma::AllocationCreateInfo vma_readback_alloc = {
+    .flags = vma::AllocationCreateFlagBits::eHostAccessRandom | vma::AllocationCreateFlagBits::eMapped,
+    .usage = vma::MemoryUsage::eAuto,
+    .requiredFlags = vk::MemoryPropertyFlagBits::eHostCoherent,
+    .preferredFlags = vk::MemoryPropertyFlagBits::eHostCached
 };
 
 static constexpr vma::AllocationCreateInfo vma_host_visible = {

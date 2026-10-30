@@ -73,7 +73,7 @@ void clear_presence() {
 
 void shutdown() {
     discord_state.running = false;
-    discord_state.core.reset();
+    static_cast<void>(discord_state.core.release());
 }
 
 void update_presence(const std::string &state, const std::string &details, bool reset_timer) {

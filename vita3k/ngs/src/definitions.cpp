@@ -159,7 +159,7 @@ static Ret apply_definition(BussType type, Arg &arg) {
             DistortionModule, // SCE_NGS_SCREAM_VOICE_DISTORTION
             EqualizerModule, // SCE_NGS_SCREAM_VOICE_EQ
             FilterModule, // SCE_NGS_SCREAM_VOICE_SEND_1_FILTER
-            FilterModule>(arg); // SCE_NGS_SCREAM_VOICE_SEND_2_FILTER
+            PauserModule>(arg); // SCE_NGS_SCREAM_VOICE_PAUSER
     case BussType::BUSS_SCREAM_ATRAC9:
         return apply_definition_with_modules<
             Atrac9Module,
@@ -167,7 +167,7 @@ static Ret apply_definition(BussType type, Arg &arg) {
             DistortionModule, // SCE_NGS_SCREAM_VOICE_DISTORTION
             EqualizerModule, // SCE_NGS_SCREAM_VOICE_EQ
             FilterModule, // SCE_NGS_SCREAM_VOICE_SEND_1_FILTER
-            FilterModule>(arg); // SCE_NGS_SCREAM_VOICE_SEND_2_FILTER
+            PauserModule>(arg); // SCE_NGS_SCREAM_VOICE_PAUSER
     case BussType::BUSS_NORMAL_PLAYER:
         return apply_definition_with_modules<
             PlayerModule,

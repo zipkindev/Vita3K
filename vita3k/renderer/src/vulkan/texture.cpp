@@ -15,6 +15,13 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <chrono>
+#include <cpu/functions.h>
+#include <renderer/texture_work_profile.h>
+#include <renderer/pvrt-dec.h>
 #include <renderer/vulkan/functions.h>
 
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -23,16 +30,17 @@
 
 #include <gxm/functions.h>
 #include <gxm/types.h>
+#include <mem/util.h>
 #include <renderer/functions.h>
 #include <util/align.h>
+#include <util/mem_snapshot.h>
 #include <vkutil/vkutil.h>
 
 namespace renderer::vulkan {
 
 // return if this format can be used to read a depth stencil buffer
 // Only return the formats we support and make sense for now
-// (technically we can read a D24S8 or D32 as R8R8R8R8, but it is not implemented
-// yet and no game I am aware of does it)
+// (U8U8U8U8 reads the packed words of an S8D24 buffer. Reading a D32 that way is not implemented)
 static bool is_depth_stencil_compatible_format(SceGxmTextureBaseFormat format, bool &can_be_depth) {
     switch (format) {
         // D16 format
@@ -49,6 +57,9 @@ static bool is_depth_stencil_compatible_format(SceGxmTextureBaseFormat format, b
     case SCE_GXM_TEXTURE_BASE_FORMAT_U8:
     case SCE_GXM_TEXTURE_BASE_FORMAT_S8:
         return true;
+        // S8D24 words as colour
+    case SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8:
+        return true;
     default:
         return false;
     }
@@ -57,11 +68,134 @@ static bool is_depth_stencil_compatible_format(SceGxmTextureBaseFormat format, b
 VKTextureCache::VKTextureCache(VKState &state)
     : state(state) {}
 
+uint64_t VKTextureCache::release_all_cached_textures() {
+    uint64_t freed = 0;
+    for (auto &item : texture_queue.items) {
+        TextureCacheInfo &info = item.content;
+        if (info.texture_size == 0)
+            continue;
+
+        forget_content(info);
+        erase_key(info);
+        info.texture_size = 0;
+        info.dirty = false;
+        info.use_hash = false;
+        info.last_hash_scene = 0;
+
+        TextureCacheEntry &entry = textures[info.index];
+        if (entry.texture.image) {
+            freed += entry.memory_needed;
+            entry.texture.destroy();
+        }
+        entry.memory_needed = 0;
+        cached_bytes -= entry.image_bytes;
+        entry.image_bytes = 0;
+    }
+    current_texture = nullptr;
+    gxm_texture = nullptr;
+    return freed;
+}
+
+void VKTextureCache::release_image(TextureCacheEntry &entry) {
+    if (entry.texture.image)
+        state.frame().destroy_queue.add_image(entry.texture);
+    cached_bytes -= entry.image_bytes;
+    entry.image_bytes = 0;
+}
+
+void VKTextureCache::create_image(const vk::ImageCreateInfo &image_info) {
+    // a game can bind far more distinct textures than fit in memory (a P8 sheet is cached once for each palette, as RGBA8)
+    // so make room by evicting the least recently used images
+    if (cached_bytes + current_texture->memory_needed > memory_budget) {
+        LOG_INFO_ONCE("Texture cache reached its {} MiB budget, evicting the least recently used textures", memory_budget / MiB(1));
+        evict_to_budget(current_texture->memory_needed);
+    }
+
+    vkutil::Image &image = current_texture->texture;
+    vma::AllocationInfo allocation_info;
+    try {
+        std::tie(image.image, image.allocation) = state.allocator.createImage(image_info, vkutil::vma_auto_alloc, allocation_info);
+    } catch (const vk::SystemError &) {
+        LOG_WARN("Could not allocate a {}x{} {} texture with {} MiB cached of a {} MiB budget: lowering the budget and retrying", image_info.extent.width,
+            image_info.extent.height, vk::to_string(image_info.format), cached_bytes / MiB(1), memory_budget / MiB(1));
+        recover_texture_memory();
+        try {
+            std::tie(image.image, image.allocation) = state.allocator.createImage(image_info, vkutil::vma_auto_alloc, allocation_info);
+        } catch (const vk::SystemError &) {
+            LOG_ERROR("Could not allocate a {}x{} {} texture: cached textures hold {} MiB of a {} MiB budget", image_info.extent.width, image_info.extent.height, vk::to_string(image_info.format), cached_bytes / MiB(1), memory_budget / MiB(1));
+            throw;
+        }
+    }
+    current_texture->image_bytes = allocation_info.size;
+    cached_bytes += allocation_info.size;
+}
+
+std::pair<uint32_t, vk::DeviceSize> VKTextureCache::evict_to_budget(const vk::DeviceSize incoming) {
+    uint32_t evicted = 0;
+    vk::DeviceSize freed = 0;
+    for (auto *item = texture_queue.head->prev; cached_bytes + incoming > memory_budget && item != texture_queue.head; item = item->prev) {
+        TextureCacheInfo &info = item->content;
+        TextureCacheEntry &entry = textures[info.index];
+        if (&entry == current_texture || !entry.texture.image)
+            continue;
+
+        forget_content(info);
+        erase_key(info);
+        info.texture_size = 0;
+        info.dirty = false;
+        info.use_hash = false;
+        info.last_hash_scene = 0;
+        freed += entry.image_bytes;
+        release_image(entry);
+        entry.memory_needed = 0;
+        evicted++;
+    }
+    return { evicted, freed };
+}
+
+void VKTextureCache::recover_texture_memory() {
+    memory_budget = std::max<vk::DeviceSize>(MiB(256), cached_bytes * 3 / 4);
+    evict_to_budget(current_texture->memory_needed);
+    {
+        std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+        state.device.waitIdle();
+    }
+    for (int i = 0; i < MAX_FRAMES_RENDERING; i++)
+        if (i != state.current_frame_idx)
+            state.frames[i].destroy_queue.destroy_objects();
+    LOG_WARN("Texture budget lowered to {} MiB ({} MiB cached)", memory_budget / MiB(1), cached_bytes / MiB(1));
+}
+
+void VKTextureCache::relieve_memory_pressure() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_memory_check)
+        return;
+    next_memory_check = now + std::chrono::seconds(1);
+    uint64_t available_kib = 0;
+    uint64_t total_kib = 0;
+    if (!mem_diag::read_available_memory(available_kib, total_kib))
+        return;
+    const vk::DeviceSize available = available_kib * 1024;
+    const vk::DeviceSize low = std::clamp<vk::DeviceSize>(total_kib * 1024 / 8, MiB(384), MiB(1536));
+    if (available < low) {
+        const vk::DeviceSize previous = memory_budget;
+        memory_budget = std::max<vk::DeviceSize>(MiB(256), std::min(memory_budget, cached_bytes) * 3 / 4);
+        const auto [evicted, freed] = evict_to_budget(0);
+        LOG_WARN("[TEXMEM] system memory available {} MiB, below {} MiB: texture budget {} -> {} MiB, evicted {} textures ({} MiB), {} MiB cached",
+            available / MiB(1), low / MiB(1), previous / MiB(1), memory_budget / MiB(1), evicted, freed / MiB(1), cached_bytes / MiB(1));
+    } else if (memory_budget < default_budget && available > low + MiB(768)) {
+        memory_budget = std::min(default_budget, memory_budget + MiB(64));
+        LOG_INFO("[TEXMEM] system memory available {} MiB: texture budget back up to {} MiB", available / MiB(1), memory_budget / MiB(1));
+    }
+}
+
 void VKTextureCache::cleanup() {
     for (auto &entry : textures) {
         if (entry.texture.image)
             entry.texture.destroy();
+        entry.image_bytes = 0;
     }
+    cached_bytes = 0;
 
     for (auto &sampler : samplers)
         state.device.destroy(sampler);
@@ -91,6 +225,10 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
     context.check_for_macroblock_change(false);
 
     bool is_vertex = index >= SCE_GXM_MAX_TEXTURE_UNITS;
+    if (index < context.texture_unit_ranges.size()) {
+        const uint32_t address = texture.data_addr << 2;
+        context.texture_unit_ranges[index] = { address, address + gxm::texture_size_first_mip(texture) };
+    }
 
     const SceGxmTextureFormat format = gxm::get_format(texture);
     const SceGxmTextureBaseFormat base_format = gxm::get_base_format(format);
@@ -112,21 +250,28 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
 
     TextureViewport texture_viewport{};
 
-    if (renderer::texture::convert_base_texture_format_to_base_color_format(base_format, format_target_of_texture)) {
+    // a 2D surface view cannot feed a cube sampler so a cube is looked up as the six face surfaces the game rendered into it
+    const bool texture_is_cube = texture.texture_type() == SCE_GXM_TEXTURE_CUBE || texture.texture_type() == SCE_GXM_TEXTURE_CUBE_ARBITRARY;
+
+    bool color_convertible = renderer::texture::convert_base_texture_format_to_base_color_format(base_format, format_target_of_texture);
+    if (color_convertible && texture_is_cube) {
+        lookup_result = context.state.surface_cache.retrieve_color_surfaces_as_cube(texture, format_target_of_texture);
+    } else if (color_convertible) {
         // try to retrieve it from the color surface cache
         lookup_result = context.state.surface_cache.retrieve_color_surface_as_texture(texture, format_target_of_texture, &texture_viewport);
     }
 
     bool is_depth_surface = false;
-    if (!lookup_result.has_value() && is_depth_stencil_compatible_format(base_format, is_depth_surface)) {
+    if (!lookup_result.has_value() && !texture_is_cube && is_depth_stencil_compatible_format(base_format, is_depth_surface)) {
         // Try to retrieve depth/stencil cache
         lookup_result = context.state.surface_cache.retrieve_depth_stencil_as_texture(texture, &texture_viewport);
     }
 
     if (lookup_result.has_value()) {
-        // get the sampler now
-        context.state.texture_cache.cache_and_bind_sampler(texture, is_depth_surface);
+        const bool needs_nearest = lookup_result->is_raw_bits || !context.state.texture_cache.format_supports_linear_filter(lookup_result->format);
+        context.state.texture_cache.cache_and_bind_sampler(texture, needs_nearest);
     } else {
+        context.state.texture_cache.current_scene = context.scene_timestamp;
         context.state.texture_cache.cache_and_bind_texture(texture, mem);
         auto &image = context.state.texture_cache.current_texture->texture;
         lookup_result = TextureLookupResult{
@@ -164,9 +309,20 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
             context.curr_frag_ublock.set_viewport_offset(index, texture_viewport.offset);
         }
     }
+
+    if (!is_vertex) {
+        const uint32_t old_cast_units = context.curr_frag_ublock.cast_sampler_bits | context.curr_frag_ublock.cast_phase_bits | context.curr_frag_ublock.raw_cast_bits;
+        context.curr_frag_ublock.set_cast_sampler_bit(index, lookup_result->is_typeless_cast, lookup_result->cast_phase_hi, lookup_result->is_cast_phase_view);
+        context.curr_frag_ublock.set_raw_cast_bit(index, lookup_result->is_raw_bits);
+        // pipelines are specialized on whether a sampled unit holds a cast
+        if ((context.curr_frag_ublock.cast_sampler_bits | context.curr_frag_ublock.cast_phase_bits | context.curr_frag_ublock.raw_cast_bits) != old_cast_units)
+            context.refresh_pipeline = true;
+    }
 }
 
 void VKTextureCache::prepare_staging_buffer(bool is_configure) {
+    renderer::TextureWorkScope preparation(renderer::TextureWorkKind::StagingPrepare,
+        { 0, current_texture->memory_needed, 0, 0, 0, 0, 0, is_configure ? 1u : 0u });
     assert(!is_texture_transfer_ready);
     VKContext *context = reinterpret_cast<VKContext *>(state.context);
 
@@ -198,10 +354,18 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
 
             vk::SubmitInfo submit_info{};
             submit_info.setCommandBuffers(context->cmdbuffers_to_submit);
-            state.general_queue.submit(submit_info, current_fence);
+            {
+                std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+                state.general_queue.submit(submit_info, current_fence);
+            }
             context->cmdbuffers_to_submit.clear();
 
-            auto result = state.device.waitForFences(current_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+            const auto result = [&] {
+                renderer::TextureWorkScope wait(renderer::TextureWorkKind::StagingFenceWait, { 0, 0, 0, 0, 0, 0, 0, 1 });
+                const auto result = state.device.waitForFences(current_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+                wait.result(static_cast<int32_t>(result));
+                return result;
+            }();
             if (result != vk::Result::eSuccess) {
                 LOG_ERROR("Could not wait for fences.");
                 assert(false);
@@ -222,7 +386,12 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
             }
         } else {
             // wait for the fence, but don't reset it
-            auto result = state.device.waitForFences(staging_buffer->waiting_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+            const auto result = [&] {
+                renderer::TextureWorkScope wait(renderer::TextureWorkKind::StagingFenceWait, { 0, 0, 0, 0, 0, 0, 0, 2 });
+                const auto result = state.device.waitForFences(staging_buffer->waiting_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+                wait.result(static_cast<int32_t>(result));
+                return result;
+            }();
             if (result != vk::Result::eSuccess) {
                 LOG_ERROR("Could not wait for fences.");
                 assert(false);
@@ -243,10 +412,13 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
         if (staging_buffer->buffer.size < current_texture->memory_needed) {
             // we need to create a bigger buffer
             // destroy the previous one if there is, no need to defer destroy it as we know it is no longer being used
+            renderer::TextureWorkScope allocation(renderer::TextureWorkKind::StagingAllocate,
+                { staging_buffer->buffer.size, current_texture->memory_needed });
             staging_buffer->buffer.destroy();
 
             staging_buffer->buffer.size = current_texture->memory_needed;
             staging_buffer->buffer.init_buffer(vk::BufferUsageFlagBits::eTransferSrc, vkutil::vma_mapped_alloc);
+            allocation.result(0);
         }
     }
 
@@ -266,6 +438,7 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
         vkutil::transition_image_layout_discard(cmd_buffer, current_texture->texture.image, vkutil::ImageLayout::SampledImage, vkutil::ImageLayout::TransferDst, range);
 
     is_texture_transfer_ready = true;
+    preparation.result(0);
 }
 
 bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &texture_folder, const std::string_view game_id) {
@@ -289,9 +462,8 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
     support_e5rgb9 = static_cast<bool>(e5rgb9_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
     support_a2rgb10 = static_cast<bool>(a2rgb10_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
 
-    // powerVR only
-    const vk::FormatProperties pvrt_support = state.physical_device.getFormatProperties(vk::Format::ePvrtc12BppUnormBlockIMG);
-    support_pvrt = static_cast<bool>(pvrt_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
+    // TODO: PVRTC is mapped to RGBA8, so keep software decoding until native PVRTC formats are mapped.
+    support_pvrt = false;
 
     // check for dxt support
     const vk::FormatProperties dxt_support = state.physical_device.getFormatProperties(vk::Format::eBc1RgbaSrgbBlock);
@@ -301,6 +473,14 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
     // check for astc support
     const vk::FormatProperties astc_support = state.physical_device.getFormatProperties(vk::Format::eAstc4x4SrgbBlock);
     support_astc = static_cast<bool>(astc_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
+
+    // an integrated GPU can report only a small carve-out as device local while its images can also live in system memory
+    vk::DeviceSize heap_size = 0;
+    for (uint32_t i = 0; i < state.physical_device_memory.memoryHeapCount; i++)
+        heap_size = std::max(heap_size, state.physical_device_memory.memoryHeaps[i].size);
+    memory_budget = std::clamp<vk::DeviceSize>(heap_size / 4, MiB(256), GiB(2));
+    default_budget = memory_budget;
+    LOG_INFO("Texture cache budget: {} MiB (largest memory heap {} MiB)", memory_budget / MiB(1), heap_size / MiB(1));
 
     return true;
 }
@@ -377,7 +557,7 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
     uint32_t width = gxm::get_width(gxm_texture);
     uint32_t height = gxm::get_height(gxm_texture);
 
-    const uint16_t mip_count = renderer::texture::get_upload_mip(gxm_texture.true_mip_count(), width, height);
+    uint16_t mip_count = renderer::texture::get_upload_mip(gxm_texture.true_mip_count(), width, height);
 
     vk::Format vk_format = texture::translate_format(base_format);
     if (gxm::is_bcn_format(base_format) && !support_dxt)
@@ -385,6 +565,41 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
         vk_format = bcn_to_rgba8(vk_format);
     if (gxm_texture.gamma_mode)
         vk_format = linear_to_srgb(vk_format);
+
+    if (vk_format != vk::Format::eUndefined && !format_supports_sampled_image(vk_format)) {
+        vk::Format fallback = texture::translate_format(base_format);
+        if (gxm::is_bcn_format(base_format) && !support_dxt)
+            fallback = bcn_to_rgba8(fallback);
+        if (fallback != vk_format && format_supports_sampled_image(fallback)) {
+            LOG_WARN_ONCE("Texture format {} is not sampleable on this GPU - using {} instead (sRGB decode dropped)", vk::to_string(vk_format), vk::to_string(fallback));
+            vk_format = fallback;
+        } else {
+            const auto raw = std::bit_cast<std::array<uint32_t, 4>>(gxm_texture);
+            LOG_ERROR("Texture format {} (base 0x{:X}) is not sampleable on this GPU and has no direct fallback - substituting RGBA8; raw words {:08X} {:08X} {:08X} {:08X}", vk::to_string(vk_format), fmt::underlying(base_format), raw[0], raw[1], raw[2], raw[3]);
+            vk_format = gxm_texture.gamma_mode ? vk::Format::eR8G8B8A8Srgb : vk::Format::eR8G8B8A8Unorm;
+        }
+    }
+
+    // Refuse to hand the gfx driver anything out of range and instead substitute safe values
+    {
+        const uint32_t max_dim = 16384; // conservative floor of maxImageDimension2D across our GPUs
+        const bool format_invalid = (vk_format == vk::Format::eUndefined);
+        const bool dims_invalid = (width == 0) || (height == 0) || (width > max_dim) || (height > max_dim);
+        const uint32_t max_mips_allowed = static_cast<uint32_t>(std::bit_width(std::max(std::max(width, 1u), std::max(height, 1u))));
+        const bool mips_invalid = (mip_count == 0) || (mip_count > max_mips_allowed);
+        if (format_invalid || dims_invalid || mips_invalid) {
+            const auto raw = std::bit_cast<std::array<uint32_t, 4>>(gxm_texture);
+            LOG_ERROR("Refusing degenerate texture image: {}x{} mips {} format {} (base 0x{:X} type 0x{:X} cube {}) raw words {:08X} {:08X} {:08X} {:08X} - substituting a safe placeholder",
+                width, height, mip_count, vk::to_string(vk_format), fmt::underlying(base_format),
+                fmt::underlying(gxm_texture.texture_type()), is_cube, raw[0], raw[1], raw[2], raw[3]);
+            if (format_invalid)
+                vk_format = vk::Format::eR8G8B8A8Unorm;
+            width = std::clamp(width, 1u, max_dim);
+            height = std::clamp(height, 1u, max_dim);
+            const uint32_t max_mips_fixed = static_cast<uint32_t>(std::bit_width(std::max(width, height)));
+            mip_count = static_cast<uint16_t>(std::clamp<uint32_t>(mip_count, 1u, max_mips_fixed));
+        }
+    }
 
     current_texture->mip_count = mip_count;
     current_texture->is_cube = is_cube;
@@ -400,8 +615,7 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
 
     // In case the cache is full, no need to put the previous image in the destroy queue
     // because of texture importation, we must be careful when destroying an image
-    if (image.image)
-        state.frame().destroy_queue.add_image(image);
+    release_image(*current_texture);
 
     // manually initialize the image
     image.width = width;
@@ -426,7 +640,7 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
         .initialLayout = vk::ImageLayout::eUndefined,
     };
 
-    std::tie(image.image, image.allocation) = state.allocator.createImage(image_info, vkutil::vma_auto_alloc);
+    create_image(image_info);
 
     // create image view
     vk::ImageSubresourceRange range{
@@ -474,8 +688,37 @@ static void *add_alpha_channel(const void *pixels, const uint32_t width, const u
     return data.data();
 }
 
+bool VKTextureCache::upload_cached_pvrt(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height,
+    uint32_t mip_index, const void *pixels, int face, uint32_t stride, uint32_t memory_height) {
+    const bool two_bit = base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP || base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP;
+    const bool type = base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP || base_format == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP;
+    const vk::DeviceSize size = vk::DeviceSize(stride) * height * 4;
+    const TextureWorkContext context{ 0, size, width, height, static_cast<uint32_t>(base_format), mip_index, static_cast<uint32_t>(face) };
+    TextureWorkScope direct(TextureWorkKind::CacheDirectUpload, context);
+    const bool hit = pvr::PVRTConsumeCachedPVRTC(pixels, two_bit, stride, memory_height, type, [&] {
+        // Called outside cache protection, after the residency hint. All fence
+        // waits and staging allocations finish before the pixel consumer.
+        if (!is_texture_transfer_ready)
+            prepare_staging_buffer();
+        const auto &staging = staging_buffers[staging_idx];
+        return staging.used_so_far <= staging.buffer.size && size <= staging.buffer.size - staging.used_so_far;
+    }, [&](auto decoded) {
+        auto &staging = staging_buffers[staging_idx];
+        TextureWorkScope copy(TextureWorkKind::StagingCopy, context);
+        std::memcpy(static_cast<uint8_t *>(staging.buffer.mapped_data) + staging.used_so_far, decoded.data(), static_cast<size_t>(size));
+        copy.result(0);
+    });
+    direct.result(hit ? 0 : 1);
+    if (!hit)
+        return false;
+    record_staged_texture(SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8, width, height, mip_index, face > 0 ? face - 1 : face, stride, height, size);
+    return true;
+}
+
 void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height,
     uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride) {
+    const renderer::TextureWorkContext work_context{ 0, 0, width, height, static_cast<uint32_t>(base_format), mip_index, static_cast<uint32_t>(face) };
+    renderer::TextureWorkScope backend_upload(renderer::TextureWorkKind::BackendUpload, work_context);
     if (!is_texture_transfer_ready)
         prepare_staging_buffer();
 
@@ -517,7 +760,23 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
         return;
     }
 
-    memcpy(static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + staging_buffer.used_so_far, text_data, upload_size);
+    backend_upload.bytes(0, upload_size);
+    {
+        renderer::TextureWorkScope copy(renderer::TextureWorkKind::StagingCopy, work_context);
+        copy.bytes(0, upload_size);
+        memcpy(static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + staging_buffer.used_so_far, text_data, upload_size);
+        copy.result(0);
+    }
+    record_staged_texture(base_format, width, height, mip_index, face, pixels_per_stride, buffer_height, upload_size);
+    backend_upload.result(0);
+}
+
+void VKTextureCache::record_staged_texture(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, uint32_t mip_index, int face, uint32_t pixels_per_stride, uint32_t buffer_height, vk::DeviceSize upload_size) {
+    const TextureWorkContext work_context{ 0, upload_size, width, height, static_cast<uint32_t>(base_format), mip_index, static_cast<uint32_t>(face) };
+    auto &staging_buffer = staging_buffers[staging_idx];
+    auto &image = current_texture->texture;
+    renderer::TextureWorkScope commands(renderer::TextureWorkKind::UploadCommands, work_context);
+    commands.bytes(0, upload_size);
 
     vk::ImageSubresourceLayers layer{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -535,9 +794,15 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
     };
     cmd_buffer.copyBufferToImage(staging_buffer.buffer.buffer, image.image, vk::ImageLayout::eTransferDstOptimal, region);
     staging_buffer.used_so_far += upload_size;
+    commands.result(0);
 }
 
 void VKTextureCache::upload_done() {
+    if (!is_texture_transfer_ready) {
+        LOG_ERROR_ONCE("Texture upload produced no data (see preceding texture errors) - skipping layout transition");
+        return;
+    }
+
     // transition the texture back to read only
     vk::ImageSubresourceRange range{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -551,6 +816,33 @@ void VKTextureCache::upload_done() {
     // this should not be necessary
     cmd_buffer = nullptr;
     is_texture_transfer_ready = false;
+}
+
+bool VKTextureCache::format_supports_sampled_image(vk::Format format) {
+    auto it = sampled_image_support_cache.find(static_cast<VkFormat>(format));
+    if (it != sampled_image_support_cache.end())
+        return it->second;
+    const vk::FormatProperties props = state.physical_device.getFormatProperties(format);
+    constexpr vk::FormatFeatureFlags needed = vk::FormatFeatureFlagBits::eSampledImage | vk::FormatFeatureFlagBits::eTransferDst;
+    const bool supported = (props.optimalTilingFeatures & needed) == needed;
+    sampled_image_support_cache[static_cast<VkFormat>(format)] = supported;
+    return supported;
+}
+
+bool VKTextureCache::format_supports_linear_filter(vk::Format format) {
+    auto it = linear_filter_support_cache.find(static_cast<VkFormat>(format));
+    if (it != linear_filter_support_cache.end())
+        return it->second;
+    const vk::FormatProperties props = state.physical_device.getFormatProperties(format);
+    const bool supported = static_cast<bool>(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImageFilterLinear);
+    linear_filter_support_cache[static_cast<VkFormat>(format)] = supported;
+    if (!supported)
+        LOG_INFO("format {} lacks linear-filter support: samplers for it will use nearest", vk::to_string(format));
+    return supported;
+}
+
+bool VKTextureCache::texture_supports_linear_filter() {
+    return format_supports_linear_filter(current_texture->texture.format);
 }
 
 void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) {
@@ -578,7 +870,7 @@ void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &textur
     vk::SamplerCreateInfo sampler_info{
         .magFilter = texture::translate_filter(mag_filter),
         .minFilter = texture::translate_filter(min_filter),
-        .mipmapMode = texture.mip_filter ? vk::SamplerMipmapMode::eLinear : vk::SamplerMipmapMode::eNearest,
+        .mipmapMode = texture.mip_filter && !no_linear ? vk::SamplerMipmapMode::eLinear : vk::SamplerMipmapMode::eNearest,
         .addressModeU = texture::translate_address_mode(uaddr),
         .addressModeV = texture::translate_address_mode(vaddr),
         .addressModeW = vk::SamplerAddressMode::eRepeat,
@@ -591,7 +883,9 @@ void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &textur
     };
 
     // when using nearest filter, disable anisotropy as the pixels can contain data other than color
-    sampler_info.anisotropyEnable = (anisotropic_filtering > 1) && (sampler_info.magFilter != vk::Filter::eNearest || sampler_info.minFilter != vk::Filter::eNearest);
+    // a single-level texture is often data too and anisotropy only helps mipmapped textures
+    sampler_info.anisotropyEnable = (anisotropic_filtering > 1) && texture.true_mip_count() > 1
+        && (sampler_info.magFilter != vk::Filter::eNearest || sampler_info.minFilter != vk::Filter::eNearest);
 
     sampler = state.device.createSampler(sampler_info);
 }
@@ -618,8 +912,7 @@ void VKTextureCache::import_configure_impl(SceGxmTextureBaseFormat base_format, 
     vkutil::Image &image = current_texture->texture;
     // In case the cache is full, no need to put the previous image in the destroy queue
     // because of texture importation, we must be careful when destroying an image
-    if (image.image)
-        state.frame().destroy_queue.add_image(image);
+    release_image(*current_texture);
 
     vk::Format vk_format = texture::translate_format(base_format);
     if (is_srgb)
@@ -648,7 +941,7 @@ void VKTextureCache::import_configure_impl(SceGxmTextureBaseFormat base_format, 
         .initialLayout = vk::ImageLayout::eUndefined,
     };
 
-    std::tie(image.image, image.allocation) = state.allocator.createImage(image_info, vkutil::vma_auto_alloc);
+    create_image(image_info);
 
     // create image view
     vk::ImageSubresourceRange range{

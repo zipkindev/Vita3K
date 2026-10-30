@@ -17,23 +17,82 @@
 
 #include "cpu/common.h"
 #include <cpu/impl/dynarmic_cpu.h>
+#include <cpu/jit_preparation.h>
+#include <cpu/jit_profile.h>
 #include <cpu/state.h>
+#include <util/jit_startup_profile.h>
 #include <util/log.h>
 
+#include <cpu/functions.h>
+#include <mem/functions.h>
 #include <mem/ptr.h>
 
 #include <dynarmic/frontend/A32/a32_ir_emitter.h>
 #include <dynarmic/interface/A32/coprocessor.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <bit>
+#include <chrono>
+#include <cstring>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
+#include <vector>
+
+// Log the first few invalid guest accesses in full, then suppress (a guest null-deref loop can log GBs).
+static bool should_log_invalid_access() {
+    static std::atomic<uint64_t> count{ 0 };
+    const uint64_t n = count.fetch_add(1, std::memory_order_relaxed);
+    if (n == 8)
+        LOG_ERROR("Further invalid guest memory accesses will be suppressed (guest likely spinning on a bad pointer)");
+    return n < 8;
+}
+
+static std::uint64_t coproc_noop(void *, std::uint32_t, std::uint32_t) {
+    return 0;
+}
+
+static Dynarmic::A32::Coprocessor::Callback coproc_noop_callback() {
+    return Dynarmic::A32::Coprocessor::Callback{ &coproc_noop, std::nullopt };
+}
+
+// Registered for every coprocessor slot Vita3K does not emulate.
+class ArmDynarmicNullCP : public Dynarmic::A32::Coprocessor {
+public:
+    using CoprocReg = Dynarmic::A32::CoprocReg;
+
+    ~ArmDynarmicNullCP() override = default;
+
+    std::optional<Callback> CompileInternalOperation(bool, unsigned, CoprocReg, CoprocReg, CoprocReg, unsigned) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessOneWord CompileSendOneWord(bool, unsigned, CoprocReg, CoprocReg, unsigned) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessTwoWords CompileSendTwoWords(bool, unsigned, CoprocReg) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessOneWord CompileGetOneWord(bool, unsigned, CoprocReg, CoprocReg, unsigned) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessTwoWords CompileGetTwoWords(bool, unsigned, CoprocReg) override {
+        return coproc_noop_callback();
+    }
+    std::optional<Callback> CompileLoadWords(bool, bool, CoprocReg, std::optional<std::uint8_t>) override {
+        return coproc_noop_callback();
+    }
+    std::optional<Callback> CompileStoreWords(bool, bool, CoprocReg, std::optional<std::uint8_t>) override {
+        return coproc_noop_callback();
+    }
+};
 
 class ArmDynarmicCP15 : public Dynarmic::A32::Coprocessor {
     uint32_t tpidruro;
-    uint32_t tpidrurw;
     uint32_t sctlr;
     uint32_t dacr;
 
@@ -42,7 +101,6 @@ public:
 
     explicit ArmDynarmicCP15()
         : tpidruro(0)
-        , tpidrurw(0)
         , sctlr(0)
         , dacr(0) {
     }
@@ -52,7 +110,7 @@ public:
     std::optional<Callback> CompileInternalOperation(bool two, unsigned opc1, CoprocReg CRd,
         CoprocReg CRn, CoprocReg CRm,
         unsigned opc2) override {
-        return std::nullopt;
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessOneWord CompileSendOneWord(bool two, unsigned opc1, CoprocReg CRn,
@@ -60,11 +118,6 @@ public:
         // MCR p15, 0, Rt, c13, c0, 3 — write TPIDRURO
         if (CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc1 == 0 && opc2 == 3) {
             return &tpidruro;
-        }
-
-        // MCR p15, 0, Rt, c13, c0, 2: write TPIDRURW
-        if (!two && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc1 == 0 && opc2 == 2) {
-            return &tpidrurw;
         }
 
         // MCR p15, 0, Rt, c1, c0, 0 — write SCTLR
@@ -78,11 +131,11 @@ public:
         }
 
         LOG_WARN("Unhandled CP15 MCR: two={} opc1={} CRn={} CRm={} opc2={}", two, opc1, (int)CRn, (int)CRm, opc2);
-        return CallbackOrAccessOneWord{};
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessTwoWords CompileSendTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
-        return CallbackOrAccessTwoWords{};
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessOneWord CompileGetOneWord(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm,
@@ -90,11 +143,6 @@ public:
         // MRC p15, 0, Rt, c13, c0, 3 — read TPIDRURO (thread-local storage)
         if (CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc1 == 0 && opc2 == 3) {
             return &tpidruro;
-        }
-
-        // MRC p15, 0, Rt, c13, c0, 2: read TPIDRURW
-        if (!two && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc1 == 0 && opc2 == 2) {
-            return &tpidrurw;
         }
 
         // MRC p15, 0, Rt, c1, c0, 0 — read SCTLR
@@ -108,21 +156,21 @@ public:
         }
 
         LOG_WARN("Unhandled CP15 MRC: two={} opc1={} CRn={} CRm={} opc2={}", two, opc1, (int)CRn, (int)CRm, opc2);
-        return CallbackOrAccessOneWord{};
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessTwoWords CompileGetTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
-        return CallbackOrAccessTwoWords{};
+        return coproc_noop_callback();
     }
 
     std::optional<Callback> CompileLoadWords(bool two, bool long_transfer, CoprocReg CRd,
         std::optional<std::uint8_t> option) override {
-        return std::nullopt;
+        return coproc_noop_callback();
     }
 
     std::optional<Callback> CompileStoreWords(bool two, bool long_transfer, CoprocReg CRd,
         std::optional<std::uint8_t> option) override {
-        return std::nullopt;
+        return coproc_noop_callback();
     }
 
     void set_tpidruro(uint32_t tpidruro) {
@@ -131,14 +179,6 @@ public:
 
     uint32_t get_tpidruro() const {
         return tpidruro;
-    }
-
-    void set_tpidrurw(uint32_t tpidrurw) {
-        this->tpidrurw = tpidrurw;
-    }
-
-    uint32_t get_tpidrurw() const {
-        return tpidrurw;
     }
 };
 
@@ -154,11 +194,162 @@ public:
         , cpu(&cpu) {}
 
     ~ArmDynarmicCallback() override = default;
+    std::chrono::steady_clock::time_point learning_begin;
+    void preparation_read(uint32_t address, uint32_t value, bool hook = false) noexcept {
+        if (parent->jit_preparation)
+            parent->jit_preparation->read(address, value, hook);
+    }
+    bool AllowJitPreparedBlock(uint64_t descriptor, uint32_t end_pc) noexcept override {
+        const auto &p = parent->jit_preparation;
+        if (!p || !p->allow_emit(descriptor, end_pc))
+            return false;
+        const auto *block = p->replay_block();
+        for (size_t i = 0; i < block->count; ++i) {
+            const auto &r = block->reads[i];
+            const Ptr<uint32_t> ptr{ r.address };
+            if (!ptr.valid(*parent->mem) || !Ptr<uint8_t>{ r.address + 3 }.valid(*parent->mem))
+                return false;
+            uint32_t actual;
+            std::memcpy(&actual, ptr.get(*parent->mem), sizeof(actual));
+            if (actual != r.value)
+                return false;
+        }
+        return true;
+    }
+    std::optional<uint32_t> prepared_read(uint32_t address, bool hook) {
+        if (!parent->jit_preparation->expects_read(address, hook)) {
+            parent->jit_preparation->invalid_read();
+            return std::nullopt;
+        }
+        const Ptr<uint32_t> ptr{ address };
+        if (!ptr.valid(*parent->mem) || !Ptr<uint8_t>{ address + 3 }.valid(*parent->mem)) {
+            parent->jit_preparation->invalid_read();
+            return std::nullopt;
+        }
+        uint32_t value;
+        std::memcpy(&value, ptr.get(*parent->mem), sizeof(value));
+        return parent->jit_preparation->replay_read(address, value, hook);
+    }
+
+    bool IsJitStartupProfilingEnabled() const noexcept override {
+        return util::jit_startup_profile_enabled();
+    }
+    std::uint64_t JitStartupCounter() const noexcept override { return util::JitStartupProfile::counter(); }
+    void JitFastmemInserted(std::uint64_t start, std::uint64_t end, std::size_t before, std::size_t after,
+        std::size_t old_buckets, std::size_t new_buckets) noexcept override {
+        // Keep every capacity transition; slow non-growth inserts are separately labelled.
+        if (old_buckets == new_buckets && end - start < fastmem_slow_ticks)
+            return;
+        util::record_jit_fastmem({ static_cast<uint64_t>(parent->thread_id), cpu->diagnostic_id,
+                                     before, after, old_buckets, new_buckets },
+            start, end);
+    }
+    void JitDispatchClearBegin() noexcept override {
+        dispatch_scope.emplace(util::JitStartupKind::DispatchClear,
+            util::JitStartupContext{ static_cast<uint64_t>(parent->thread_id), cpu->diagnostic_id, 0, 0, 0, 0, 1048576 });
+    }
+    void JitDispatchClearEnd() noexcept override {
+        dispatch_scope->result(0);
+        dispatch_scope.reset();
+    }
+    std::optional<util::JitStartupScope> dispatch_scope;
+    uint64_t fastmem_slow_ticks = [] {
+        // Frequency is platform QPC on Windows, steady nanoseconds elsewhere.
+        return util::JitStartupProfile::counter_frequency() / 500;
+    }();
+    bool IsJitCompileProfilingEnabled() const noexcept override {
+        return (parent->jit_profile && parent->jit_profile->enabled()) || bool(parent->jit_preparation);
+    }
+    void JitCompileBegin(std::uint64_t descriptor) noexcept override {
+        if (parent->jit_profile)
+            parent->jit_profile->begin(descriptor);
+        if (parent->jit_preparation) {
+            learning_begin = std::chrono::steady_clock::now();
+            parent->jit_preparation->begin(descriptor);
+        }
+    }
+    void JitCompileComplete(std::uint32_t end_pc, std::size_t bytes) noexcept override {
+        if (parent->jit_profile)
+            parent->jit_profile->complete(end_pc, bytes);
+        if (parent->jit_preparation)
+            parent->jit_preparation->complete(end_pc,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - learning_begin).count());
+    }
+    void JitCompileAborted() noexcept override {
+        if (parent->jit_profile)
+            parent->jit_profile->abort();
+        if (parent->jit_preparation)
+            parent->jit_preparation->abort();
+    }
+    void JitCacheInvalidated() noexcept override {
+        if (parent->jit_profile)
+            parent->jit_profile->invalidated();
+        if (parent->jit_preparation)
+            parent->jit_preparation->invalidated();
+    }
 
     std::optional<std::uint32_t> MemoryReadCode(Dynarmic::A32::VAddr addr) override {
+        if (parent->jit_preparation && parent->jit_preparation->is_replaying())
+            return prepared_read(addr, false);
         if (cpu->log_mem)
             LOG_TRACE("Instruction fetch at address 0x{:X}", addr);
-        return MemoryRead32(addr);
+        const Ptr<uint32_t> ptr{ static_cast<Address>(addr) };
+        if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
+            if (!confirm_invalid_access(addr, "instruction fetch")) {
+                const auto value = MemoryRead32(addr);
+                if (parent->jit_profile)
+                    parent->jit_profile->code_read(addr, value);
+                return value;
+            }
+            uint32_t bc_nid = 0, bc_lr = 0;
+            get_last_import_call(bc_nid, bc_lr);
+            LOG_CRITICAL("Invalid instruction fetch at address 0x{:X} (last HLE import on this thread: nid=0x{:X} called from LR=0x{:X})\n{}", addr, bc_nid, bc_lr, cpu->save_context().description());
+            // Disassemble the code before LR: it shows where the (bad) branch target was loaded from.
+            const uint32_t lr_raw = read_lr(*parent);
+            const bool thumb_caller = (lr_raw & 1) != 0;
+            const uint32_t lr = lr_raw & ~1u;
+            if (lr >= parent->mem->host_page_size) {
+                std::string window;
+                uint32_t a = lr - 64;
+                while (a <= lr + 2 && Ptr<uint32_t>{ a }.valid(*parent->mem)) {
+                    uint16_t insn_size = 2;
+                    window += fmt::format("  0x{:X}: {}\n", a, disassemble(*parent, a, thumb_caller, &insn_size));
+                    a += insn_size ? insn_size : 2;
+                }
+                LOG_CRITICAL("Code before the call site (LR-64..LR, thumb={}):\n{}", thumb_caller, window);
+            }
+            // memory each register points at, captured at crash time
+            {
+                const CPUContext crash_ctx = cpu->save_context();
+                std::string reg_mem;
+                for (int r = 0; r < 14; r++) {
+                    const uint32_t rv = crash_ctx.cpu_registers[r];
+                    const uint32_t base = rv & ~3u;
+                    if (base < parent->mem->host_page_size)
+                        continue;
+                    reg_mem += fmt::format("  [r{}=0x{:08X}]:", r, rv);
+                    for (int w = -2; w < 6; w++) {
+                        const Ptr<uint32_t> wp{ static_cast<Address>(base + w * 4) };
+                        if (wp.valid(*parent->mem))
+                            reg_mem += fmt::format(" {:08X}", *wp.get(*parent->mem));
+                        else
+                            reg_mem += " ????????";
+                    }
+                    reg_mem += "\n";
+                }
+                LOG_CRITICAL("Memory at register targets (words -2..+5):\n{}", reg_mem);
+            }
+            if (parent->jit_preparation)
+                parent->jit_preparation->invalid_read();
+            if (parent->jit_profile)
+                parent->jit_profile->invalid_read();
+            return std::nullopt;
+        }
+        const auto value = MemoryRead32(addr);
+        preparation_read(addr, value);
+        if (parent->jit_profile)
+            parent->jit_profile->code_read(addr, value);
+        return value;
     }
 
     static void TraceInstruction(uint64_t self_, uint64_t address, uint64_t is_thumb) {
@@ -173,24 +364,213 @@ public:
         LOG_TRACE("{} ({}): {} {}", log_hex(self_), self.parent->thread_id, log_hex(address), disassembly);
     }
 
+    inline static std::recursive_timed_mutex loader_lock_mutex;
+    inline static std::atomic<int> loader_lock_timeouts{ 0 };
+    int loader_lock_held = 0;
+
+    static void MonoLoaderLockAcquire(uint64_t self_, uint64_t, uint64_t) {
+        ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
+        if (self.loader_lock_held > 0) {
+            ++self.loader_lock_held;
+            return;
+        }
+        if (!loader_lock_mutex.try_lock_for(std::chrono::seconds(5))) {
+            if (loader_lock_timeouts.fetch_add(1) < 20)
+                LOG_WARN("Timed out waiting for the emulated mono loader lock on thread {}, proceeding unserialised", self.parent->thread_id);
+            return;
+        }
+        self.loader_lock_held = 1;
+    }
+
+    static void MonoLoaderLockRelease(uint64_t self_, uint64_t, uint64_t) {
+        ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
+        if (self.loader_lock_held == 0)
+            return;
+        if (--self.loader_lock_held == 0)
+            loader_lock_mutex.unlock();
+    }
+
+    enum class MonoLoaderOp {
+        None,
+        Lock,
+        Unlock,
+    };
+
+    static constexpr bool is_movw(uint32_t insn, uint32_t rd) {
+        return (insn & 0xFFF0F000) == (0xE3000000 | (rd << 12));
+    }
+    static constexpr bool is_movt(uint32_t insn, uint32_t rd) {
+        return (insn & 0xFFF0F000) == (0xE3400000 | (rd << 12));
+    }
+
+    // Neither mono_loader_lock nor mono_loader_unlock is exported, so they cannot be resolved
+    // by NID, and each mono build places them somewhere different. Recognise them from their own code
+    // instead, as dynarmic translates them. Both are the same 19-instruction body:
+    //
+    //      push {r4, lr}
+    //      movw/movt r0, #<&loader_lock_enabled>   ; immediates vary per build
+    //      ldr  r0, [r0]
+    //      cmp  r0, #0
+    //      beq  epilogue                           ; disabled: no mutex is ever taken
+    //      movw/movt r0, #<&nest_count_tls_key>
+    //      ldr  r4, [r0]
+    //      movw/movt ip, #<&tls_get> ; mov r0, r4 ; blx ip
+    //      movw ip, ... ; add/sub r1, r0, #1       ; the ONLY differing word: +1 lock, -1 unlock
+    //      movt ip, ... ; mov r0, r4 ; blx ip      ; tls_set(key, nest +/- 1)
+    //  epilogue:
+    //      pop  {r4, pc}
+    MonoLoaderOp classify_mono_loader_lock(Dynarmic::A32::VAddr pc) {
+        static constexpr uint32_t PUSH_R4_LR = 0xE92D4010;
+        static constexpr uint32_t LDR_R0_R0 = 0xE5900000;
+        static constexpr uint32_t CMP_R0_0 = 0xE3500000;
+        static constexpr uint32_t BEQ_EPILOGUE = 0x0A00000B; // beq +11 words -> the pop below
+        static constexpr uint32_t LDR_R4_R0 = 0xE5904000;
+        static constexpr uint32_t MOV_R0_R4 = 0xE1A00004;
+        static constexpr uint32_t BLX_IP = 0xE12FFF3C;
+        static constexpr uint32_t ADD_R1_R0_1 = 0xE2801001; // lock:   nest + 1
+        static constexpr uint32_t SUB_R1_R0_1 = 0xE2401001; // unlock: nest - 1
+        static constexpr uint32_t POP_R4_PC = 0xE8BD8010;
+        static constexpr size_t BODY_WORDS = 19;
+
+        const auto word_at = [&](size_t i) -> std::optional<uint32_t> {
+            if (parent->jit_preparation && parent->jit_preparation->is_replaying())
+                return prepared_read(static_cast<Address>(pc + i * 4), true);
+            const Ptr<uint32_t> word{ static_cast<Address>(pc + i * 4) };
+            if (!word.valid(*parent->mem)) {
+                if (parent->jit_preparation)
+                    parent->jit_preparation->invalid_read();
+                if (parent->jit_profile)
+                    parent->jit_profile->invalid_read();
+                return std::nullopt;
+            }
+            const auto value = *word.get(*parent->mem);
+            preparation_read(word.address(), value, true);
+            if (parent->jit_profile)
+                parent->jit_profile->code_read(word.address(), value, true);
+            return value;
+        };
+
+        const auto first = word_at(0);
+        if (!first || *first != PUSH_R4_LR)
+            return MonoLoaderOp::None;
+
+        uint32_t w[BODY_WORDS];
+        w[0] = *first;
+        for (size_t i = 1; i < BODY_WORDS; i++) {
+            const auto word = word_at(i);
+            if (!word)
+                return MonoLoaderOp::None;
+            w[i] = *word;
+        }
+
+        const bool shape = is_movw(w[1], 0) && is_movt(w[2], 0) && w[3] == LDR_R0_R0
+            && w[4] == CMP_R0_0 && w[5] == BEQ_EPILOGUE
+            && is_movw(w[6], 0) && is_movt(w[7], 0) && w[8] == LDR_R4_R0
+            && is_movw(w[9], 12) && is_movt(w[10], 12) && w[11] == MOV_R0_R4 && w[12] == BLX_IP
+            && is_movw(w[13], 12) && is_movt(w[15], 12) && w[16] == MOV_R0_R4 && w[17] == BLX_IP
+            && w[18] == POP_R4_PC;
+        if (!shape)
+            return MonoLoaderOp::None;
+
+        if (w[14] == ADD_R1_R0_1)
+            return MonoLoaderOp::Lock;
+        if (w[14] == SUB_R1_R0_1)
+            return MonoLoaderOp::Unlock;
+        return MonoLoaderOp::None;
+    }
+
+    // Emitting IR before dynarmic evaluates an instruction's condition makes ir.block non-empty
+    bool may_be_conditional(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) {
+        if (is_thumb)
+            return ir.current_location.IT().IsInITBlock();
+
+        const auto insn = MemoryReadCode(pc);
+        if (!insn)
+            return true; // unreadable: assume the worst rather than risk the loop
+        // 0xE is AL, 0xF the unconditional encoding space; everything else is a real condition
+        return (*insn >> 28) < 0xE;
+    }
+
     void PreCodeTranslationHook(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) override {
-        if (cpu->log_code) {
+        if (!is_thumb) {
+            if (const MonoLoaderOp op = classify_mono_loader_lock(pc); op != MonoLoaderOp::None) {
+                static std::once_flag announced;
+                std::call_once(announced, [pc] {
+                    LOG_INFO("Serialising mono's loader lock: found it at 0x{:X}, and it takes no mutex in this build", pc);
+                });
+                ir.CallHostFunction(op == MonoLoaderOp::Lock ? &MonoLoaderLockAcquire : &MonoLoaderLockRelease,
+                    ir.Imm64((uint64_t)this), ir.Imm64(0), ir.Imm64(0));
+            }
+        }
+        if (cpu->log_code && !may_be_conditional(is_thumb, pc, ir)) {
             ir.CallHostFunction(&TraceInstruction, ir.Imm64((uint64_t)this), ir.Imm64(pc), ir.Imm64(is_thumb));
         }
     }
 
+    // rechecks a failed lock-free validity test under the allocator lock
+    bool confirm_invalid_access(Dynarmic::A32::VAddr addr, const char *what) {
+        if (addr >= parent->mem->host_page_size && is_valid_addr_synced(*parent->mem, static_cast<Address>(addr))) {
+            static std::atomic<uint32_t> transient_count{ 0 };
+            const uint32_t n = transient_count.fetch_add(1, std::memory_order_relaxed);
+            if (n < 16)
+                LOG_CRITICAL("TRANSIENT invalid {} at 0x{:X} recovered (PC 0x{:X}, thread {}) — lock-free validity race caught in the act",
+                    what, addr, this->cpu->get_pc(), parent->thread_id);
+            else if (n == 16)
+                LOG_CRITICAL("Further transient-invalid recoveries will be suppressed");
+            return false;
+        }
+        return true;
+    }
+
+    // an access straddling a 4 KiB page boundary resolves each half through the page table
+    template <typename T>
+    static bool straddles_page(Dynarmic::A32::VAddr addr) {
+        return ((addr & 0xFFFu) + sizeof(T)) > 0x1000u;
+    }
+
+    template <typename T>
+    T read_straddling(Dynarmic::A32::VAddr addr) {
+        MemState &mem = *parent->mem;
+        const uint32_t first = 0x1000u - (addr & 0xFFFu);
+        T value;
+        uint8_t *out = reinterpret_cast<uint8_t *>(&value);
+        memcpy(out, Ptr<uint8_t>(addr).get(mem), first);
+        memcpy(out + first, Ptr<uint8_t>(static_cast<Address>(addr + first)).get(mem), sizeof(T) - first);
+        return value;
+    }
+
+    template <typename T>
+    void write_straddling(Dynarmic::A32::VAddr addr, T value) {
+        MemState &mem = *parent->mem;
+        const uint32_t first = 0x1000u - (addr & 0xFFFu);
+        const uint8_t *in = reinterpret_cast<const uint8_t *>(&value);
+        memcpy(Ptr<uint8_t>(addr).get(mem), in, first);
+        memcpy(Ptr<uint8_t>(static_cast<Address>(addr + first)).get(mem), in + first, sizeof(T) - first);
+    }
+
     template <typename T>
     T MemoryRead(Dynarmic::A32::VAddr addr) {
+        cpu->maybe_exclusive = true;
         Ptr<T> ptr{ addr };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
-            LOG_ERROR("Invalid read of uint{}_t at address: 0x{:x}\n{}", sizeof(T) * 8, addr, this->cpu->save_context().description());
+            if (!confirm_invalid_access(addr, "read"))
+                return *ptr.get(*parent->mem);
+            if (should_log_invalid_access()) {
+                LOG_ERROR("Invalid read of uint{}_t at address: 0x{:x}\n{}", sizeof(T) * 8, addr, this->cpu->save_context().description());
 
-            auto pc = this->cpu->get_pc();
-            if (pc < parent->mem->host_page_size)
-                LOG_CRITICAL("PC is 0x{:x}", pc);
-            else
-                LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+                auto pc = this->cpu->get_pc();
+                if (pc < parent->mem->host_page_size)
+                    LOG_CRITICAL("PC is 0x{:x}", pc);
+                else
+                    LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+            }
             return 0;
+        }
+
+        if constexpr (sizeof(T) > 1) {
+            if (straddles_page<T>(addr) && Ptr<uint8_t>(static_cast<Address>(addr + sizeof(T) - 1)).valid(*parent->mem)) {
+                return read_straddling<T>(addr);
+            }
         }
 
         T ret = *ptr.get(*parent->mem);
@@ -220,14 +600,27 @@ public:
     void MemoryWrite(Dynarmic::A32::VAddr addr, T value) {
         Ptr<T> ptr{ addr };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
-            LOG_ERROR("Invalid write of uint{}_t at addr: 0x{:x}, val = 0x{:x}\n{}", sizeof(T) * 8, addr, value, this->cpu->save_context().description());
+            if (!confirm_invalid_access(addr, "write")) {
+                *ptr.get(*parent->mem) = value;
+                return;
+            }
+            if (should_log_invalid_access()) {
+                LOG_ERROR("Invalid write of uint{}_t at addr: 0x{:x}, val = 0x{:x}\n{}", sizeof(T) * 8, addr, value, this->cpu->save_context().description());
 
-            auto pc = this->cpu->get_pc();
-            if (pc < parent->mem->host_page_size)
-                LOG_CRITICAL("PC is 0x{:x}", pc);
-            else
-                LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+                auto pc = this->cpu->get_pc();
+                if (pc < parent->mem->host_page_size)
+                    LOG_CRITICAL("PC is 0x{:x}", pc);
+                else
+                    LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+            }
             return;
+        }
+
+        if constexpr (sizeof(T) > 1) {
+            if (straddles_page<T>(addr) && Ptr<uint8_t>(static_cast<Address>(addr + sizeof(T) - 1)).valid(*parent->mem)) {
+                write_straddling<T>(addr, value);
+                return;
+            }
         }
 
         *ptr.get(*parent->mem) = value;
@@ -254,15 +647,18 @@ public:
 
     template <typename T>
     bool MemoryWriteExclusive(Dynarmic::A32::VAddr addr, T value, T expected) {
+        cpu->maybe_exclusive = false;
         Ptr<T> ptr{ addr };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
-            LOG_ERROR("Invalid exclusive write of uint{}_t at addr: 0x{:x}, val = 0x{:x}, expected = 0x{:x}\n{}", sizeof(T) * 8, addr, value, expected, this->cpu->save_context().description());
+            if (should_log_invalid_access()) {
+                LOG_ERROR("Invalid exclusive write of uint{}_t at addr: 0x{:x}, val = 0x{:x}, expected = 0x{:x}\n{}", sizeof(T) * 8, addr, value, expected, this->cpu->save_context().description());
 
-            auto pc = this->cpu->get_pc();
-            if (pc < parent->mem->host_page_size)
-                LOG_CRITICAL("PC is 0x{:x}", pc);
-            else
-                LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+                auto pc = this->cpu->get_pc();
+                if (pc < parent->mem->host_page_size)
+                    LOG_CRITICAL("PC is 0x{:x}", pc);
+                else
+                    LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+            }
             return false;
         }
 
@@ -296,12 +692,19 @@ public:
     void ExceptionRaised(uint32_t pc, Dynarmic::A32::Exception exception) override {
         switch (exception) {
         case Dynarmic::A32::Exception::Breakpoint: {
-            cpu->break_ = true;
-            cpu->jit->HaltExecution();
-            if (cpu->is_thumb_mode())
-                cpu->set_pc(pc | 1);
+            if (breakpoints_halt()) {
+                cpu->break_ = true;
+                cpu->jit->HaltExecution();
+                if (cpu->is_thumb_mode())
+                    cpu->set_pc(pc | 1);
+                else
+                    cpu->set_pc(pc);
+                break;
+            }
+            if (parent->on_guest_breakpoint)
+                parent->on_guest_breakpoint(pc);
             else
-                cpu->set_pc(pc);
+                LOG_ERROR("[BKPT] guest breakpoint at 0x{:X} on thread {} with no debugger attached, continuing", pc, parent->thread_id);
             break;
         }
         case Dynarmic::A32::Exception::WaitForInterrupt: {
@@ -319,21 +722,28 @@ public:
         case Dynarmic::A32::Exception::Yield:
             break;
         case Dynarmic::A32::Exception::UndefinedInstruction:
-            LOG_WARN("Undefined instruction at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value(), disassemble(*parent, pc, nullptr));
-            InterpreterFallback(pc, 1);
+            LOG_CRITICAL("Halting thread: undefined instruction at address 0x{:X}, instruction 0x{:X} ({})\n{}", pc, MemoryReadCode(pc).value_or(0), disassemble(*parent, pc, nullptr), cpu->save_context().description());
+            cpu->crashed = true;
+            cpu->jit->HaltExecution();
             break;
         case Dynarmic::A32::Exception::UnpredictableInstruction:
-            LOG_WARN("Unpredictable instruction at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value(), disassemble(*parent, pc, nullptr));
+            LOG_WARN("Unpredictable instruction at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value_or(0), disassemble(*parent, pc, nullptr));
             InterpreterFallback(pc, 1);
             break;
         case Dynarmic::A32::Exception::DecodeError: {
-            LOG_WARN("Decode error at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value(), disassemble(*parent, pc, nullptr));
-            InterpreterFallback(pc, 1);
+            LOG_CRITICAL("Halting thread: decode error at address 0x{:X}, instruction 0x{:X} ({})\n{}", pc, MemoryReadCode(pc).value_or(0), disassemble(*parent, pc, nullptr), cpu->save_context().description());
+            cpu->crashed = true;
+            cpu->jit->HaltExecution();
             break;
         }
+        case Dynarmic::A32::Exception::NoExecuteFault:
+            LOG_CRITICAL("Halting thread: attempted to execute unmapped memory at pc = 0x{:X}\n{}", pc, cpu->save_context().description());
+            cpu->crashed = true;
+            cpu->jit->HaltExecution();
+            break;
         default:
             LOG_WARN("Unknown exception {} Raised at pc = 0x{:x}", static_cast<size_t>(exception), pc);
-            LOG_TRACE("at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value(), disassemble(*parent, pc, nullptr));
+            LOG_TRACE("at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value_or(0), disassemble(*parent, pc, nullptr));
         }
     }
 
@@ -353,23 +763,35 @@ public:
 Dynarmic::ExclusiveMonitor DynarmicCPU::shared_monitor(MAX_CORE_COUNT);
 
 std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
+    util::JitStartupScope startup(util::JitStartupKind::JitCreate,
+        { static_cast<uint64_t>(parent->thread_id), diagnostic_id, 0, 0, 0, 0, diagnostic_rebuild ? 1u : 0u });
     Dynarmic::A32::UserConfig config{};
     config.arch_version = Dynarmic::A32::ArchVersion::v7;
     config.callbacks = cb.get();
     if (parent->mem->use_page_table) {
         config.page_table = (log_mem || !cpu_opt) ? nullptr : reinterpret_cast<decltype(config.page_table)>(parent->mem->page_table.get());
         config.absolute_offset_page_table = true;
+        // the fast path reads through the first page only (so the page straddling accesses must use the callbacks)
+        config.detect_misaligned_access_via_page_table = 16 | 32 | 64;
+        config.only_detect_misalignment_via_page_table_on_page_boundary = true;
     } else if (!log_mem && cpu_opt) {
         config.fastmem_pointer = std::bit_cast<uintptr_t>(parent->mem->memory.get());
     }
     config.hook_hint_instructions = true;
     config.global_monitor = &shared_monitor;
     config.coprocessors[15] = cp15;
+    static const std::shared_ptr<ArmDynarmicNullCP> null_cp = std::make_shared<ArmDynarmicNullCP>();
+    for (auto &coproc : config.coprocessors) {
+        if (!coproc)
+            coproc = null_cp;
+    }
     config.processor_id = core_id;
     config.optimizations = cpu_opt ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
     config.enable_cycle_counting = false;
 
-    return std::make_unique<Dynarmic::A32::Jit>(config);
+    auto result = std::make_unique<Dynarmic::A32::Jit>(config);
+    startup.result(0);
+    return result;
 }
 
 DynarmicCPU::DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt)
@@ -378,19 +800,88 @@ DynarmicCPU::DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt
     , cp15(std::make_shared<ArmDynarmicCP15>())
     , core_id(processor_id)
     , cpu_opt(cpu_opt) {
+    static std::atomic<uint64_t> next_id{ 0 };
+    diagnostic_id = next_id.fetch_add(1, std::memory_order_relaxed) + 1;
     jit = make_jit();
 }
 
 DynarmicCPU::~DynarmicCPU() = default;
 
+void DynarmicCPU::prepare_jit() {
+#if defined(_M_X64) || defined(__x86_64__)
+    auto &p = parent->jit_preparation;
+    if (!p || jit->IsExecuting() || log_code || log_mem)
+        return;
+    const auto blocks = p->ranked();
+    const auto start = std::chrono::steady_clock::now();
+    for (const auto &b : blocks) {
+        auto &stats = p->stats;
+        stats.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        if (stats.elapsed_ms >= cpu::JitPreparation::time_limit_ms) {
+            stats.deadline = true;
+            break;
+        }
+        if (stats.native_bytes >= cpu::JitPreparation::native_limit) {
+            stats.native_cap = true;
+            break;
+        }
+        ++stats.attempted;
+        p->replay(b);
+        try {
+            const auto bytes = jit->PrepareBlock(b.descriptor);
+            if (bytes) {
+                ++stats.prepared;
+                stats.native_bytes += bytes;
+            } else
+                ++stats.skipped;
+        } catch (...) {
+            ++stats.skipped;
+            p->end_replay();
+            stats.prepared = 0;
+            stats.native_bytes = 0;
+            rebuild_jit(); // Discard potentially partial emission before demand fallback.
+            break;
+        }
+        p->end_replay();
+    }
+    p->stats.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    p->report();
+    LOG_INFO("[JIT-PREPARE] {} learned blocks loaded; prepared {}, skipped {} in {} ms; {} native bytes", p->stats.loaded, p->stats.prepared, p->stats.skipped, p->stats.elapsed_ms, p->stats.native_bytes);
+#endif
+}
+
 int DynarmicCPU::run() {
+    // apply deferred logging changes now safely outside of jit->Run()
+    if (has_pending_log_code || has_pending_log_mem) {
+        bool rebuild = false;
+        if (has_pending_log_code) {
+            has_pending_log_code = false;
+            if (log_code != pending_log_code) {
+                log_code = pending_log_code;
+                rebuild = true;
+            }
+        }
+        if (has_pending_log_mem) {
+            has_pending_log_mem = false;
+            if (log_mem != pending_log_mem) {
+                log_mem = pending_log_mem;
+                rebuild = true;
+            }
+        }
+        if (rebuild)
+            rebuild_jit();
+    }
     halted = false;
     break_ = false;
+    crashed = false;
     parent->svc_called = false;
     Dynarmic::HaltReason halt_reason;
     do {
         halt_reason = jit->Run();
     } while ((halt_reason == Dynarmic::HaltReason::Step) || (halt_reason == Dynarmic::HaltReason::CacheInvalidation));
+
+    if (crashed)
+        return -1;
 
     return halted;
 }
@@ -410,20 +901,29 @@ void DynarmicCPU::trigger_breakpoint() {
     stop();
 }
 
+void DynarmicCPU::rebuild_jit() {
+    if (parent->jit_profile)
+        parent->jit_profile->invalidated();
+    const CPUContext ctx = save_context();
+    diagnostic_rebuild = true;
+    jit = make_jit();
+    load_context(ctx);
+}
+
 void DynarmicCPU::set_log_code(bool log) {
     if (log_code == log)
         return;
 
-    log_code = log;
-    jit = make_jit();
+    pending_log_code = log;
+    has_pending_log_code = true;
 }
 
 void DynarmicCPU::set_log_mem(bool log) {
     if (log_mem == log)
         return;
 
-    log_mem = log;
-    jit = make_jit();
+    pending_log_mem = log;
+    has_pending_log_mem = true;
 }
 
 bool DynarmicCPU::get_log_code() {
@@ -464,14 +964,6 @@ uint32_t DynarmicCPU::get_tpidruro() {
 
 void DynarmicCPU::set_tpidruro(uint32_t val) {
     cp15->set_tpidruro(val);
-}
-
-uint32_t DynarmicCPU::get_tpidrurw() {
-    return cp15->get_tpidrurw();
-}
-
-void DynarmicCPU::set_tpidrurw(uint32_t val) {
-    cp15->set_tpidrurw(val);
 }
 
 void DynarmicCPU::set_pc(uint32_t val) {
@@ -548,6 +1040,11 @@ void DynarmicCPU::invalidate_jit_cache(Address start, size_t length) {
     jit->InvalidateCacheRange(start, length);
 }
 
+static constexpr bool CLEAR_EXCLUSIVE_ONLY_WHEN_RESERVED = true;
+
 void DynarmicCPU::clear_exclusive() {
+    if (CLEAR_EXCLUSIVE_ONLY_WHEN_RESERVED && !maybe_exclusive)
+        return;
+    maybe_exclusive = false;
     shared_monitor.ClearProcessor(core_id);
 }

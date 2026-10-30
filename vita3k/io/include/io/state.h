@@ -23,6 +23,7 @@
 
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 
 // Class for all needed information to access files on Vita3K.
 class FileStats : public VitaStats {
@@ -102,8 +103,8 @@ struct IOState {
     struct DevicePaths {
         std::string app0;
         std::string savedata0;
+        std::string savedata1; // another title's save data mounted by sceAppUtilSaveDataMount, empty when none
         std::string addcont0;
-        std::string cache0;
     } device_paths;
 
     std::string addcont;
@@ -117,15 +118,20 @@ struct IOState {
 
     bool redirect_stdio;
 
-    SceUID next_fd = 0;
+    std::atomic<SceUID> next_fd{ 0 };
     TtyFiles tty_files;
     StdFiles std_files;
     DirEntries dir_entries;
 
     std::unordered_map<std::string, std::string> cachemap;
+    std::unordered_set<std::string> indexed_roots;
+    std::mutex cachemap_mutex;
     bool case_isens_find_enabled = false;
 
     std::mutex overlay_mutex;
+    mutable std::mutex file_mutex;
+    std::atomic<uint64_t> concurrent_positional_io{ 0 };
+    mutable std::atomic<uint64_t> guest_io_ops{ 0 };
     SceUID next_overlay_id = 1;
     // overlay in the order they should be applied
     std::vector<FiosOverlay> overlays;

@@ -30,6 +30,7 @@ data class EmulationSessionUiState(
     val overlayScale: Int = 100,
     val overlayOpacity: Int = 100,
     val hideOverlayWhenControllerConnected: Boolean = true,
+    val touchSwitchTilt: Boolean = false,
     val controllerConnected: Boolean = false,
     val statusMessage: String? = null
 )
@@ -152,6 +153,7 @@ class EmulationSessionViewModel(application: Application) : AndroidViewModel(app
         )
         applyOverlayState(emulator)
         emulator.restoreImeAfterPauseMenu()
+        emulator.focusGameSurface()
     }
 
     fun togglePause(emulator: Emulator) {
@@ -282,7 +284,8 @@ class EmulationSessionViewModel(application: Application) : AndroidViewModel(app
             overlayMask = uiState.overlayMask,
             overlayScale = uiState.overlayScale,
             overlayOpacity = uiState.overlayOpacity,
-            hideOverlayWhenControllerConnected = uiState.hideOverlayWhenControllerConnected
+            hideOverlayWhenControllerConnected = uiState.hideOverlayWhenControllerConnected,
+            touchSwitchTilt = uiState.touchSwitchTilt
         ).normalized()
     }
 
@@ -380,7 +383,8 @@ class EmulationSessionViewModel(application: Application) : AndroidViewModel(app
             hideToggleVisible = normalized.hideToggleVisible,
             overlayScale = normalized.overlayScale,
             overlayOpacity = normalized.overlayOpacity,
-            hideOverlayWhenControllerConnected = normalized.hideOverlayWhenControllerConnected
+            hideOverlayWhenControllerConnected = normalized.hideOverlayWhenControllerConnected,
+            touchSwitchTilt = normalized.touchSwitchTilt
         )
     }
 }

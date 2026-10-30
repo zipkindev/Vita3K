@@ -47,6 +47,8 @@ public:
     QString vsync;
     QString disable_surface_sync;
     QString async_pipeline;
+    QString accurate_thread_scheduling;
+    QString guest_cores;
     QString screen_filter;
     QString gpu_device;
     QString resolution_upscaling;
@@ -75,6 +77,7 @@ public:
     QString check_for_updates;
     QString log_compat_warn;
     QString texture_cache;
+    QString decoded_texture_cache;
     QString archive_log;
     QString log_level;
     QString discord_rpc;

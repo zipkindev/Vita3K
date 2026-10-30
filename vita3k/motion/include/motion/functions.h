@@ -36,4 +36,5 @@ SceFloat get_angle_threshold(const MotionState &state);
 void set_angle_threshold(MotionState &state, SceFloat setValue);
 SceFVector3 get_basic_orientation(const MotionState &state);
 
+void set_touch_tilt(MotionState &state, const CtrlState &ctrl_state, bool active, float x, float y);
 void refresh_motion(MotionState &state, CtrlState &ctrl_state);

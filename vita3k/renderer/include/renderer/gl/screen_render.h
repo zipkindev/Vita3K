@@ -39,13 +39,7 @@ public:
         return m_screen_texture;
     }
 
-    enum class Filter {
-        Bilinear,
-        Nearest,
-        FXAA,
-        Bicubic
-    };
-    Filter filter = Filter::Bilinear;
+    bool enable_fxaa;
 
 private:
     struct screen_vertex {
@@ -62,19 +56,7 @@ private:
     GLuint m_vbo{ 0 };
     SharedGLObject m_render_shader_nofilter;
     SharedGLObject m_render_shader_fxaa;
-    SharedGLObject m_render_shader_bicubic;
     GLuint m_screen_texture{ 0 };
-    GLuint m_sampler_linear{ 0 };
-    GLuint m_sampler_nearest{ 0 };
-
-    // Intermediate target for running FXAA at the rendering resolution
-    GLuint m_fxaa_fbo{ 0 };
-    GLuint m_fxaa_texture{ 0 };
-    int m_fxaa_width{ 0 };
-    int m_fxaa_height{ 0 };
-
-    const SharedGLObject &current_shader() const;
-    GLuint current_sampler() const;
 
     float last_uvs[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
 };

@@ -30,7 +30,7 @@ void sync_clipping(VKContext &context) {
     if (!context.render_target)
         return;
 
-    const float res_multiplier = context.state.res_multiplier;
+    const float res_multiplier = context.state.res_multiplier * context.surface_downscale;
 
     const int scissor_x = context.record.region_clip_min.x;
     const int scissor_y = context.record.region_clip_min.y;
@@ -94,16 +94,26 @@ void sync_stencil_func(VKContext &context, const bool is_back) {
         state = is_back ? &context.record.back_stencil_state_values : &context.record.front_stencil_state_values;
     }
 
-    context.render_cmd.setStencilCompareMask(face, state->compare_mask);
+    context.render_cmd.setStencilCompareMask(face, (context.stencil_compare_mask_zeroed && !is_back) ? 0 : state->compare_mask);
     context.render_cmd.setStencilReference(face, state->ref);
     context.render_cmd.setStencilWriteMask(face, state->write_mask);
+}
+
+// Turnip decides LRZ writes from the blend state alone
+bool fetch_draw_stops_lrz_write(const VKState &state, const GxmRecordState &record, const SceGxmProgram &fragment_program) {
+    return state.is_mesa_turnip && state.features.direct_fragcolor && fragment_program.is_frag_color_used() && !fragment_program.has_no_effect()
+        && record.front_side_fragment_program_mode != SCE_GXM_FRAGMENT_PROGRAM_DISABLED
+        && record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED
+        && record.front_stencil_state_op.func == SCE_GXM_STENCIL_FUNC_ALWAYS
+        && (record.two_sided != SCE_GXM_TWO_SIDED_ENABLED || record.back_stencil_state_op.func == SCE_GXM_STENCIL_FUNC_ALWAYS);
 }
 
 void sync_depth_bias(VKContext &context) {
     if (!context.is_recording)
         return;
 
-    context.render_cmd.setDepthBias(static_cast<float>(context.record.depth_bias_unit), 0.0, static_cast<float>(context.record.depth_bias_slope));
+    // The slope factor applies per raster pixel
+    context.render_cmd.setDepthBias(static_cast<float>(context.record.depth_bias_unit), 0.0, static_cast<float>(context.record.depth_bias_slope) * context.state.res_multiplier);
 }
 
 void sync_depth_data(VKContext &context) {
@@ -168,6 +178,12 @@ void sync_viewport_flat(VKContext &context) {
 
     if (!context.is_recording)
         return;
+    constexpr bool log_gxm_scene_viewport = false; // pairs with log_gxm_scene_state in context.cpp
+    if (log_gxm_scene_viewport && !context.gxmscene_viewport_logged) {
+        context.gxmscene_viewport_logged = true;
+        LOG_INFO("[GXMSCENE]   FLAT viewport x={} y={} w={} h={}",
+            context.viewport.x, context.viewport.y, context.viewport.width, context.viewport.height);
+    }
     context.render_cmd.setViewport(0, context.viewport);
 }
 
@@ -181,7 +197,7 @@ void sync_viewport_real(VKContext &context, const float xOffset, const float yOf
     const float x = xOffset - std::abs(xScale);
     const float y = yOffset - yScale;
 
-    const float res_multiplier = context.state.res_multiplier;
+    const float res_multiplier = context.state.res_multiplier * context.surface_downscale;
 
     // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkViewport.html
     // https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#vertexpostproc-viewport
@@ -199,11 +215,19 @@ void sync_viewport_real(VKContext &context, const float xOffset, const float yOf
 
     if (!context.is_recording)
         return;
+    constexpr bool log_gxm_scene_viewport = false; // pairs with log_gxm_scene_state in context.cpp
+    if (log_gxm_scene_viewport && !context.gxmscene_viewport_logged) {
+        context.gxmscene_viewport_logged = true;
+        LOG_INFO("[GXMSCENE]   GUEST viewport x={} y={} w={} h={} (xOffset={} yOffset={} xScale={} yScale={}) rt extent={}x{}",
+            context.viewport.x, context.viewport.y, context.viewport.width, context.viewport.height,
+            xOffset, yOffset, xScale, yScale,
+            context.render_target ? context.render_target->width : 0,
+            context.render_target ? context.render_target->height : 0);
+    }
     context.render_cmd.setViewport(0, context.viewport);
 }
 
 void sync_visibility_buffer(VKContext &context, Ptr<uint32_t> buffer, uint32_t stride) {
-    context.end_visibility_query();
     if (!buffer) {
         context.current_visibility_buffer = nullptr;
         return;
@@ -211,10 +235,19 @@ void sync_visibility_buffer(VKContext &context, Ptr<uint32_t> buffer, uint32_t s
 
     auto ite = context.visibility_buffers.find(buffer.address());
     if (ite == context.visibility_buffers.end()) {
-        context.visibility_buffers[buffer.address()] = { buffer.address(), nullptr, 0, static_cast<uint32_t>(stride / sizeof(uint32_t)) };
+        // create a new query pool
+        vk::QueryPoolCreateInfo pool_info{
+            .queryType = vk::QueryType::eOcclusion,
+            .queryCount = static_cast<uint32_t>(stride / sizeof(uint32_t))
+        };
+        vk::QueryPool query_pool = context.state.device.createQueryPool(pool_info);
+
+        context.visibility_buffers[buffer.address()] = { buffer.address(), nullptr, 0, static_cast<uint32_t>(stride / sizeof(uint32_t)), query_pool };
         ite = context.visibility_buffers.find(buffer.address());
 
         std::tie(ite->second.gpu_buffer, ite->second.buffer_offset) = context.state.get_matching_mapping(buffer.cast<void>());
+        // the + 1 is to make computing the ranges easier in context.cpp
+        ite->second.queries_used.resize(ite->second.size + 1, false);
     }
 
     context.current_visibility_buffer = &ite->second;
@@ -233,14 +266,20 @@ void sync_visibility_index(VKContext &context, bool enable, uint32_t index, bool
     }
 
     if (!enable) {
-        context.end_visibility_query();
+        if (context.is_in_query) {
+            context.render_cmd.endQuery(context.current_visibility_buffer->query_pool, context.current_query_idx);
+            context.is_in_query = false;
+        }
 
         context.current_query_idx = -1;
         return;
     }
 
-    if (context.current_query_idx != index || context.is_query_op_increment != is_increment)
-        context.end_visibility_query();
+    // do not end the query if it's the same index
+    if (context.is_in_query && context.current_query_idx != index) {
+        context.render_cmd.endQuery(context.current_visibility_buffer->query_pool, context.current_query_idx);
+        context.is_in_query = false;
+    }
     context.current_query_idx = index;
     context.is_query_op_increment = is_increment;
 }

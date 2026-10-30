@@ -26,12 +26,14 @@
 
 #include <vkutil/vkutil.h>
 
+#include <future>
+
 namespace renderer::vulkan {
 
 VKContext::VKContext(VKState &state, MemState &mem)
     : state(state)
     , mem(mem)
-    , vertex_stream_ring_buffer(vk::BufferUsageFlagBits::eVertexBuffer, MiB(/*128*/ 64))
+    , vertex_stream_ring_buffer(vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer, MiB(/*128*/ 64))
     , index_stream_ring_buffer(vk::BufferUsageFlagBits::eIndexBuffer, MiB(64))
     , vertex_uniform_stream_ring_buffer(vk::BufferUsageFlagBits::eStorageBuffer, MiB(/*256*/ 64))
     , fragment_uniform_stream_ring_buffer(vk::BufferUsageFlagBits::eStorageBuffer, MiB(/*256*/ 64))
@@ -58,7 +60,7 @@ VKContext::VKContext(VKState &state, MemState &mem)
         std::fill_n(vertex_stream_buffers, SCE_GXM_MAX_VERTEX_STREAMS, state.default_buffer.buffer);
 
         // also initialize the gpu wait thread
-        gpu_request_wait_thread = std::thread(&VKContext::wait_thread_function, this, std::ref(mem));
+        state.start_gpu_request_wait_thread(mem);
     } else {
         // these are not needed when using memory mapping
         vertex_stream_ring_buffer.create();
@@ -150,16 +152,19 @@ VKContext::VKContext(VKState &state, MemState &mem)
 }
 
 VKContext::~VKContext() {
-    if (gpu_request_wait_thread.joinable())
-        gpu_request_wait_thread.join();
+    if (state.features.enable_memory_mapping && state.gpu_request_wait_thread.joinable() && !state.request_queue.is_aborted()) {
+        auto promise = std::make_shared<std::promise<void>>();
+        std::future<void> future = promise->get_future();
+        state.request_queue.push(CallbackRequest{ new CallbackRequestFunction([promise]() { promise->set_value(); }) });
+        while (future.wait_for(std::chrono::milliseconds(5)) != std::future_status::ready) {
+            if (state.request_queue.is_aborted())
+                break;
+        }
+    }
 
-    for (auto pool : visibility_query_pools)
-        state.device.destroy(pool);
+    for (auto &[addr, vb] : visibility_buffers)
+        state.device.destroy(vb.query_pool);
     visibility_buffers.clear();
-    state.device.destroy(visibility_pipeline);
-    state.device.destroy(visibility_pipeline_layout);
-    state.device.destroy(visibility_descriptor_layout);
-    state.device.destroy(visibility_shader);
 
     state.device.destroy(global_descriptor_pool);
     global_descriptor_pool = nullptr;
@@ -171,12 +176,16 @@ VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &p
     , depthstencil(static_cast<uint32_t>(params.width * state.res_multiplier), static_cast<uint32_t>(params.height * state.res_multiplier), state.deep_stencil_use) {
     width = static_cast<uint32_t>(params.width * state.res_multiplier);
     height = static_cast<uint32_t>(params.height * state.res_multiplier);
+    base_width = width;
+    base_height = height;
 
+    // The standard render pass declares this fallback image as an input
+    // attachment even when the interlock path can also use it as storage.
     vk::ImageUsageFlags color_usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eInputAttachment;
     if (state.features.support_shader_interlock)
         color_usage |= vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eStorage;
     else
-        color_usage |= vk::ImageUsageFlagBits::eTransientAttachment;
+        color_usage |= vk::ImageUsageFlagBits::eInputAttachment | vk::ImageUsageFlagBits::eTransientAttachment;
     color.init_image(color_usage);
     if (params.multisampleMode == SCE_GXM_MULTISAMPLE_4X) {
         // the depth buffer may need to be 4x bigger if we use a texture without downscale
@@ -186,27 +195,16 @@ VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &p
 
     depthstencil.init_image(vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransientAttachment);
 
-    if (state.features.use_mask_bit) {
-        mask = vkutil::Image(depthstencil.width, depthstencil.height, vk::Format::eR8G8B8A8Unorm);
-        mask.init_image(vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferDst);
-
-        vk::FramebufferCreateInfo mask_info{
-            .renderPass = state.pipeline_cache.retrieve_mask_render_pass(),
-            .width = mask.width,
-            .height = mask.height,
-            .layers = 1
-        };
-        mask_info.setAttachments(mask.view);
-        mask_framebuffer = device.createFramebuffer(mask_info);
-    }
-
     // transition images to their right state
     vk::CommandBuffer cmd_buffer = vkutil::create_single_time_command(state.device, state.general_command_pool);
     // color
     color.transition_to_discard(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
     // depth stencil
     depthstencil.transition_to_discard(cmd_buffer, vkutil::ImageLayout::DepthStencilAttachment, vkutil::ds_subresource_range);
-    vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+    {
+        std::lock_guard<std::mutex> queue_lock(state.queue_mutex);
+        vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+    }
 
     constexpr uint16_t SCE_GXM_MAX_SCENES_PER_RENDERTARGET = 8;
     // hopefully this will always be enough
@@ -231,7 +229,6 @@ VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &p
 }
 
 VKRenderTarget::~VKRenderTarget() {
-    device.destroy(mask_framebuffer);
     for (auto &fence : fences)
         device.destroy(fence);
     fences.clear();
@@ -259,8 +256,6 @@ void destroy(VKState &state, std::unique_ptr<RenderTarget> &rt) {
     FrameObject &frame = state.frame();
     frame.destroy_queue.add_image(render_target.color);
     frame.destroy_queue.add_image(render_target.depthstencil);
-    frame.destroy_queue.add(render_target.mask_framebuffer);
-    frame.destroy_queue.add_image(render_target.mask);
 
     for (auto &fence : render_target.fences)
         frame.destroy_queue.add(fence);
@@ -300,13 +295,16 @@ bool create(std::unique_ptr<FragmentProgram> &fp, VKState &state, const SceGxmPr
         if (blend->colorMask & SCE_GXM_COLOR_MASK_A)
             color_mask |= vk::ColorComponentFlagBits::eA;
 
+        const bool color_is_blended = blend->colorFunc != SCE_GXM_BLEND_FUNC_NONE;
+        const bool alpha_is_blended = blend->alphaFunc != SCE_GXM_BLEND_FUNC_NONE;
+
         fp_vk->blending = vk::PipelineColorBlendAttachmentState{
-            .blendEnable = (blend->colorFunc != SCE_GXM_BLEND_FUNC_NONE) || (blend->alphaFunc != SCE_GXM_BLEND_FUNC_NONE),
-            .srcColorBlendFactor = translate_blend_factor(blend->colorSrc),
-            .dstColorBlendFactor = translate_blend_factor(blend->colorDst),
+            .blendEnable = color_is_blended || alpha_is_blended,
+            .srcColorBlendFactor = color_is_blended ? translate_blend_factor(blend->colorSrc) : vk::BlendFactor::eOne,
+            .dstColorBlendFactor = color_is_blended ? translate_blend_factor(blend->colorDst) : vk::BlendFactor::eZero,
             .colorBlendOp = translate_blend_func(blend->colorFunc),
-            .srcAlphaBlendFactor = translate_blend_factor(blend->alphaSrc),
-            .dstAlphaBlendFactor = translate_blend_factor(blend->alphaDst),
+            .srcAlphaBlendFactor = alpha_is_blended ? translate_blend_factor(blend->alphaSrc) : vk::BlendFactor::eOne,
+            .dstAlphaBlendFactor = alpha_is_blended ? translate_blend_factor(blend->alphaDst) : vk::BlendFactor::eZero,
             .alphaBlendOp = translate_blend_func(blend->alphaFunc),
             .colorWriteMask = color_mask
         };

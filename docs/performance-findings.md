@@ -1,10 +1,10 @@
 # Community performance findings
 
-These findings summarize Windows Legion Go testing through October 24, 2026. WipEout 2048 is the primary development workload; DOA5 Plus and DOA Xtreme 3 Venus provide additional compatibility and bottleneck checks. Improvements to shared code can help other compatible workloads, but testing two or three titles does not validate every game or handheld.
+These findings summarize Windows Legion Go testing through October 28, 2026. WipEout 2048 is the primary development workload; DOA5 Plus and DOA Xtreme 3 Venus provide additional compatibility and bottleneck checks. Improvements to shared code can help other compatible workloads, but testing two or three titles does not validate every game or handheld.
 
 ## Measurement method and limits
 
-We capture PresentMon presentation intervals and Windows CPU traces, usually for 90 seconds after the player confirms active gameplay. Early Ubermall comparisons used 45 seconds. The player reports deaths, pauses, restarts and finishes; interrupted attempts are kept separate from clean comparisons. Some initial traces started too late or included uncertain transitions and are not treated as clean races.
+PresentMon presentation intervals and Windows CPU traces are captured, historically for 90 seconds after active-gameplay confirmation and more recently in two-minute windows. Early Ubermall comparisons used 45 seconds. The player reports deaths, pauses, restarts and finishes; interrupted attempts are kept separate from clean comparisons. Some initial traces started too late or included uncertain transitions and are not treated as clean races.
 
 A fresh process has a cold decoded RAM cache, but retains disk shader/pipeline caches and the explicitly identified learned texture profile. It is not a completely uncached installation. Most WipEout comparisons use Vulkan at 2×, AF4, async pipeline compilation, 512 MiB decoded cache, two decode workers and the same saved input settings. Older 256 MiB and Off tests are labeled separately. Ship, traffic, weapons and fight stages were not deterministic; sequential tests can also benefit from cache warming. Medians/p99 describe presentation, not guest simulation rate or controller-to-display latency.
 
@@ -112,8 +112,110 @@ Native Windows tests cover cache/decoder correctness, learning bounds and mergin
 
 `.13` EXE SHA-256: `647344142a59a623189511dd5072f8eb4dfff3d279e16ccdf08412b2fd288cc2`. Its PDB SHA-256 is `fea199909354d4e1bbcb2c27a6f8365a15bbd46ab76f1cd07f27c1dccbf8d7fb`, GUID `0f40747a-ac7c-48be-a107-8b372aea0d3a`, age 1. The [Windows runner job](https://github.com/zipkindev/Vita3K-Go/actions/runs/40077345873) identifies the build. Manifests additionally record the recipe and applied support/dependency patches; the source commit alone is not the full build recipe. [Symbol instructions](windows-symbols.md).
 
+## October 28 preview: recent demand and direct staging
+
+The `.37` preview retains the `.36` direct cached-pixel-to-Vulkan-staging path and
+bounded Windows page hints. Recent per-session CPU texture demand and coarse
+first-demand-order cohorts now guide later startup selection alongside a costly
+input allowance. The decoded RAM ceiling remains 512 MiB in this test, with at
+most 384 MiB used by preparation. Selection is generic, not a map/effect list.
+
+In the final fresh-process Chenghou Rapier four-lap check, 3,255 inputs were prepared
+in 2.79 seconds from the newly learned version 2 profile. Private exact-input
+comparison plus coverage registration tracked eight expensive inputs that had
+been budget-skipped in `.36`: all eight were prepared, requested twice each and
+recorded no demand decode in the final `.37` session. This is a positive coverage
+result after learning; it does not establish prediction of unseen effects or a
+causal whole-game speedup. The input profile, disk caches and encounters differ
+from the earlier `.35`/`.36` sessions.
+
+| Final `.37` recorder window | Result |
+|---|---:|
+| Duration | 120 seconds |
+| Presentation intervals wholly inside the window | 3,598 |
+| Median / p99 | 33.3284 / 35.5141 ms |
+| Maximum | 129.2460 ms |
+| Intervals ≥50 / ≥100 ms | 3 / 1 |
+| Intervals between 30 and 40 ms | 99.58% |
+
+Recording began following a manual start-click; exact race-start QPC was not
+instrumented. A 2m17s race was reported. Feedback described some stutters and
+correct graphics. No additional continuity prompt was requested; exact phase
+boundaries remain a measurement limitation. The largest gap overlaps a 106.1022 ms
+synchronous renderer pipeline span; concurrent worker spans must not be added to
+it. A 64.8215 ms gap overlaps demand PVRTC decoding/upload work. A 57.2266 ms gap
+has no retained slow texture/pipeline span identifying its cause.
+
+Whole-session texture counters, including menus and time outside recording, show
+223 demand decodes and 0 byte/entry capacity evictions, with peak sampled payload
+residency about 416.67 MiB. The 3,478 shutdown clear events are not runtime capacity
+churn. Learning remained within the 64 MiB packed-file bound; bounded replacement
+added 205 and removed 211 exact inputs on close. This is allowed storage pressure,
+not loss of every evicted decoded texture.
+
+`.36` had a 364.7061 ms largest event containing synchronous pipelines and decoding;
+`.35` separate traffic sessions had maxima 172.3172 and 94.0833 ms. These are
+separate encounters with different learned inputs, not a controlled version A/B.
+No percentage gain or every-frame-under-100/50-ms result is claimed. Graphics
+pipeline libraries remain disabled by default after failed `.32`/`.33` loading
+experiments. The `.37` Windows build passed 34/34 tests and the same EXE/PDB pair
+was verified on the Legion Go. Killzone Mercenary 1.12 also reached rendered UI
+after its existing license was copied; no gameplay/performance claim follows.
+
+## October 28 queue synchronization preview
+
+The `.38` preview ports mainline b89272d3 queue synchronization to the additional
+Go/Plus submission paths, without changing the .37 texture/pipeline policies.
+A fresh-process Chenghou Rapier four-lap run used the latest .37 learning at
+512 MiB, Vulkan 2×/AF4/Bilinear, automatic preparation/two-way decoding and async
+off. The 120.072-second start-input window includes countdown and uncertain death
+timing near its end; it is not a confirmed uninterrupted gameplay interval.
+
+The 3,601 wholly contained presentation intervals had median 33.3432 ms, p99
+35.2757 ms, p99.9 36.4560 ms and maximum 60.8090 ms; 2 intervals were ≥50 ms and
+none ≥100 ms. Feedback reported no noticeable stutter. Different profiles,
+encounters and capture protocols prevent a controlled .37/.38 speedup claim.
+
+Whole-session exact preparation loaded 191 recipes, prepared 27 and reused 18.
+The specific .37 costly recipe was prepared, but its flags do not show exact
+reuse in this race. Performance captures ran without Vulkan validation; the
+Khronos layer is not installed/registered on the Go yet. Native tests and a
+smooth race do not replace validation-enabled API/synchronization checks.
+[Full settings, provenance and limitations](releases/v1.3.3-win11merge.38.md).
+
 ## Next questions and reproducing results
 
-Useful follow-ups are controlled fresh-process repeats, new tracks/games, profile admission when archives exceed decoded RAM, mixed size/cost/frequency ranking, long sessions near storage/history limits and attribution of the remaining initial JIT gap. JIT preparation has not been implemented; diagnostic read fingerprints are not a safe replay-validation scheme. More CPU threads alone do not make arbitrary guest compilation or texture prediction safe.
+Useful follow-ups are controlled fresh-process repeats, new tracks/games, profile admission when archives exceed decoded RAM, mixed size/cost/frequency ranking, long sessions near storage/history limits and attribution of the remaining initial JIT gap. An off-by-default bounded compile-only main-thread JIT preparation prototype exists; no independent gameplay gain has been established. Diagnostic read fingerprints alone are not a safe replay-validation scheme. More CPU threads alone do not make arbitrary guest compilation or texture prediction safe.
 
 To contribute, report hardware/OS/driver, game and version, exact build/EXE identity, graphics settings, cache budget and preparation report. State whether it is the first race/fight after a fresh launch, a same-session repeat, or a new disk-cache state. Keep the event and settings comparable, confirm continuous gameplay and separate interrupted captures. Reproduce both improvements and regressions. Submit numeric summaries and reviewed traces where appropriate, with game-derived data and personal information removed. No game files, saves, learned texture payloads or credentials are published in this report.
+
+
+## .46 progress-driven recovery candidate — 2026-10-29
+
+Since .38, Vulkan attachment/readback/view correctness fixes and bounded dynamic
+pipeline scheduling/recovery changes were added. The .46 step suppresses unchanged
+pair notifications, retains bounded progress across template eviction, reopens
+work on useful new readiness and remembers completed speculative recipes after
+unused objects are reclaimed. This avoids redundant work; it does not retain
+unlimited Vulkan objects or predict unseen effects.
+
+A fresh-process Sol 2 Rapier, four-lap capture at 512 MiB, async OFF and validation
+OFF was confirmed as continuous driving with traffic/weapons and some stutters.
+Across 3,569 positive presentation intervals: median 33.3391 ms, p99 36.1886 ms,
+p99.9 63.9249 ms, maximum 525.0769 ms; five intervals ≥50 ms, two ≥100 ms.
+The largest interval overlapped a 510.07 ms driver creation inside synchronous
+compilation. Its recipe was absent from the 236 launch recipes; none shared its
+vertex or fragment shader identity. Closure saved all prior recipes plus five,
+reaching 241. Another 90.85 ms gap overlapped texture staging/work spans, which
+cannot be added together as independent CPU costs. Three other ≥50 ms intervals
+lack a retained pipeline/texture span ≥5 ms; their causes remain unresolved.
+Manual click-to-driving alignment is not instrumented. These are presentation
+intervals, not input latency; they do not establish a controlled .45/.46 speedup.
+
+An earlier accidental solo time trial in .46 had a 227.94 ms maximum and no
+traffic/weapons. It is separate from combat evidence. The .45 four-track tournament
+was reported smooth overall, but differing learned input and unsegmented loading
+prevent a causal comparison. All 38 native Windows tests and .46 package/symbol
+checks passed; menu-only pinned synchronization validation had zero error categories
+and 13 unused-output warnings. Full race/effect validation and consistent sub-100 ms
+play remain open. See [the .46 release notes](releases/v1.3.3-win11merge.46.md).

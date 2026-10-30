@@ -9,7 +9,6 @@
 #include "android_state.h"
 
 #include <app/functions.h>
-#include <ime/functions.h>
 #include <ime/keyboard.h>
 #include <io/state.h>
 #include <motion/functions.h>

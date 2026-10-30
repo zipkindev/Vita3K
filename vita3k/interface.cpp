@@ -17,6 +17,9 @@
 
 #include "interface.h"
 #include "archive.h"
+#include <util/jit_startup_profile.h>
+#include <util/pipeline_profile.h>
+#include <util/sync_wait_profile.h>
 
 #include "module/load_module.h"
 
@@ -33,7 +36,6 @@
 #include <lang/state.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
-#include <packages/vci.h>
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
 
@@ -41,15 +43,22 @@
 #include <pugixml.hpp>
 
 #include <modules/module_parent.h>
-#include <modules/sysmem_state.h>
 #include <string>
 #include <util/log.h>
 #include <util/string_utils.h>
 #include <util/vector_utils.h>
 #include <util/vita_theme_utils.h>
 
+#include <cpu/functions.h>
+#include <cpu/impl/interface.h>
+#include <cpu/jit_preparation.h>
+#include <cpu/jit_profile.h>
+#include <cpu/state.h>
+#include <cstdlib>
 #include <gdbstub/functions.h>
 #include <stb_image_write.h>
+#include <stdexcept>
+#include <util/hash.h>
 
 #if USE_DISCORD
 #include <app/discord.h>
@@ -57,7 +66,10 @@
 
 #include "patch/patch.h"
 
+#include <algorithm>
+#include <chrono>
 #include <memory>
+#include <numeric>
 #include <regex>
 
 typedef std::shared_ptr<mz_zip_archive> ZipPtr;
@@ -93,6 +105,21 @@ static std::string fallback_theme_root_name(const std::string &content_path) {
     return (separator == std::string::npos) ? trimmed : trimmed.substr(separator + 1);
 }
 
+// an archive entry must stay inside the folder its content installs into
+static bool is_safe_archive_path(std::string_view relative) {
+    if (relative.starts_with('/') || relative.starts_with('\\') || relative.find(':') != std::string_view::npos)
+        return false;
+    while (!relative.empty()) {
+        const size_t separator = relative.find_first_of("/\\");
+        if (relative.substr(0, separator) == "..")
+            return false;
+        if (separator == std::string_view::npos)
+            break;
+        relative.remove_prefix(separator + 1);
+    }
+    return true;
+}
+
 static bool is_nonpdrm(EmuEnvState &emuenv, const fs::path &output_path) {
     const auto app_license_path{ emuenv.vita_fs_path / "ux0/license" / emuenv.app_info.app_title_id / fmt::format("{}.rif", emuenv.app_info.app_content_id) };
     const auto is_patch_found_app_license = (emuenv.app_info.app_category == "gp") && fs::exists(app_license_path);
@@ -111,18 +138,27 @@ static bool is_nonpdrm(EmuEnvState &emuenv, const fs::path &output_path) {
 }
 
 static bool set_content_path(EmuEnvState &emuenv, const bool is_theme, fs::path &dest_path) {
-    if (emuenv.app_info.app_title_id.empty()) {
-        LOG_ERROR("param.sfo has no title ID, not installing it");
+    // these ids name folders a reinstall removes so an empty or path-like id must never reach them
+    const bool is_theme_content = emuenv.app_info.app_category == "ac" && is_theme;
+    if (!is_theme_content && !sfo::is_safe_folder_name(emuenv.app_info.app_title_id)) {
+        LOG_ERROR("Rejecting content with an unusable title id '{}'", emuenv.app_info.app_title_id);
         return false;
     }
-
     const auto app_path = dest_path / "app" / emuenv.app_info.app_title_id;
 
     if (emuenv.app_info.app_category == "ac") {
         if (is_theme) {
+            if (!sfo::is_safe_folder_name(emuenv.app_info.app_content_id)) {
+                LOG_ERROR("Rejecting a theme with an unusable content id '{}'", emuenv.app_info.app_content_id);
+                return false;
+            }
             dest_path /= fs::path("theme") / emuenv.app_info.app_content_id;
             emuenv.app_info.app_title += " (Theme)";
         } else {
+            if (emuenv.app_info.app_content_id.size() <= 20 || !sfo::is_safe_folder_name(emuenv.app_info.app_content_id.substr(20))) {
+                LOG_ERROR("Rejecting DLC with an unusable content id '{}'", emuenv.app_info.app_content_id);
+                return false;
+            }
             emuenv.app_info.app_content_id = emuenv.app_info.app_content_id.substr(20);
             dest_path /= fs::path("addcont") / emuenv.app_info.app_title_id / emuenv.app_info.app_content_id;
             emuenv.app_info.app_title += " (DLC)";
@@ -176,12 +212,19 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
     std::string theme_path = "theme.xml";
     vfs::FileBuffer buffer, theme;
 
+    LOG_INFO("Installing archive content '{}'", content_path.empty() ? "<archive root>" : content_path);
+
     const auto is_theme = mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + theme_path).c_str(), &write_to_buffer, &theme, 0);
     const std::string theme_root_name = fallback_theme_root_name(content_path);
 
+    LOG_INFO("Reading {}{} from archive...", content_path, sfo_path);
     auto output_path{ emuenv.vita_fs_path / "ux0" };
     if (mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + sfo_path).c_str(), &write_to_buffer, &buffer, 0)) {
-        sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang);
+        LOG_INFO("param.sfo read ({} bytes)", buffer.size());
+        if (!sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang)) {
+            LOG_ERROR("Rejecting content '{}': param.sfo failed to parse ({} bytes)", content_path, buffer.size());
+            return false;
+        }
         if (!set_content_path(emuenv, is_theme, output_path))
             return false;
     } else if (is_theme) {
@@ -192,6 +235,20 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
         return false;
     }
 
+    LOG_INFO("Content {} [{}] installs to {}", emuenv.app_info.app_title, emuenv.app_info.app_title_id, output_path);
+
+    // every destination is checked before a previous install is removed or anything is written
+    for (mz_uint i = 0, count = mz_zip_reader_get_num_files(zip.get()); i < count; i++) {
+        mz_zip_archive_file_stat file_stat;
+        if (!mz_zip_reader_file_stat(zip.get(), i, &file_stat))
+            continue;
+        const std::string_view entry_name = file_stat.m_filename;
+        if (entry_name.starts_with(content_path) && !is_safe_archive_path(entry_name.substr(content_path.size()))) {
+            LOG_ERROR("Rejecting content '{}': archive entry '{}' would extract outside its folder", content_path, entry_name);
+            return false;
+        }
+    }
+
     const auto created = fs::create_directories(output_path);
     if (!created) {
         if (reinstall_callback) {
@@ -200,7 +257,10 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
                 return true;
             }
         }
+        const auto remove_start = std::chrono::steady_clock::now();
+        LOG_INFO("Removing previous install at {} before reinstall...", output_path);
         fs::remove_all(output_path);
+        LOG_INFO("Previous install removed in {} ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - remove_start).count());
     }
 
     float file_progress = 0;
@@ -212,33 +272,28 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
     };
 
     mz_uint num_files = mz_zip_reader_get_num_files(zip.get());
+    LOG_INFO("Extracting {} archive file(s) to {}...", num_files, output_path);
     for (mz_uint i = 0; i < num_files; i++) {
         mz_zip_archive_file_stat file_stat;
         if (!mz_zip_reader_file_stat(zip.get(), i, &file_stat)) {
             continue;
         }
         const std::string m_filename = file_stat.m_filename;
-        if (m_filename.contains(content_path)) {
+        if (m_filename.starts_with(content_path)) {
             file_progress = static_cast<float>(i) / num_files * 100.0f;
             update_progress();
 
             std::string replace_filename = m_filename.substr(content_path.size());
-            const fs::path file_output = fs_utils::generic_path(output_path / fs_utils::utf8_to_path(replace_filename));
-
-            const fs::path normalized_output_path = output_path.lexically_normal();
-            const fs::path normalized_file_output = file_output.lexically_normal();
-            const fs::path relative_to_output = normalized_file_output.lexically_relative(normalized_output_path);
-            if (relative_to_output.empty() || *relative_to_output.begin() == "..") {
-                LOG_ERROR("Rejecting archive entry whose path escapes the install directory: {}", m_filename);
-                continue;
-            }
-
+            const fs::path file_output = (output_path / fs_utils::utf8_to_path(replace_filename)).generic_path();
             if (mz_zip_reader_is_file_a_directory(zip.get(), i)) {
                 fs::create_directories(file_output);
             } else {
                 fs::create_directories(file_output.parent_path());
                 LOG_INFO("Extracting {}", file_output);
-                mz_zip_reader_extract_to_file(zip.get(), i, fs_utils::path_to_utf8(file_output).c_str(), 0);
+                if (!mz_zip_reader_extract_to_file(zip.get(), i, fs_utils::path_to_utf8(file_output).c_str(), 0)) {
+                    LOG_ERROR("Failed to extract {}: {}", file_output, miniz_get_error(zip));
+                    return false;
+                }
             }
         }
     }
@@ -292,18 +347,42 @@ static std::vector<std::string> get_archive_contents_path(const ZipPtr &zip) {
     return content_path;
 }
 
-std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback, const ReinstallCallback &reinstall_callback) {
-    if (string_utils::tolower(archive_path.extension().string()) == ".vci") {
-        const auto vci_progress = [&](float pct) {
-            if (progress_callback)
-                progress_callback({ 1.f, 1.f, pct });
-        };
-        const bool state = install_vci(archive_path, emuenv, vci_progress);
-        std::vector<ContentInfo> content_installed{};
-        content_installed.push_back({ emuenv.app_info.app_title, emuenv.app_info.app_title_id, emuenv.app_info.app_category, emuenv.app_info.app_content_id, archive_path.string(), state });
-        return content_installed;
-    }
+static bool archive_content_is_patch(const ZipPtr &zip, const std::string &content_path) {
+    vfs::FileBuffer buffer;
+    if (!mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + "sce_sys/param.sfo").c_str(), &write_to_buffer, &buffer, 0))
+        return false;
+    sfo::SfoAppInfo info;
+    return sfo::get_param_info(info, buffer, 0) && info.app_category.contains("gp");
+}
 
+static bool archive_holds_only_patches(const fs::path &archive_path) {
+    FILE *fp = FOPEN(archive_path.c_str(), "rb");
+    if (!fp)
+        return false;
+    bool only_patches = false;
+    {
+        const ZipPtr zip(new mz_zip_archive, delete_zip);
+        std::memset(zip.get(), 0, sizeof(*zip));
+        if (mz_zip_reader_init_cfile(zip.get(), fp, 0, 0)) {
+            const auto contents = get_archive_contents_path(zip);
+            only_patches = !contents.empty() && std::all_of(contents.begin(), contents.end(), [&](const std::string &content) { return archive_content_is_patch(zip, content); });
+        }
+    }
+    fclose(fp);
+    return only_patches;
+}
+
+std::vector<size_t> archive_install_order(const std::vector<fs::path> &archives) {
+    std::vector<bool> only_patches(archives.size());
+    for (size_t i = 0; i < archives.size(); i++)
+        only_patches[i] = archive_holds_only_patches(archives[i]);
+    std::vector<size_t> order(archives.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_partition(order.begin(), order.end(), [&](size_t index) { return !only_patches[index]; });
+    return order;
+}
+
+std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback, const ReinstallCallback &reinstall_callback) {
     FILE *vpk_fp = FOPEN(archive_path.c_str(), "rb");
     if (!vpk_fp) {
         LOG_CRITICAL("Failed to load archive file in path: {}", fs_utils::path_to_utf8(archive_path));
@@ -319,11 +398,20 @@ std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &ar
         return {};
     }
 
-    const auto content_path = get_archive_contents_path(zip);
+    const mz_uint archive_num_files = mz_zip_reader_get_num_files(zip.get());
+    auto content_path = get_archive_contents_path(zip);
+    LOG_INFO("Archive {}: {} file(s), {} content(s) found", fs_utils::path_to_utf8(archive_path.filename()), archive_num_files, content_path.size());
     if (content_path.empty()) {
+        for (mz_uint i = 0; i < std::min<mz_uint>(archive_num_files, 8); i++) {
+            mz_zip_archive_file_stat file_stat;
+            if (mz_zip_reader_file_stat(zip.get(), i, &file_stat))
+                LOG_ERROR("No installable content found; archive entry {}: '{}'", i, file_stat.m_filename);
+        }
         fclose(vpk_fp);
         return {};
     }
+
+    std::stable_partition(content_path.begin(), content_path.end(), [&](const std::string &path) { return !archive_content_is_patch(zip, path); });
 
     const auto count = static_cast<float>(content_path.size());
     float current = 0.f;
@@ -370,7 +458,10 @@ static bool install_content(EmuEnvState &emuenv, const fs::path &content_path) {
     const auto is_theme = fs::exists(theme_path);
     auto dst_path{ emuenv.vita_fs_path / "ux0" };
     if (fs_utils::read_data(sfo_path, buffer)) {
-        sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang);
+        if (!sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang)) {
+            LOG_ERROR("Rejecting content at {}: param.sfo failed to parse", content_path);
+            return false;
+        }
         if (!set_content_path(emuenv, is_theme, dst_path))
             return false;
 
@@ -441,8 +532,26 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         ::call_import(emuenv, cpu, nid, thread_id);
     };
     emuenv.kernel.process_exit_callback = [&emuenv](int res, std::optional<AppLaunchRequest> relaunch) {
-        emuenv.post_app_launch_request(relaunch.value_or(AppLaunchRequest{ .reason = AppLaunchReason::ProcessExit, .exit_code = res }));
+        emuenv.post_app_launch_request(relaunch.value_or(AppLaunchRequest{ .reason = AppLaunchReason::ProcessExit }));
     };
+    emuenv.kernel.accurate_thread_scheduling = emuenv.cfg.current_config.accurate_thread_scheduling;
+    // preempt-on-wake goes with accurate thread scheduling on every platform
+    emuenv.kernel.preempt_on_wake = emuenv.cfg.current_config.accurate_thread_scheduling;
+    emuenv.kernel.preempt_on_wake_us = emuenv.cfg.current_config.preempt_on_wake_us;
+    LOG_INFO("CONFIG (applied): memory_mapping={} accurate_thread_scheduling={} preempt_on_wake={} high_accuracy={} res_multiplier={} guest_cores={}",
+        emuenv.cfg.current_config.memory_mapping, emuenv.cfg.current_config.accurate_thread_scheduling,
+        emuenv.kernel.preempt_on_wake,
+        emuenv.cfg.current_config.high_accuracy, emuenv.cfg.current_config.resolution_multiplier, emuenv.cfg.current_config.guest_cores);
+    guest_sched_set_cores(emuenv.cfg.current_config.guest_cores);
+    if (emuenv.kernel.accurate_thread_scheduling)
+        LOG_INFO("Accurate thread scheduling enabled: default-affinity guest threads run one at a time, by priority");
+    if (emuenv.kernel.preempt_on_wake)
+        LOG_INFO("Preempt-on-wake enabled ({}us window): a thread that wakes a higher-priority thread waits for it only when the woken thread has no free core to run on", emuenv.kernel.preempt_on_wake_us);
+    static uint32_t game_boots = 0;
+    game_boots++;
+    core_lock_begin_boot(game_boots);
+    guest_assert_begin_boot();
+
     if (!emuenv.kernel.init(emuenv.mem, call_import, emuenv.cfg.current_config.cpu_opt)) {
         LOG_WARN("Failed to init kernel!");
         return KernelInitFailed;
@@ -494,7 +603,6 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         sfo::load(emuenv.sfo_handle, param_sfo);
 
     init_exported_vars(emuenv);
-    create_system_font_blocks(emuenv);
 
     // Load main executable
     if (!launch_request.self_path.empty()) {
@@ -508,20 +616,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
     if (main_module_id >= 0) {
         const auto module = emuenv.kernel.loaded_modules[main_module_id];
         LOG_INFO("Main executable {} ({}) loaded", module->info.module_name, emuenv.self_path);
-        uint32_t module_nid = 0;
-        {
-            const std::lock_guard<std::mutex> guard(emuenv.kernel.export_nids_mutex);
-            for (const auto &[nid, uid] : emuenv.kernel.module_uid_by_nid) {
-                if (uid == static_cast<uint32_t>(main_module_id))
-                    module_nid = nid;
-            }
-        }
-        LOG_INFO("Main executable NID: {} (for the NID attribute of a patch)", fmt::format("0x{:08X}", module_nid));
-
-        const std::string bin = "app0:" + emuenv.self_path;
-        Patches patches = get_patches(emuenv.patch_path, emuenv.io.title_id, bin);
-        const Patches xml_patches = get_xml_patches(emuenv.patch_path, emuenv.io.title_id, bin, emuenv.app_info.app_version, module_nid);
-        patches.insert(patches.end(), xml_patches.begin(), xml_patches.end());
+        const Patches patches = get_patches(emuenv.patch_path, emuenv.io.title_id, "app0:" + emuenv.self_path);
         if (!patches.empty())
             do_patches(emuenv.mem, patches, module->info);
     } else
@@ -586,7 +681,7 @@ void toggle_texture_replacement(EmuEnvState &emuenv) {
 
 static std::vector<uint32_t> get_current_app_frame(EmuEnvState &emuenv, uint32_t &width, uint32_t &height) {
     // Dump the current frame from the emulator display
-    std::vector<uint32_t> frame = emuenv.renderer->dump_frame(emuenv.display, width, height);
+    std::vector<uint32_t> frame = emuenv.renderer->dump_frame_on_render_thread(emuenv.display, width, height);
     if (frame.empty() || (frame.size() != (width * height))) {
         return {};
     }
@@ -655,9 +750,10 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchR
         return ModuleLoadFailed;
     }
 
+    // Breakpoint instructions only halt a thread when someone can resume it
+    set_breakpoints_halt(emuenv.cfg.gdbstub);
     if (emuenv.cfg.gdbstub) {
-        // The threads wait for the debugger's first continue
-        emuenv.kernel.suspend_threads();
+        emuenv.kernel.debugger.wait_for_debugger = true;
         server_open(emuenv);
     }
 
@@ -706,24 +802,122 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
             affinity = *affinity_ptr.get(emuenv.mem);
         }
     }
-    // A main thread without its own affinity runs on every user core and reports them all
-    if (affinity == SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT)
-        affinity = SCE_KERNEL_CPU_MASK_USER_ALL;
-    const ThreadStatePtr main_thread = emuenv.kernel.create_thread(emuenv.mem, emuenv.io.title_id.c_str(), entry_point, priority, affinity, stack_size, 0, nullptr);
+    // The existing JIT diagnostic switch also observes all subsequent CPU startups.
+    if (emuenv.cfg.current_config.jit_compile_telemetry || std::getenv("VITA3K_DIAG_JIT_PROFILE")) {
+        try {
+            const auto directory = util::fresh_diagnostic_path(emuenv.cache_path.native(), "jit-startup");
+            emuenv.jit_startup_profile = std::make_shared<util::JitStartupProfile>(directory, emuenv.io.title_id);
+            util::publish_jit_startup_profile(emuenv.jit_startup_profile);
+            LOG_INFO("[JIT-STARTUP] All-thread startup and fast-memory observer armed: {}", directory.string());
+        } catch (const std::exception &e) {
+            LOG_WARN("[JIT-STARTUP] Diagnostic disabled: {}", e.what());
+        }
+    }
+    const ThreadStatePtr main_thread = emuenv.kernel.create_thread(emuenv.mem, emuenv.io.title_id.c_str(), entry_point, priority, affinity, stack_size, nullptr);
     if (!main_thread) {
         LOG_ERROR("Failed to init main thread.");
         return InitThreadFailed;
     }
     emuenv.main_thread_id = main_thread->id;
 
-    // Before any guest code runs, module_start functions included, since they can read it too
-    emuenv.set_launch_uri(emuenv.cfg.launch_uri);
+    try {
+        if (emuenv.cfg.current_config.pipeline_telemetry && emuenv.renderer->current_backend == renderer::Backend::Vulkan) {
+            const auto directory = util::fresh_diagnostic_path(emuenv.cache_path.native(), "pipelines");
+            emuenv.pipeline_profile = std::make_shared<util::PipelineProfile>(directory, emuenv.io.title_id);
+            util::publish_pipeline_profile(emuenv.pipeline_profile);
+            LOG_INFO("[PIPELINE-PROFILE] Armed bounded Vulkan pipeline diagnostics: {}", directory.string());
+        }
+    } catch (const std::exception &e) {
+        LOG_WARN("[PIPELINE-PROFILE] Diagnostic disabled: {}", e.what());
+    }
 
     // Run `module_start` export (entry point) of loaded libraries
     for (auto &[_, module] : emuenv.kernel.loaded_modules) {
         if (module->info.modid != main_module_id)
             start_module(emuenv, module->info);
     }
+
+    try {
+        const char *output = std::getenv("VITA3K_DIAG_SYNC_PROFILE");
+        if ((output && *output) || emuenv.cfg.current_config.sync_wait_telemetry) {
+            const auto directory = output && *output ? std::filesystem::path(fs_utils::utf8_to_path(output).native())
+                                                     : util::fresh_diagnostic_path(emuenv.cache_path.native(), "sync-waits");
+            emuenv.sync_wait_profile = std::make_shared<util::SyncWaitProfile>(directory, emuenv.io.title_id);
+            util::publish_sync_wait_profile(emuenv.sync_wait_profile);
+            LOG_INFO("[SYNC-PROFILE] Armed selected synchronization API spans: {}", directory.string());
+        }
+    } catch (const std::exception &e) {
+        LOG_WARN("[SYNC-PROFILE] Diagnostic disabled: {}", e.what());
+    }
+
+    // Diagnostic-only main-thread learning. No code is precompiled or executed here.
+#if defined(_M_X64) || defined(__x86_64__)
+    const char *jit_output = std::getenv("VITA3K_DIAG_JIT_PROFILE");
+    if ((jit_output && *jit_output) || emuenv.cfg.current_config.jit_compile_telemetry) {
+        try {
+            cpu::JitProfileConfig profile;
+            profile.directory = (jit_output && *jit_output ? std::filesystem::path(fs_utils::utf8_to_path(jit_output).native())
+                                                           : util::fresh_diagnostic_path(emuenv.cache_path.native(), "jit-profile"))
+                                    .native();
+            profile.title = emuenv.io.title_id;
+            profile.version = emuenv.app_info.app_version;
+            profile.executable = emuenv.self_name;
+            profile.guest_thread = main_thread->id;
+            profile.cpu_optimizations = emuenv.kernel.cpu_opt;
+            {
+                const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
+                for (const auto &[_, module] : emuenv.kernel.loaded_modules) {
+                    const auto &info = module->info;
+                    const std::string path(info.path, std::find(std::begin(info.path), std::end(info.path), '\0'));
+                    for (const auto &seg : info.segments) {
+                        if (seg.memsz)
+                            profile.regions.push_back({ path, seg.vaddr.address(), seg.memsz, seg.perms });
+                    }
+                }
+            }
+            emuenv.jit_compile_profile = std::make_shared<cpu::JitCompileProfile>(std::move(profile));
+            main_thread->cpu->jit_profile = emuenv.jit_compile_profile;
+            LOG_INFO("[JIT-PROFILE] Main-thread compilation observer armed (65536 rolling records; bounded session summaries; no prewarming)");
+        } catch (const std::exception &e) {
+            LOG_WARN("[JIT-PROFILE] Diagnostic disabled: {}", e.what());
+        }
+    }
+#endif
+
+    // The main CPU has not been started. Prepare only verified app executable regions.
+#if defined(_M_X64) || defined(__x86_64__)
+    if (emuenv.cfg.current_config.jit_preparation) {
+        try {
+            std::vector<cpu::JitPreparation::Region> regions;
+            std::string identity = "jit-preparation20-v1-dynarmic86458a-hooks1-x64:" + emuenv.io.title_id + ":" + emuenv.app_info.app_version + ":" + emuenv.self_name + ":" + std::to_string(emuenv.kernel.cpu_opt);
+            size_t bytes = 0;
+            const auto module = [&] {
+                const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
+                return emuenv.kernel.loaded_modules.at(main_module_id);
+            }();
+            for (const auto &seg : module->info.segments) {
+                if (!seg.memsz || (seg.perms & 7) != 5)
+                    continue; // Read/execute, never writable data.
+                bytes += seg.memsz;
+                if (bytes > 32 * 1024 * 1024 || !seg.vaddr.valid(emuenv.mem)
+                    || !Ptr<uint8_t>{ seg.vaddr.address() + seg.memsz - 1 }.valid(emuenv.mem))
+                    throw std::runtime_error("Executable region outside preparation bounds");
+                regions.push_back({ seg.vaddr.address(), seg.memsz });
+                identity += ":" + std::to_string(seg.vaddr.address()) + ":" + std::to_string(seg.memsz) + ":" + hex_string(sha256(seg.vaddr.get(emuenv.mem), seg.memsz));
+            }
+            if (emuenv.io.title_id.empty() || emuenv.io.title_id.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") != std::string::npos)
+                throw std::runtime_error("Invalid title for JIT preparation cache");
+            const auto path = std::filesystem::path(emuenv.cache_path.native()) / "jit-preparation" / (emuenv.io.title_id + ".pj20");
+            emuenv.jit_preparation = std::make_shared<cpu::JitPreparation>(path, sha256(identity.data(), identity.size()), std::move(regions));
+            main_thread->cpu->jit_preparation = emuenv.jit_preparation;
+            main_thread->cpu->cpu->prepare_jit();
+        } catch (const std::exception &e) {
+            emuenv.jit_preparation.reset();
+            main_thread->cpu->jit_preparation.reset();
+            LOG_WARN("[JIT-PREPARE] Disabled; normal compilation remains active: {}", e.what());
+        }
+    }
+#endif
 
     SceKernelThreadOptParam param{ 0, 0 };
     std::vector<std::string> cfg_args;

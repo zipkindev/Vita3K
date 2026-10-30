@@ -26,6 +26,7 @@ struct CPUInterface {
     virtual ~CPUInterface() = default;
 
     virtual int run() = 0;
+    virtual void prepare_jit() {}
     virtual void stop() = 0;
 
     virtual uint32_t get_reg(uint8_t idx) = 0;
@@ -45,9 +46,6 @@ struct CPUInterface {
 
     virtual uint32_t get_tpidruro() = 0;
     virtual void set_tpidruro(uint32_t val) = 0;
-
-    virtual uint32_t get_tpidrurw() = 0;
-    virtual void set_tpidrurw(uint32_t val) = 0;
 
     virtual float get_float_reg(uint8_t idx) = 0;
     virtual void set_float_reg(uint8_t idx, float val) = 0;

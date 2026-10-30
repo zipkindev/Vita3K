@@ -24,7 +24,6 @@
 #include <mutex>
 #include <string>
 
-struct EmuEnvState;
 struct MemState;
 
 // Shared SysmemState definition used by SceSysmem and kubridge HLE.
@@ -39,22 +38,14 @@ typedef std::map<SceUID, KernelMemBlockPtr> Blocks;
 struct SysmemState {
     std::mutex mutex;
     Blocks blocks;
+    Blocks vm_blocks;
     SceUID next_uid = 1;
 
     uint32_t allocated_user = 0;
     uint32_t allocated_cdram = 0;
     uint32_t allocated_phycont = 0;
 
-    // The blocks for code. Only sceKernelFreeMemBlockForVM takes one out and gives its space back.
-    std::map<SceUID, SceKernelVARange> vm_blocks;
-    // The address space they take, of the 16 MiB they share
-    SceSize vm_space_used = 0;
-    bool vm_domain_open = false;
-
     SceUID get_next_uid() {
         return next_uid++;
     }
 };
-
-// The shell keeps these fonts in shared blocks that libpvf and WebKit open by name before an app starts.
-void create_system_font_blocks(EmuEnvState &emuenv);

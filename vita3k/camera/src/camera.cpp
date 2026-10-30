@@ -157,7 +157,7 @@ static bool init_image(Camera *self) {
 }
 
 static bool init_solid_color(Camera *self) {
-    SDL_SurfacePtr image_surface(SDL_CreateSurface(self->info.width, self->info.height, SDL_PIXELFORMAT_ABGR8888));
+    SDL_SurfacePtr image_surface(SDL_CreateSurface(self->info.width, self->info.height, SDL_PIXELFORMAT_ARGB8888));
     if (!image_surface) {
         LOG_ERROR("Failed to create SDL surface for solid color: {}", SDL_GetError());
         return false;
@@ -321,8 +321,8 @@ int Camera::read(SceCameraRead *read, void *pIBase, void *pUBase, void *pVBase, 
     read->status = SCE_CAMERA_STATUS_IS_ACTIVE;
     read->timestamp = last_frame_timestamp_us;
     if (pImpl->frame) {
+        sizeIBase = std::min(sizeIBase, (SceSize)(pImpl->frame->pitch * pImpl->frame->h)); // here pitch is width in bytes
         if (this->info.format == SCE_CAMERA_FORMAT_YUV420_PLANE) {
-            sizeIBase = std::min(sizeIBase, (SceSize)(pImpl->frame->pitch * pImpl->frame->h));
             sizeUBase = std::min(sizeUBase, (SceSize)(pImpl->frame->pitch * pImpl->frame->h / 4));
             sizeVBase = std::min(sizeVBase, (SceSize)(pImpl->frame->pitch * pImpl->frame->h / 4));
             memcpy(pIBase, (uint8_t *)pImpl->frame->pixels, sizeIBase);
@@ -332,6 +332,17 @@ int Camera::read(SceCameraRead *read, void *pIBase, void *pUBase, void *pVBase, 
             // convert SDL_PIXELFORMAT_YUY2 Y0+U0+Y1+V0 to planar format
             const int width = pImpl->frame->w;
             const int height = pImpl->frame->h;
+            const bool chroma_fits = sizeUBase >= (SceSize)((width / 2) * height) && sizeVBase >= (SceSize)((width / 2) * height);
+            if (sizeIBase < (SceSize)(width * height) || !chroma_fits) {
+                LOG_ERROR_ONCE("Buffer sizes too small for YUV422 planar conversion: IBase {}, UBase {}, VBase {}, required I {}, U {}, V {}.", sizeIBase, sizeUBase, sizeVBase, width * height, (width / 2) * height, (width / 2) * height);
+                if (sizeIBase < (SceSize)(width * height))
+                    return SCE_CAMERA_ERROR_PARAM;
+                // the luma plane still fits: convert it and fill the short chroma planes with neutral grey
+                if (pUBase && sizeUBase)
+                    memset(pUBase, 128, sizeUBase);
+                if (pVBase && sizeVBase)
+                    memset(pVBase, 128, sizeVBase);
+            }
             if (!SDL_LockSurface(pImpl->frame.get())) {
                 LOG_ERROR("Failed to lock camera frame surface: {}", SDL_GetError());
                 goto BAD_FRAME;
@@ -344,21 +355,17 @@ int Camera::read(SceCameraRead *read, void *pIBase, void *pUBase, void *pVBase, 
             for (ptrdiff_t y = 0; y < height; y++) {
                 uint8_t const *row = packed + y * pitch;
                 for (ptrdiff_t x = 0; x < width; x += 2) {
-                    const size_t y_index = y * width + x;
-                    const size_t uv_index = y_index / 2;
-                    if (y_index < sizeIBase)
-                        Y[y_index] = row[x * 2];
-                    if (y_index + 1 < sizeIBase)
-                        Y[y_index + 1] = row[x * 2 + 2];
-                    if (uv_index < sizeUBase)
-                        U[uv_index] = row[x * 2 + 1];
-                    if (uv_index < sizeVBase)
-                        V[uv_index] = row[x * 2 + 3];
+                    ptrdiff_t pair_idx = x / 2;
+                    Y[y * width + x] = row[pair_idx * 4];
+                    Y[y * width + x + 1] = row[pair_idx * 4 + 2];
+                    if (chroma_fits) {
+                        U[y * (width / 2) + pair_idx] = row[pair_idx * 4 + 1];
+                        V[y * (width / 2) + pair_idx] = row[pair_idx * 4 + 3];
+                    }
                 }
             }
             SDL_UnlockSurface(pImpl->frame.get());
         } else {
-            sizeIBase = std::min(sizeIBase, (SceSize)(pImpl->frame->pitch * pImpl->frame->h)); // here pitch is width in bytes
             memcpy(pIBase, pImpl->frame->pixels, sizeIBase);
         }
     } else {

@@ -50,29 +50,30 @@ static void ctr_init(uint8_t *counter, uint8_t *iv, uint64_t n) {
     }
 }
 
-static int execute(std::string &zrif, fs::path &title_src, fs::path &title_dst, F00DEncryptorTypes type, std::string &f00d_arg, PfsProgressCallback progress = nullptr) {
+static int execute(std::string &zrif, fs::path &title_src, fs::path &title_dst, F00DEncryptorTypes type, std::string &f00d_arg) {
     std::string title_src_str = title_src.string();
     std::string title_dst_str = title_dst.string();
-    return execute(zrif, title_src_str, title_dst_str, type, f00d_arg, progress);
+    return execute(zrif, title_src_str, title_dst_str, type, f00d_arg);
 }
 
-bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, const fs::path &title_path, const std::function<void(float)> &progress_callback) {
+bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, const fs::path &title_path) {
     fs::path title_id_src = title_path;
     fs::path title_id_dst = fs_utils::path_concat(title_path, "_dec");
-    std::ifstream binfile(drmlicpath, std::ios::in | std::ios::binary | std::ios::ate);
+    fs::ifstream binfile(drmlicpath, std::ios::in | std::ios::binary | std::ios::ate);
     std::string zRIF = rif2zrif(binfile);
     F00DEncryptorTypes f00d_enc_type = F00DEncryptorTypes::native;
     std::string f00d_arg = std::string();
 
-    PfsProgressCallback pfs_progress = nullptr;
-    if (progress_callback) {
-        pfs_progress = [&progress_callback](std::uint64_t processed, std::uint64_t total, const std::string &) {
-            progress_callback(total ? static_cast<float>(processed) / static_cast<float>(total) : 1.f);
-        };
-    }
-
-    if ((execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg, pfs_progress) < 0) && (title_path.string().find("theme") == std::string::npos))
+    const bool is_theme = title_path.parent_path().filename() == "theme";
+    boost::system::error_code ec;
+    if (execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg) < 0 && !is_theme) {
+        fs::remove_all(title_id_dst, ec);
         return false;
+    }
+    if (!fs::is_directory(title_id_dst, ec)) {
+        LOG_ERROR("NoNpDrm decryption of {} produced no output", title_path);
+        return false;
+    }
 
     if (!emuenv.app_info.app_category.contains("gp"))
         copy_license(emuenv, drmlicpath);
@@ -80,6 +81,20 @@ bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, co
     fs::remove_all(title_id_src);
     fs::rename(title_id_dst, title_id_src);
 
+    return true;
+}
+
+static bool is_safe_entry_name(std::string_view name) {
+    if (name.starts_with('/') || name.starts_with('\\') || name.find(':') != std::string_view::npos)
+        return false;
+    while (!name.empty()) {
+        const size_t separator = name.find_first_of("/\\");
+        if (name.substr(0, separator) == "..")
+            return false;
+        if (separator == std::string_view::npos)
+            break;
+        name.remove_prefix(separator + 1);
+    }
     return true;
 }
 
@@ -102,8 +117,9 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
 
     progress_callback(0);
 
-    if (byte_swap(pkg_header.magic) != 0x7F504b47 && byte_swap(ext_header.magic) != 0x7F657874) {
+    if (byte_swap(pkg_header.magic) != 0x7F504b47 || byte_swap(ext_header.magic) != 0x7F657874) {
         LOG_ERROR("Not a valid pkg file!");
+        fclose(infile);
         return false;
     }
 
@@ -204,18 +220,46 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
     EVP_EncryptUpdate(cipher_ctx, main_key, &dec_len, pkg_header.pkg_data_iv, 0x10);
     EVP_EncryptFinal_ex(cipher_ctx, main_key + dec_len, &dec_len);
 
+    const auto abandon = [&]() {
+        evp_cleanup();
+        fclose(infile);
+        return false;
+    };
+    if (sfo_size == 0 || sfo_size > pkg_size || sfo_offset > pkg_size - sfo_size) {
+        LOG_ERROR("The pkg's param.sfo ({} bytes at {}) lies outside the {} byte file", sfo_size, sfo_offset, pkg_size);
+        return abandon();
+    }
     std::vector<uint8_t> sfo_buffer(sfo_size);
-    SfoFile sfo_file;
     fseek(infile, sfo_offset, SEEK_SET);
     fread(sfo_buffer.data(), sfo_buffer.size(), 1, infile);
-    sfo::load(sfo_file, sfo_buffer);
-    sfo::get_param_info(emuenv.app_info, sfo_buffer, emuenv.cfg.sys_lang);
+    if (!sfo::get_param_info(emuenv.app_info, sfo_buffer, emuenv.cfg.sys_lang)) {
+        LOG_ERROR("The pkg's param.sfo could not be parsed");
+        return abandon();
+    }
+    if (type != PkgType::PKG_TYPE_VITA_THEME && !sfo::is_safe_folder_name(emuenv.app_info.app_title_id)) {
+        LOG_ERROR("The pkg has an unusable title id '{}'", emuenv.app_info.app_title_id);
+        return abandon();
+    }
 
-    if (type == PkgType::PKG_TYPE_VITA_DLC)
+    if (type == PkgType::PKG_TYPE_VITA_DLC) {
+        if (emuenv.app_info.app_content_id.size() <= 20) {
+            LOG_ERROR("The pkg has an unusable DLC content id '{}'", emuenv.app_info.app_content_id);
+            return abandon();
+        }
         emuenv.app_info.app_content_id = emuenv.app_info.app_content_id.substr(20);
+    }
+    if ((type == PkgType::PKG_TYPE_VITA_DLC || type == PkgType::PKG_TYPE_VITA_THEME) && !sfo::is_safe_folder_name(emuenv.app_info.app_content_id)) {
+        LOG_ERROR("The pkg has an unusable content id '{}'", emuenv.app_info.app_content_id);
+        return abandon();
+    }
 
     if (type == PkgType::PKG_TYPE_VITA_APP && strcmp(emuenv.app_info.app_category.c_str(), "gp") == 0) {
         type = PkgType::PKG_TYPE_VITA_PATCH;
+    }
+
+    if (type == PkgType::PKG_TYPE_VITA_PATCH && !fs::exists(emuenv.vita_fs_path / "ux0/app" / emuenv.app_info.app_title_id / "sce_sys/param.sfo")) {
+        LOG_ERROR("Install app before patch: {} is not installed", emuenv.app_info.app_title_id);
+        return abandon();
     }
 
     auto path{ emuenv.vita_fs_path / "ux0" };
@@ -275,11 +319,15 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
 
         auto string_name = std::string(name.begin(), name.end());
         LOG_INFO(string_name);
+        if (!is_safe_entry_name(string_name)) {
+            LOG_ERROR("The pkg entry '{}' would extract outside its folder", string_name);
+            return abandon();
+        }
 
         if ((byte_swap(entry.type) & 0xFF) == 4 || (byte_swap(entry.type) & 0xFF) == 18) { // Directory
             fs::create_directories(path / string_name);
         } else { // File
-            std::ofstream outfile(path / string_name, std::ios::binary);
+            fs::ofstream outfile(path / string_name, std::ios::binary);
 
             auto offset = byte_swap(entry.data_offset);
             auto data_size = byte_swap(entry.data_size);
@@ -380,7 +428,7 @@ std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path
         return {};
 
     LOG_INFO("Found license file: {}", rif_path);
-    std::ifstream binfile(rif_path, std::ios::in | std::ios::binary | std::ios::ate);
+    fs::ifstream binfile(rif_path, std::ios::in | std::ios::binary | std::ios::ate);
     if (!binfile)
         return {};
 

@@ -32,6 +32,7 @@
 
 namespace renderer {
 struct FragmentProgram;
+struct ProgramBinding;
 struct VertexProgram;
 } // namespace renderer
 
@@ -42,14 +43,19 @@ struct SceGxmColorSurface {
         uint32_t disabled : 1;
         uint32_t downscale : 1;
         uint32_t gamma : 2;
-        uint32_t : 28;
+        uint32_t clip_x_min : 12;
+        uint32_t clip_y_min : 12;
+        uint32_t : 4;
     };
-    uint32_t width;
-    uint32_t height;
+    uint16_t width;
+    uint16_t height;
     uint32_t strideInPixels;
     Ptr<void> data;
     SceGxmColorFormat colorFormat;
     SceGxmColorSurfaceType surfaceType;
+    uint32_t clip_x_max : 12;
+    uint32_t clip_y_max : 12;
+    uint32_t : 8;
     // opaque end
     uint32_t outputRegisterSize;
     SceGxmTexture backgroundTex;
@@ -286,7 +292,8 @@ struct SceGxmFragmentProgram {
     // only necessary with async compilation
     std::atomic<uint32_t> compile_threads_on = 0;
     bool is_maskupdate;
-    std::unique_ptr<renderer::FragmentProgram> renderer_data;
+    std::shared_ptr<renderer::FragmentProgram> renderer_data;
+    std::shared_ptr<renderer::ProgramBinding> renderer_binding;
 };
 
 struct SceGxmNotification {
@@ -297,6 +304,7 @@ struct SceGxmNotification {
 struct SceGxmRegisteredProgram {
     // TODO This is an opaque type.
     Ptr<const SceGxmProgram> program;
+    Address self = 0;
 };
 
 typedef Ptr<SceGxmRegisteredProgram> SceGxmShaderPatcherId;
@@ -333,7 +341,8 @@ struct SceGxmVertexProgram {
     Ptr<const SceGxmProgram> program;
     std::vector<SceGxmVertexStream> streams;
     std::vector<SceGxmVertexAttribute> attributes;
-    std::unique_ptr<renderer::VertexProgram> renderer_data;
+    std::shared_ptr<renderer::VertexProgram> renderer_data;
+    std::shared_ptr<renderer::ProgramBinding> renderer_binding;
     uint64_t key_hash;
     // only necessary with async compilation
     std::atomic<uint32_t> compile_threads_on = 0;

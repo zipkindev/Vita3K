@@ -7,7 +7,6 @@
 #pragma once
 
 #include <util/function_info.h>
-#include <util/warning.h>
 
 #include <algorithm>
 #include <array>
@@ -103,7 +102,10 @@ private:
     template <typename FnT>
     struct VisitorCaller;
 
-    DISABLE_MSVC_WARNING_BEGIN(4800) // forcing value to bool 'true' or 'false' (performance warning)
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4800) // forcing value to bool 'true' or 'false' (performance warning)
+#endif
     template <typename Visitor, typename... Args, typename CallRetT>
     struct VisitorCaller<CallRetT (Visitor::*)(Args...)> {
         template <size_t... iota>
@@ -137,7 +139,9 @@ private:
             };
         }
     };
-    DISABLE_MSVC_WARNING_END
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 public:
     /**

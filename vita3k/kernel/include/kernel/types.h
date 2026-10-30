@@ -49,24 +49,11 @@
 
 #define SCE_KERNEL_ATTR_TH_FIFO 0x00000000U
 #define SCE_KERNEL_ATTR_TH_PRIO 0x00002000U
-
-// Lets sceKernelOpen* find the object by name
 #define SCE_KERNEL_ATTR_OPENABLE 0x00000080U
-// Lets several threads wait on an event flag at once
-#define SCE_EVENT_WAITMULTIPLE 0x00001000U
+#define SCE_KERNEL_ATTR_MULTI 0x00001000U
 
 #define SCE_KERNEL_EVENT_ATTR_MANUAL_RESET 0x00000000U
 #define SCE_KERNEL_EVENT_ATTR_AUTO_RESET 0x00000100U
-
-// System events of a simple event: set when it is created, deleted, opened and closed, and the
-// result of a wait that ends with an error
-#define SCE_KERNEL_EVENT_CREATE 0x00000004U
-#define SCE_KERNEL_EVENT_DELETE 0x00000008U
-#define SCE_KERNEL_EVENT_ERROR 0x00000010U
-#define SCE_KERNEL_EVENT_OPEN 0x00000100U
-#define SCE_KERNEL_EVENT_CLOSE 0x00000200U
-// The bits of a simple event a game may set and clear, the others are system events
-#define SCE_KERNEL_EVENT_USER_DEFINED_MASK 0xFF000000U
 
 #define SCE_KERNEL_ATTR_NOTIFY_CB_ALL 0x00000000U
 #define SCE_KERNEL_ATTR_NOTIFY_CB_WAKEUP_ONLY 0x00000800U
@@ -77,19 +64,32 @@
 #define SCE_KERNEL_RW_LOCK_ATTR_RECURSIVE 0x2U
 #define SCE_KERNEL_RW_LOCK_ATTR_CEILING 0x4U
 
-#define SCE_KERNEL_RW_LOCK_CANCEL_WITH_WRITE_LOCK 0x1U
-
-#define SCE_KERNEL_EVENT_TIMER 0x00008000U
-
 #define SCE_KERNEL_TIMER_TYPE_SET_EVENT 0
 #define SCE_KERNEL_TIMER_TYPE_PULSE_EVENT 1
 
-#define SCE_KERNEL_MSG_PIPE_TYPE_USER_MAIN 0x00000040U
+#define SCE_KERNEL_EVENT_CREATE 0x00000004U
+#define SCE_KERNEL_EVENT_DELETE 0x00000008U
+#define SCE_KERNEL_EVENT_ERROR 0x00000010U
+// the bits of a simple event a game may set, pulse and clear; the others are system events
+#define SCE_KERNEL_EVENT_USER_DEFINED_MASK 0xFF000000U
+#define SCE_KERNEL_EVENT_TIMER 0x00008000U
+#define SCE_KERNEL_EVENT_DATA_EXIST 0x00010000U
 
-// The bits that order the threads waiting on a message pipe, separately for senders and receivers
-#define SCE_KERNEL_MSG_PIPE_ATTR_TH_MASK 0x0000000FU
-#define SCE_KERNEL_MSG_PIPE_ATTR_TH_PRIO_S 0x00000001U
-#define SCE_KERNEL_MSG_PIPE_ATTR_TH_PRIO_R 0x00000002U
+#define SCE_KERNEL_EVENT_WAIT_MODE_OR 0x00000001U
+#define SCE_KERNEL_EVENT_WAIT_MODE_AND 0x00000002U
+
+#define SCE_KERNEL_THREADMGR_UID_CLASS_THREAD 1
+#define SCE_KERNEL_THREADMGR_UID_CLASS_SEMA 2
+#define SCE_KERNEL_THREADMGR_UID_CLASS_EVENT_FLAG 3
+#define SCE_KERNEL_THREADMGR_UID_CLASS_MUTEX 4
+#define SCE_KERNEL_THREADMGR_UID_CLASS_COND 5
+#define SCE_KERNEL_THREADMGR_UID_CLASS_TIMER 6
+#define SCE_KERNEL_THREADMGR_UID_CLASS_MSG_PIPE 7
+#define SCE_KERNEL_THREADMGR_UID_CLASS_CALLBACK 8
+#define SCE_KERNEL_THREADMGR_UID_CLASS_LW_MUTEX 10
+#define SCE_KERNEL_THREADMGR_UID_CLASS_LW_COND 11
+#define SCE_KERNEL_THREADMGR_UID_CLASS_RW_LOCK 12
+#define SCE_KERNEL_THREADMGR_UID_CLASS_SIMPLE_EVENT 13
 
 #define SCE_KERNEL_MSG_PIPE_MODE_ASAP 0x00000000U
 #define SCE_KERNEL_MSG_PIPE_MODE_FULL 0x00000001U
@@ -99,44 +99,20 @@
 
 #define SCE_KERNEL_MSG_PIPE_MODE_DONT_REMOVE 0x00000100U
 
+#define SCE_KERNEL_MSG_PIPE_TYPE_USER_MAIN 64
+#define SCE_KERNEL_MSG_PIPE_TYPE_USER_CDRAM 66
+
+#define SCE_KERNEL_MSG_PIPE_ATTR_TH_PRIO 0x00000003U
+#define SCE_KERNEL_MSG_PIPE_ATTR_TH_FIFO 0x0000000CU
+
 #define SCE_KERNEL_LW_MUTEX_ATTR_TH_FIFO SCE_KERNEL_ATTR_TH_FIFO
 #define SCE_KERNEL_LW_MUTEX_ATTR_TH_PRIO SCE_KERNEL_ATTR_TH_PRIO
-
-#define SCE_KERNEL_THREAD_STATUS_RUNNING 0x00000001U
-#define SCE_KERNEL_THREAD_STATUS_READY 0x00000002U
-#define SCE_KERNEL_THREAD_STATUS_STANDBY 0x00000004U
-#define SCE_KERNEL_THREAD_STATUS_WAITING 0x00000008U
-#define SCE_KERNEL_THREAD_STATUS_DORMANT 0x00000010U
-#define SCE_KERNEL_THREAD_STATUS_DELETED 0x00000020U
-#define SCE_KERNEL_THREAD_STATUS_DEAD 0x00000040U
-#define SCE_KERNEL_THREAD_STATUS_STAGNANT 0x00000080U
-#define SCE_KERNEL_THREAD_STATUS_SUSPENDED 0x00000100U
-
-#define SCE_KERNEL_WAITTYPE_DELAY 0x00000001U
-#define SCE_KERNEL_WAITTYPE_WAITTHEND 0x00000002U
-#define SCE_KERNEL_WAITTYPE_SIGNAL 0x00000004U
-#define SCE_KERNEL_WAITTYPE_WAITTHSUSPEND 0x00000008U
-#define SCE_KERNEL_WAITTYPE_EVENTFLAG 0x00000010U
-#define SCE_KERNEL_WAITTYPE_SEMAPHORE 0x00000020U
-#define SCE_KERNEL_WAITTYPE_MUTEX 0x00000040U
-#define SCE_KERNEL_WAITTYPE_RW_LOCK 0x00000080U
-#define SCE_KERNEL_WAITTYPE_COND_SIGNAL 0x00000100U
-#define SCE_KERNEL_WAITTYPE_COND_MUTEX 0x00000200U
-#define SCE_KERNEL_WAITTYPE_FAST_MUTEX 0x00001000U
-#define SCE_KERNEL_WAITTYPE_FAST_MUTEX_SPIN 0x00002000U
-#define SCE_KERNEL_WAITTYPE_EVENT 0x00010000U
-#define SCE_KERNEL_WAITTYPE_MP_EVENTS 0x00020000U
-#define SCE_KERNEL_WAITTYPE_MSG_PIPE 0x00040000U
-#define SCE_KERNEL_WAITTYPE_LW_MUTEX 0x00100000U
-#define SCE_KERNEL_WAITTYPE_LW_COND_SIGNAL 0x00200000U
-#define SCE_KERNEL_WAITTYPE_LW_COND_LW_MUTEX 0x00400000U
 
 #define KERNELOBJECT_MAX_NAME_LENGTH 31
 
 #define SCE_UID_INVALID_UID (SceUID)(0xFFFFFFFF)
 
 #define SCE_ERROR_ERRNO_EINVAL 0x80010016
-#define SCE_ERROR_ERRNO_ENOSYS 0x80010058
 
 constexpr size_t MODULE_INFO_NUM_SEGMENTS = 4;
 
@@ -462,6 +438,7 @@ enum SceKernelErrorCode : uint32_t {
     SCE_KERNEL_ERROR_PRELOAD_FIOS2_FAILED = 0x8002D0F2,
     SCE_KERNEL_ERROR_AUTHFAIL = 0x8002F000,
     SCE_KERNEL_ERROR_NO_AUTH = 0x8002F001,
+    SCE_KERNEL_ERROR_MPP_EMPTY = 0x800201b4
 };
 
 enum SceEventFlagWaitTypes {
@@ -472,26 +449,12 @@ enum SceEventFlagWaitTypes {
 };
 
 enum SceKernelMemBlockType {
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_L1WBWA_RW = 0x09404060,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_R = 0x09408040,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW = 0x09408060,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_DEVICE_RW = 0x0C200860,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_R = 0x0C20D040,
+    SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE = 0x0C208060,
     SCE_KERNEL_MEMBLOCK_TYPE_USER_RX = 0x0C20D050,
     SCE_KERNEL_MEMBLOCK_TYPE_USER_RW = 0x0C20D060,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE = 0x0C208060,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_GAME_RW = 0x0C50D060,
     SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW = 0x0C80D060,
     SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW = 0x0D808060,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_CDIALOG_RW = 0x0CA0D060,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_CDIALOG_NC_RW = 0x0CA08060,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_TOOL_RW = 0x0CF0D060,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_TOOL_NC_RW = 0x0CF08060,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_CDIALOG_RO_UNCACHE = 0x0E208040,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_CDIALOG_RX_UNCACHE = 0x0E208050,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_CDIALOG_RW_UNCACHE = 0x0E208060,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_CDIALOG_RO = 0x0E20D040,
-    SCE_KERNEL_MEMBLOCK_TYPE_USER_CDIALOG_RW = 0x0E20D060,
+    SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW = 0x09408060
 };
 
 enum SceSysmoduleModuleId : uint16_t {
@@ -557,11 +520,6 @@ enum SceSysmoduleModuleId : uint16_t {
     SCE_SYSMODULE_MARLIN_DOWNLOADER = 0x003B,
     SCE_SYSMODULE_MARLIN_APP_LIB = 0x003C,
     SCE_SYSMODULE_TELEPHONY_UTIL = 0x003D,
-    SCE_SYSMODULE_SHACCCG = 0x003E,
-    SCE_SYSMODULE_MONO_BRIDGE = 0x003F,
-    SCE_SYSMODULE_MONO = 0x0040,
-    SCE_SYSMODULE_PSM = 0x0041,
-    SCE_SYSMODULE_PSM_DEVAGENT = 0x0042,
     SCE_SYSMODULE_PSPNET_ADHOC = 0x0043,
     SCE_SYSMODULE_DTCP_IP = 0x0044,
     SCE_SYSMODULE_VIDEO_SEARCH_EMPR = 0x0045,
@@ -628,10 +586,10 @@ enum SceSysmoduleInternalModuleId : uint32_t {
 
 // Indexes in thread local storage (TLS) for system data. It is used mostly by libkernel.
 enum TlsItems {
-    TLS_PROCESS_ID = 0, // unused, and 0 when a thread is created, as on a Vita
+    TLS_PROCESS_ID = 0,
     TLS_THREAD_ID = 1,
-    TLS_SP_TOP = 2, // the high end of the stack
-    TLS_SP_BOTTOM = 3, // its low end
+    TLS_SP_TOP = 2,
+    TLS_SP_BOTTOM = 3,
     TLS_VFP_EXCEPTION = 4,
     TLS_RESERVED_5 = 5,
     TLS_RESERVED_6 = 6, // libc reserved longjump addr
@@ -707,11 +665,6 @@ struct SceKernelStopModuleOpt {
     SceUInt32 stop;
 };
 
-struct SceKernelVARange {
-    Address addr;
-    SceSize size;
-};
-
 struct SceKernelMemBlockInfo {
     SceSize size;
     Ptr<void> mappedBase;
@@ -723,6 +676,19 @@ struct SceKernelMemBlockInfo {
 
 struct SceKernelSimpleEventOptParam {
     SceSize size;
+};
+
+struct SceKernelWaitEvent {
+    SceUID eventId;
+    SceUInt32 eventPattern;
+};
+
+struct SceKernelResultEvent {
+    SceUID eventId;
+    SceInt32 result;
+    SceUInt32 resultPattern;
+    SceInt32 reserved;
+    SceUInt64 userData;
 };
 
 struct SceKernelEventFlagOptParam {
@@ -756,6 +722,7 @@ struct SceKernelLMOption {
     SceSize size;
 };
 
+// We only use workarea for uid
 struct SceKernelLwMutexWork {
     std::uint32_t owner;
     std::uint32_t unknown0;
@@ -764,6 +731,7 @@ struct SceKernelLwMutexWork {
     SceUID uid;
     std::uint32_t unknown1[3];
 };
+
 static_assert(sizeof(SceKernelLwMutexWork) == 32, "Incorrect size");
 
 struct SceKernelLwMutexInfo {
@@ -778,23 +746,12 @@ struct SceKernelLwMutexInfo {
     SceUInt32 numWaitThreads; /**< Number of threads waiting for the lightweight mutex */
 };
 
+// We only use workarea for uid
 struct SceKernelLwCondWork {
     SceUID uid;
-    SceUID lwMutexUid;
-    std::uint32_t unknown[2];
-};
-static_assert(sizeof(SceKernelLwCondWork) == 16, "Incorrect size");
 
-struct SceKernelLwCondInfo {
-    SceSize size; /**< Size of this structure (sizeof(SceKernelLwCondInfo)) */
-    SceUID uid; /**< Lightweight condition variable identifier */
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1]; /**< Name given to sceKernelCreateLwCond() */
-    SceUInt32 attr; /**< Attributes given to sceKernelCreateLwCond() */
-    Ptr<SceKernelLwCondWork> pWork; /**< Work area given to sceKernelCreateLwCond() */
-    Ptr<SceKernelLwMutexWork> pLwMutex; /**< Work area of the lightweight mutex it uses */
-    SceUInt32 numWaitThreads; /**< Number of threads waiting on it */
+    std::uint8_t padding[28];
 };
-static_assert(sizeof(SceKernelLwCondInfo) == 0x38, "Incorrect size");
 
 struct SceKernelCreateLwMutex_opt {
     int init_count;
@@ -814,14 +771,6 @@ struct SceKernelCreateSema_opt {
     int maxVal;
     Ptr<SceKernelSemaOptParam> option;
 };
-
-// The arguments of sceKernelCancelEventWithSetPattern after the pattern, which its syscall takes
-// through a pointer
-struct SceKernelCancelEventWithSetPattern_opt {
-    SceUInt64 userData;
-    Ptr<SceUInt32> pNumWaitThreads;
-};
-static_assert(sizeof(SceKernelCancelEventWithSetPattern_opt) == 0x10, "Incorrect size");
 
 struct SceKernelCreateMsgPipeOpt {
     /** Size of the structure */
@@ -855,17 +804,6 @@ struct SceKernelCondInfo {
     SceUInt32 numWaitThreads;
 };
 
-struct SceKernelMppInfo {
-    SceSize size;
-    SceUID mppId;
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
-    SceUInt32 attr;
-    SceInt32 bufSize;
-    SceInt32 freeSize;
-    SceInt32 numSendWaitThreads;
-    SceInt32 numReceiveWaitThreads;
-};
-
 struct SceKernelEventFlagInfo {
     SceSize size;
     SceUID evfId;
@@ -875,19 +813,6 @@ struct SceKernelEventFlagInfo {
     SceUInt32 currentPattern;
     SceUInt32 numWaitThreads;
 };
-
-// What sceKernelGetEventInfo reports
-struct SceKernelEventInfo {
-    SceSize size;
-    SceUID eventId;
-    char name[KERNELOBJECT_MAX_NAME_LENGTH + 1];
-    SceUInt32 attr;
-    SceUInt32 eventPattern;
-    SceUInt64 userData;
-    SceUInt32 numWaitThreads;
-    SceInt32 reserved;
-};
-static_assert(sizeof(SceKernelEventInfo) == 0x40, "Incorrect size");
 
 struct SceKernelMutexInfo {
     SceSize size;
@@ -932,6 +857,18 @@ struct SceKernelSemaInfo {
     SceInt32 currentCount;
     SceInt32 maxCount;
     SceUInt32 numWaitThreads;
+};
+
+enum SceKernelThreadStatus : SceUInt32 {
+    SCE_KERNEL_THREAD_STATUS_RUNNING = 0x00000001,
+    SCE_KERNEL_THREAD_STATUS_READY = 0x00000002,
+    SCE_KERNEL_THREAD_STATUS_STANDBY = 0x00000004,
+    SCE_KERNEL_THREAD_STATUS_WAITING = 0x00000008,
+    SCE_KERNEL_THREAD_STATUS_DORMANT = 0x00000010,
+    SCE_KERNEL_THREAD_STATUS_DELETED = 0x00000020,
+    SCE_KERNEL_THREAD_STATUS_DEAD = 0x00000040,
+    SCE_KERNEL_THREAD_STATUS_STAGNANT = 0x00000080,
+    SCE_KERNEL_THREAD_STATUS_SUSPENDED = 0x00000100,
 };
 
 struct SceKernelThreadInfo {

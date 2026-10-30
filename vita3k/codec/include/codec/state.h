@@ -95,6 +95,7 @@ struct H264DecoderState : public DecoderState {
 
     uint32_t width_in = 0;
     uint32_t height_in = 0;
+    uint32_t pitch_in = 0;
 
     uint32_t width_out = 0;
     uint32_t height_out = 0;
@@ -107,15 +108,42 @@ struct H264DecoderState : public DecoderState {
     bool output_yuvp3;
 
     bool is_stopped = true;
+    struct HeldPicture {
+        uint64_t au_hash = 0;
+        uint64_t pts = ~0ull;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t pitch = 0;
+        bool yuvp3 = false;
+        std::vector<uint8_t> data;
+    };
+    std::vector<HeldPicture> held;
+    uint64_t last_au_hash = 0;
+    struct SentAu {
+        uint64_t pts = ~0ull;
+        uint64_t hash = 0;
+    };
+    std::vector<SentAu> recent_sent; // newest last, at most 16
+    bool last_send_was_refeed = false;
+    static uint64_t au_hash(const uint8_t *p, uint32_t n);
+    uint64_t hash_for_pts(uint64_t pic_pts) const;
+    void stash_picture(const uint8_t *data, uint64_t pic_pts, uint32_t width, uint32_t height, bool yuvp3);
+    bool take_held_picture(uint8_t *out, uint64_t au_hash, uint32_t width, uint32_t height, bool yuvp3);
+    bool poll(uint8_t *data);
+    bool is_draining = false;
 
     static uint32_t buffer_size(DecoderSize size);
+    uint32_t frame_bytes() const;
 
     uint32_t get(DecoderQuery query) override;
 
     bool send(const uint8_t *data, uint32_t size) override;
     bool receive(uint8_t *data, DecoderSize *size = nullptr) override;
+    // Signal end-of-stream and return one buffered picture, if available. Call repeatedly to
+    bool drain(uint8_t *data, DecoderSize *size = nullptr);
+    void flush() override;
     void configure(void *options);
-    void set_res(const uint32_t width, const uint32_t height);
+    void set_res(const uint32_t width, const uint32_t height, const uint32_t pitch = 0);
     void get_res(uint32_t &width, uint32_t &height);
     void get_pts(uint32_t &upper, uint32_t &lower);
     void set_output_format(bool is_yuv_p3);
@@ -167,7 +195,8 @@ struct Atrac9DecoderState : public DecoderState {
     uint32_t get(DecoderQuery query) override;
     uint32_t get_es_size() override;
 
-    bool send(const uint8_t *data, uint32_t size = 0) override;
+    // A bounded ATRAC9 decode requires the actual available input byte count.
+    bool send(const uint8_t *data, uint32_t size) override;
     bool receive(uint8_t *data, DecoderSize *size) override;
     void flush() override;
 
@@ -189,6 +218,7 @@ struct Mp3DecoderState : public DecoderState {
     bool receive(uint8_t *data, DecoderSize *size) override;
 
     explicit Mp3DecoderState(uint32_t channels);
+    ~Mp3DecoderState() override;
 };
 
 struct ADPCMHistory {
@@ -233,13 +263,19 @@ struct AacDecoderState : public DecoderState {
     SwrContext *swr = nullptr;
     AVFrame *frame;
     uint32_t es_size_used;
+    uint32_t output_sample_rate = 0;
+    uint32_t output_channels = 0;
+    bool is_sbr = false;
+    int configured_input_sample_rate = 0;
+    int configured_input_channels = 0;
+    int configured_input_format = -1;
     uint32_t get(DecoderQuery query) override;
 
     bool send(const uint8_t *data, uint32_t size) override;
     bool receive(uint8_t *data, DecoderSize *size) override;
     uint32_t get_es_size() override;
 
-    explicit AacDecoderState(uint32_t sample_rate, uint32_t channels);
+    explicit AacDecoderState(uint32_t sample_rate, uint32_t channels, bool is_sbr);
     ~AacDecoderState() override;
 };
 
@@ -281,9 +317,10 @@ struct PlayerState {
     ~PlayerState();
 };
 
-void convert_rgb_to_yuv(const uint8_t *rgba, uint8_t *yuv, uint32_t width, uint32_t height, const DecoderColorSpace color_space, bool is_bgra, int32_t in_pitch);
+void get_yuv_frame_layout(uint32_t width, uint32_t height, DecoderColorSpace color_space, bool hw_csc_pitch, uint32_t pitch[3], uint32_t offset[3]);
+void convert_rgb_to_yuv(const uint8_t *rgba, uint8_t *yuv, uint32_t width, uint32_t height, const DecoderColorSpace color_space, int32_t in_pitch, bool is_bgra, bool hw_csc_pitch);
 void convert_yuv_to_rgb(const uint8_t *yuv, uint8_t *rgba, uint32_t frame_width, const DecoderColorSpace color_space, bool is_bgra, MJpegPitch pitch[4]);
-int convert_yuv_to_jpeg(const uint8_t *yuv, uint8_t *jpeg, uint32_t width, uint32_t height, uint32_t max_size, const DecoderColorSpace color_space, int32_t compress_ratio);
-void copy_yuv_data_from_frame(AVFrame *frame, uint8_t *dest, const uint32_t width, const uint32_t height, bool is_p3);
+int convert_yuv_to_jpeg(const uint8_t *yuv, uint8_t *jpeg, uint32_t frame_width, uint32_t frame_height, uint32_t width, uint32_t height, bool hw_csc_pitch, uint32_t max_size, const DecoderColorSpace color_space, int32_t compress_ratio);
+void copy_yuv_data_from_frame(AVFrame *frame, uint8_t *dest, const uint32_t width, const uint32_t height, bool is_p3, const uint32_t pitch = 0);
 void calculate_pitch_info(uint32_t width, uint32_t height, int downscale_ratio, DecoderColorSpace color_space, bool use_standard_decoder, MJpegPitch output_pitch[4]);
 std::string codec_error_name(int error);

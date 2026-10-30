@@ -137,6 +137,11 @@ std::string to_debug_str<SceAudioOutChannelFlag>(const MemState &mem, SceAudioOu
     return std::to_string(type);
 }
 
+static bool audio_cfg_traced(std::atomic<uint32_t> &calls, uint32_t &n) {
+    n = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    return n <= 16 || (n & (n - 1)) == 0;
+}
+
 EXPORT(int, sceAudioOutGetAdopt, SceAudioOutPortType type) {
     TRACY_FUNC(sceAudioOutGetAdopt, type);
     // this is used in case the vita is using voice chat, not useful for us
@@ -145,8 +150,31 @@ EXPORT(int, sceAudioOutGetAdopt, SceAudioOutPortType type) {
 }
 
 EXPORT(int, sceAudioOutGetConfig, int port, SceAudioOutConfigType type) {
-    TRACY_FUNC(sceAudioOutGetConfig, type);
-    return UNIMPLEMENTED();
+    TRACY_FUNC(sceAudioOutGetConfig, port, type);
+    const AudioOutPortPtr prt = lock_and_find(port, emuenv.audio.out_ports, emuenv.audio.mutex);
+    if (!prt)
+        return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
+
+    int value;
+    switch (type) {
+    case SCE_AUDIO_OUT_CONFIG_TYPE_LEN:
+        value = prt->len;
+        break;
+    case SCE_AUDIO_OUT_CONFIG_TYPE_FREQ:
+        value = prt->freq;
+        break;
+    case SCE_AUDIO_OUT_CONFIG_TYPE_MODE:
+        value = prt->mode;
+        break;
+    default:
+        return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_CONF_TYPE);
+    }
+
+    static std::atomic<uint32_t> calls{ 0 };
+    uint32_t n;
+    if (audio_cfg_traced(calls, n))
+        LOG_INFO("[AUDIOCFG] {}: thread {} port {} type {} config type {} = {} (#{})", export_name, thread_id, port, prt->type, static_cast<int>(type), value, n);
+    return value;
 }
 
 EXPORT(int, sceAudioOutGetPortVolume_forUser) {
@@ -201,14 +229,15 @@ EXPORT(int, sceAudioOutOutput, int port, const void *buf) {
     if (!buf)
         return 0;
 
+    note_audio_thread(emuenv.kernel, thread_id, export_name);
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
     if (!thread) {
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
     }
     // is it really useful to update the thread status?
-    thread->begin_host_wait();
+    thread->update_status(ThreadStatus::wait);
     emuenv.audio.audio_output(*prt, buf);
-    thread->end_host_wait();
+    thread->update_status(ThreadStatus::run);
 
     return prt->len;
 }
@@ -286,8 +315,23 @@ EXPORT(int, sceAudioOutSetConfig, int port, int len, int freq, int mode) {
     const auto set_freq = freq >= 0 ? freq : prt->freq;
     const auto set_mode = mode >= 0 ? mode : prt->mode;
 
-    if ((set_len == prt->len) && (set_freq == prt->freq) && (set_mode == prt->mode))
+    static std::atomic<uint32_t> calls{ 0 };
+    uint32_t n;
+    const bool traced = audio_cfg_traced(calls, n);
+
+    if ((set_len == prt->len) && (set_freq == prt->freq) && (set_mode == prt->mode)) {
+        if (traced)
+            LOG_INFO("[AUDIOCFG] {}: thread {} port {} type {} unchanged len {} freq {} mode {} (#{})", export_name, thread_id, port, prt->type, set_len, set_freq, set_mode, n);
         return 0;
+    }
+
+    const int type = prt->type;
+    const int left_volume = prt->left_channel_volume;
+    const int right_volume = prt->right_channel_volume;
+    const float volume = prt->volume;
+    const int old_len = prt->len;
+    const int old_freq = prt->freq;
+    const int old_mode = prt->mode;
 
     if (CALL_EXPORT(sceAudioOutReleasePort, port) != 0)
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
@@ -299,9 +343,17 @@ EXPORT(int, sceAudioOutSetConfig, int port, int len, int freq, int mode) {
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_NOT_OPENED);
 
     // Save the port configuration
+    prt->type = type;
     prt->freq = set_freq;
     prt->len = set_len;
     prt->mode = set_mode;
+    prt->left_channel_volume = left_volume;
+    prt->right_channel_volume = right_volume;
+    emuenv.audio.set_volume(*prt, volume);
+
+    if (traced)
+        LOG_INFO("[AUDIOCFG] {}: thread {} port {} type {} rebuilt len {} -> {} freq {} -> {} mode {} -> {}, kept volume L {} R {} ({:.3f}) (#{})",
+            export_name, thread_id, port, type, old_len, set_len, old_freq, set_freq, old_mode, set_mode, left_volume, right_volume, volume, n);
 
     const std::lock_guard<std::mutex> lock(emuenv.audio.mutex);
     emuenv.audio.out_ports.emplace(port, prt);

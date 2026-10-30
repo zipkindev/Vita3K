@@ -22,6 +22,7 @@ object OverlayStore {
     private const val KEY_OVERLAY_SCALE = "overlay_scale"
     private const val KEY_OVERLAY_OPACITY = "overlay_opacity"
     private const val KEY_HIDE_ON_CONTROLLER = "hide_overlay_on_controller"
+    private const val KEY_TOUCH_SWITCH_TILT = "overlay_touch_switch_tilt"
     private const val KEY_CONFIG_PREFIX = "config"
     private const val KEY_LAYOUT_PREFIX = "layout"
     private const val KEY_POSITION_X_SUFFIX = ":x"
@@ -208,6 +209,7 @@ object OverlayStore {
                 configKey(normalizedScopeId, KEY_HIDE_ON_CONTROLLER),
                 normalizedState.config.hideOverlayWhenControllerConnected
             )
+            putBoolean(configKey(normalizedScopeId, KEY_TOUCH_SWITCH_TILT), normalizedState.config.touchSwitchTilt)
             saveLayoutEntries(this, normalizedScopeId, normalizedState.layout)
             if (markOverride && normalizedScopeId.isNotEmpty()) {
                 putBoolean(overrideEnabledKey(normalizedScopeId), true)
@@ -234,7 +236,8 @@ object OverlayStore {
             overlayMask = prefs.getInt(keys[0], fallback.overlayMask),
             overlayScale = prefs.getInt(keys[1], fallback.overlayScale),
             overlayOpacity = prefs.getInt(keys[2], fallback.overlayOpacity),
-            hideOverlayWhenControllerConnected = prefs.getBoolean(keys[3], fallback.hideOverlayWhenControllerConnected)
+            hideOverlayWhenControllerConnected = prefs.getBoolean(keys[3], fallback.hideOverlayWhenControllerConnected),
+            touchSwitchTilt = prefs.getBoolean(configKey(scopeId, KEY_TOUCH_SWITCH_TILT), fallback.touchSwitchTilt)
         ).normalized()
     }
 

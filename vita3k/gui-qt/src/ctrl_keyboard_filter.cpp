@@ -22,6 +22,7 @@
 #include <ctrl/ctrl.h>
 #include <ctrl/state.h>
 #include <touch/functions.h>
+#include <touch/state.h>
 #include <util/log.h>
 
 #include <QEvent>
@@ -79,14 +80,14 @@ bool CtrlKeyboardFilter::eventFilter(QObject *watched, QEvent *event) {
         if (pressed && matches(cfg.keyboard_gui_toggle_touch, cfg.keyboard_gui_toggle_touch_alt))
             toggle_touchscreen(m_emuenv.touch);
 
+        if (matches(cfg.keyboard_gui_tilt, cfg.keyboard_gui_tilt_alt))
+            m_emuenv.touch.tilt_key_held = pressed;
+
         if (pressed && matches(cfg.keyboard_toggle_texture_replacement, cfg.keyboard_toggle_texture_replacement_alt))
             emit texture_replacement_toggled();
 
         if (pressed && matches(cfg.keyboard_take_screenshot, cfg.keyboard_take_screenshot_alt))
             emit screenshot_requested();
-
-        if (pressed && matches(cfg.keyboard_gui_exit, cfg.keyboard_gui_exit_alt))
-            emit exit_requested();
 
         return false;
     }

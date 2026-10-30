@@ -28,6 +28,7 @@
 TRACY_MODULE_NAME(SceFiber);
 
 #define SCE_FIBER_CONTEXT_MINIMUM_SIZE 512
+#define SCE_FIBER_CONTEXT_GUARD 0xEEEEEEEE
 
 enum SceFiberErrorCode : uint32_t {
     SCE_FIBER_OK = 0x00000000, //!< Success
@@ -145,7 +146,7 @@ static void initialize_fiber(EmuEnvState &emuenv, const ThreadStatePtr &thread, 
     *fiber->cpu = save_context(*thread->cpu);
 
     if (addrContext && sizeContext > 0) {
-        memset(addrContext.get(emuenv.mem), 0xCC, sizeContext);
+        *addrContext.cast<uint32_t>().get(emuenv.mem) = SCE_FIBER_CONTEXT_GUARD;
         fiber->cpu->set_sp(addrContext.address() + sizeContext);
     }
     fiber->cpu->set_lr(0xDEADBEAF);
@@ -167,6 +168,7 @@ EXPORT(int, _sceFiberAttachContextAndRun, SceFiber *fiber, Address addrContext, 
     fiber->addrContext = addrContext;
     fiber->sizeContext = sizeContext;
     if (addrContext && sizeContext > 0) {
+        *Ptr<uint32_t>(addrContext).get(emuenv.mem) = SCE_FIBER_CONTEXT_GUARD;
         fiber->cpu->set_sp(addrContext + sizeContext);
     }
 
@@ -196,6 +198,7 @@ EXPORT(int, _sceFiberAttachContextAndSwitch, SceFiber *fiber, Address addrContex
     fiber->addrContext = addrContext;
     fiber->sizeContext = sizeContext;
     if (addrContext && sizeContext > 0) {
+        *Ptr<uint32_t>(addrContext).get(emuenv.mem) = SCE_FIBER_CONTEXT_GUARD;
         fiber->cpu->set_sp(addrContext + sizeContext);
     }
 

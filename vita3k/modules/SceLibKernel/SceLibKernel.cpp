@@ -29,19 +29,21 @@
 #include <kernel/state.h>
 #include <kernel/sync_primitives.h>
 #include <packages/functions.h>
+#include <string_view>
 
 #include <io/device.h>
 #include <io/io.h>
 #include <io/types.h>
 #include <kernel/types.h>
 #include <rtc/rtc.h>
+#include <set>
+#include <util/lock_and_find.h>
 #include <util/log.h>
 #include <util/tracy.h>
 
-#include <atomic>
 #include <cmath>
 #include <cstdlib>
-#include <type_traits>
+#include <mem/functions.h>
 
 enum class TimerFlags : uint32_t {
     FIFO_THREAD = 0x00000000,
@@ -55,6 +57,12 @@ enum class TimerFlags : uint32_t {
 };
 
 TRACY_MODULE_NAME(SceLibKernel);
+
+inline static uint64_t get_current_time() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch())
+        .count();
+}
 
 VAR_EXPORT(__sce_libcparam) {
     // This variable almost newer used. So I return something that looks good, but not exacly correct.
@@ -149,9 +157,9 @@ EXPORT(int, sceClibMemcmpConstTime) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(Ptr<void>, sceClibMemcpy, Ptr<void> dst, const void *src, SceSize len) {
+EXPORT(Ptr<void>, sceClibMemcpy, Ptr<void> dst, Ptr<void> src, SceSize len) {
     TRACY_FUNC(sceClibMemcpy, dst, src, len);
-    memcpy(dst.get(emuenv.mem), src, len);
+    memmove_guest(emuenv.mem, dst.address(), src.address(), len); // page-aware in Page Table mode
     return dst;
 }
 
@@ -175,7 +183,7 @@ EXPORT(Ptr<void>, sceClibMemcpy_safe, Ptr<void> dst, const Ptr<void> src, SceSiz
     if (dst.address() == src.address()) {
         LOG_ERROR("sceClibMemcpy({},{},{}) src == dst", log_hex_full(src.address()), log_hex_full(dst.address()), len);
         assert(false);
-        CALL_EXPORT(sceClibMemcpy, dst, src.get(emuenv.mem), len);
+        CALL_EXPORT(sceClibMemcpy, dst, src, len);
         return dst;
     }
     const auto diff = std::abs((int)(src.address() - dst.address()));
@@ -183,13 +191,13 @@ EXPORT(Ptr<void>, sceClibMemcpy_safe, Ptr<void> dst, const Ptr<void> src, SceSiz
         LOG_ERROR("sceClibMemcpy({},{},{}) src/dst overlap", log_hex_full(src.address()), log_hex_full(dst.address()), len);
         assert(false);
     }
-    CALL_EXPORT(sceClibMemcpy, dst, src.get(emuenv.mem), len);
+    CALL_EXPORT(sceClibMemcpy, dst, src, len);
     return dst;
 }
 
-EXPORT(Ptr<void>, sceClibMemmove, Ptr<void> dst, const void *src, SceSize len) {
+EXPORT(Ptr<void>, sceClibMemmove, Ptr<void> dst, Ptr<void> src, SceSize len) {
     TRACY_FUNC(sceClibMemmove, dst, src, len);
-    memmove(dst.get(emuenv.mem), src, len);
+    memmove_guest(emuenv.mem, dst.address(), src.address(), len);
     return dst;
 }
 
@@ -200,7 +208,7 @@ EXPORT(int, sceClibMemmoveChk) {
 
 EXPORT(Ptr<void>, sceClibMemset, Ptr<void> dst, int ch, SceSize len) {
     TRACY_FUNC(sceClibMemset, dst, ch, len);
-    memset(dst.get(emuenv.mem), ch, len);
+    memset_guest(emuenv.mem, dst.address(), ch, len);
     return dst;
 }
 
@@ -447,9 +455,10 @@ EXPORT(int, sceClibVdprintf) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceClibVprintf, const char *fmt, module::vargs args) {
-    TRACY_FUNC(sceClibVprintf, fmt);
+EXPORT(int, sceClibVprintf, const char *fmt, Address list) {
+    TRACY_FUNC(sceClibVprintf, fmt, list);
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    module::vargs args(list);
     if (!thread) {
         return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
     }
@@ -624,10 +633,13 @@ EXPORT(SceUID, sceIoOpen, const char *file, const int flags, const SceMode mode)
     }
 
     if (emuenv.cfg.current_config.file_loading_delay > 0)
-        std::this_thread::sleep_for(std::chrono::milliseconds(emuenv.cfg.current_config.file_loading_delay));
+        guest_sched_release_for_block();
+    std::this_thread::sleep_for(std::chrono::milliseconds(emuenv.cfg.current_config.file_loading_delay));
 
-    LOG_INFO("Opening file: {}", file);
-    return open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
+    core_lock_release_for_block();
+    const SceUID opened_fd = open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
+    LOG_TRACE("Opening file: {} flags=0x{:X} -> {}", file, flags, opened_fd < 0 ? fmt::format("FAILED {}", log_hex(static_cast<uint32_t>(opened_fd))) : fmt::format("fd {}", opened_fd));
+    return opened_fd;
 }
 
 EXPORT(int, sceIoOpenAsync) {
@@ -635,16 +647,18 @@ EXPORT(int, sceIoOpenAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(SceSSize, sceIoPread, SceUID fd, void *buf, SceSize nbyte, SceOff offset) {
+EXPORT(SceSSize, sceIoPread, SceUID fd, Ptr<void> buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(sceIoPread, fd, buf, nbyte, offset);
-    auto pos = tell_file(emuenv.io, fd, export_name);
-    if (pos < 0) {
-        return static_cast<SceSSize>(pos);
+    if (offset < 0)
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
+
+    if (emuenv.cfg.current_config.file_loading_delay > 0) {
+        const uint32_t delay_us = emuenv.cfg.current_config.file_loading_delay * 1000 + nbyte / 20;
+        guest_sched_release_for_block();
+        std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
     }
-    seek_file(fd, offset, SCE_SEEK_SET, emuenv.io, export_name);
-    const auto res = read_file(buf, emuenv.io, fd, nbyte, export_name);
-    seek_file(fd, pos, SCE_SEEK_SET, emuenv.io, export_name);
-    return res;
+    core_lock_release_for_block();
+    return read_file_into_guest(emuenv.mem, buf.address(), emuenv.io, fd, nbyte, offset, export_name);
 }
 
 EXPORT(int, sceIoPreadAsync) {
@@ -654,14 +668,8 @@ EXPORT(int, sceIoPreadAsync) {
 
 EXPORT(SceSSize, sceIoPwrite, SceUID fd, const void *buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(sceIoPwrite, fd, buf, nbyte, offset);
-    auto pos = tell_file(emuenv.io, fd, export_name);
-    if (pos < 0) {
-        return static_cast<SceSSize>(pos);
-    }
-    seek_file(fd, offset, SCE_SEEK_SET, emuenv.io, export_name);
-    const auto res = write_file(fd, buf, nbyte, emuenv.io, export_name);
-    seek_file(fd, pos, SCE_SEEK_SET, emuenv.io, export_name);
-    return res;
+    core_lock_release_for_block();
+    return write_file_at(fd, buf, nbyte, offset, emuenv.io, export_name);
 }
 
 EXPORT(int, sceIoPwriteAsync) {
@@ -729,410 +737,364 @@ EXPORT(int, sceIoWrite2) {
     return UNIMPLEMENTED();
 }
 
-// The sum of two values, wrapping at the width of their type
-template <typename T>
-static T wrap_add(T a, T b) {
-    using U = std::make_unsigned_t<T>;
-    return static_cast<T>(static_cast<U>(a) + static_cast<U>(b));
+EXPORT(int, sceKernelAtomicAddAndGet16) {
+    TRACY_FUNC(sceKernelAtomicAddAndGet16);
+    return UNIMPLEMENTED();
 }
 
-// The difference of two values, wrapping at the width of their type
-template <typename T>
-static T wrap_sub(T a, T b) {
-    using U = std::make_unsigned_t<T>;
-    return static_cast<T>(static_cast<U>(a) - static_cast<U>(b));
+EXPORT(int, sceKernelAtomicAddAndGet32) {
+    TRACY_FUNC(sceKernelAtomicAddAndGet32);
+    return UNIMPLEMENTED();
 }
 
-// Sets *store to new_value if it holds value, and returns the old value either way
-template <typename T>
-static T atomic_compare_and_set(T *store, T value, T new_value) {
-    std::atomic_ref(*store).compare_exchange_strong(value, new_value);
-    return value;
+EXPORT(int, sceKernelAtomicAddAndGet64) {
+    TRACY_FUNC(sceKernelAtomicAddAndGet64);
+    return UNIMPLEMENTED();
 }
 
-// Adds value to *store, or stores limit instead once the sum reaches it, and returns whether it
-// did. Despite the name, that's what a Vita does. The sum is taken at 32 bits for the narrower
-// types, so it only wraps at 32 and 64 bits.
-template <typename T>
-static SceBool atomic_add_unless(T *store, T value, T limit) {
-    using Sum = std::conditional_t<sizeof(T) == 8, SceInt64, SceInt32>;
-    std::atomic_ref ref(*store);
-    T old = ref.load();
-    Sum sum;
-    do {
-        sum = wrap_add<Sum>(old, value);
-    } while (!ref.compare_exchange_weak(old, sum >= limit ? limit : static_cast<T>(sum)));
-    return sum >= limit;
+EXPORT(int, sceKernelAtomicAddAndGet8) {
+    TRACY_FUNC(sceKernelAtomicAddAndGet8);
+    return UNIMPLEMENTED();
 }
 
-// Decrements *store if it's positive, or at 8 and 16 bits also if it's 0, and returns the old value
-template <typename T>
-static T atomic_dec_if_positive(T *store) {
-    std::atomic_ref ref(*store);
-    T old = ref.load();
-    while ((sizeof(T) <= 2 ? old >= 0 : old > 0) && !ref.compare_exchange_weak(old, static_cast<T>(old - 1))) {
-    }
-    return old;
+EXPORT(int, sceKernelAtomicAddUnless16) {
+    TRACY_FUNC(sceKernelAtomicAddUnless16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicAddAndGet16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicAddAndGet16, store, value);
-    return wrap_add(std::atomic_ref(*store).fetch_add(value), value);
+EXPORT(int, sceKernelAtomicAddUnless32) {
+    TRACY_FUNC(sceKernelAtomicAddUnless32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicAddAndGet32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicAddAndGet32, store, value);
-    return wrap_add(std::atomic_ref(*store).fetch_add(value), value);
+EXPORT(int, sceKernelAtomicAddUnless64) {
+    TRACY_FUNC(sceKernelAtomicAddUnless64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicAddAndGet64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicAddAndGet64, store, value);
-    return wrap_add(std::atomic_ref(*store).fetch_add(value), value);
+EXPORT(int, sceKernelAtomicAddUnless8) {
+    TRACY_FUNC(sceKernelAtomicAddUnless8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicAddAndGet8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicAddAndGet8, store, value);
-    return wrap_add(std::atomic_ref(*store).fetch_add(value), value);
+EXPORT(int, sceKernelAtomicAndAndGet16) {
+    TRACY_FUNC(sceKernelAtomicAndAndGet16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceBool, sceKernelAtomicAddUnless16, SceInt16 *store, SceInt16 value, SceInt16 limit) {
-    TRACY_FUNC(sceKernelAtomicAddUnless16, store, value, limit);
-    return atomic_add_unless(store, value, limit);
+EXPORT(int, sceKernelAtomicAndAndGet32) {
+    TRACY_FUNC(sceKernelAtomicAndAndGet32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceBool, sceKernelAtomicAddUnless32, SceInt32 *store, SceInt32 value, SceInt32 limit) {
-    TRACY_FUNC(sceKernelAtomicAddUnless32, store, value, limit);
-    return atomic_add_unless(store, value, limit);
+EXPORT(int, sceKernelAtomicAndAndGet64) {
+    TRACY_FUNC(sceKernelAtomicAndAndGet64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceBool, sceKernelAtomicAddUnless64, SceInt64 *store, SceInt64 value, SceInt64 limit) {
-    TRACY_FUNC(sceKernelAtomicAddUnless64, store, value, limit);
-    return atomic_add_unless(store, value, limit);
+EXPORT(int, sceKernelAtomicAndAndGet8) {
+    TRACY_FUNC(sceKernelAtomicAndAndGet8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceBool, sceKernelAtomicAddUnless8, SceInt8 *store, SceInt8 value, SceInt8 limit) {
-    TRACY_FUNC(sceKernelAtomicAddUnless8, store, value, limit);
-    return atomic_add_unless(store, value, limit);
+EXPORT(int, sceKernelAtomicClearAndGet16) {
+    TRACY_FUNC(sceKernelAtomicClearAndGet16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicAndAndGet16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicAndAndGet16, store, value);
-    return static_cast<SceInt16>(std::atomic_ref(*store).fetch_and(value) & value);
+EXPORT(int, sceKernelAtomicClearAndGet32) {
+    TRACY_FUNC(sceKernelAtomicClearAndGet32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicAndAndGet32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicAndAndGet32, store, value);
-    return static_cast<SceInt32>(std::atomic_ref(*store).fetch_and(value) & value);
+EXPORT(int, sceKernelAtomicClearAndGet64) {
+    TRACY_FUNC(sceKernelAtomicClearAndGet64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicAndAndGet64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicAndAndGet64, store, value);
-    return static_cast<SceInt64>(std::atomic_ref(*store).fetch_and(value) & value);
+EXPORT(int, sceKernelAtomicClearAndGet8) {
+    TRACY_FUNC(sceKernelAtomicClearAndGet8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicAndAndGet8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicAndAndGet8, store, value);
-    return static_cast<SceInt8>(std::atomic_ref(*store).fetch_and(value) & value);
+EXPORT(int, sceKernelAtomicClearMask16) {
+    TRACY_FUNC(sceKernelAtomicClearMask16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicClearAndGet16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicClearAndGet16, store, value);
-    return static_cast<SceInt16>(std::atomic_ref(*store).fetch_and(static_cast<SceInt16>(~value)) & ~value);
+EXPORT(int, sceKernelAtomicClearMask32) {
+    TRACY_FUNC(sceKernelAtomicClearMask32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicClearAndGet32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicClearAndGet32, store, value);
-    return static_cast<SceInt32>(std::atomic_ref(*store).fetch_and(static_cast<SceInt32>(~value)) & ~value);
+EXPORT(int, sceKernelAtomicClearMask64) {
+    TRACY_FUNC(sceKernelAtomicClearMask64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicClearAndGet64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicClearAndGet64, store, value);
-    return static_cast<SceInt64>(std::atomic_ref(*store).fetch_and(static_cast<SceInt64>(~value)) & ~value);
+EXPORT(int, sceKernelAtomicClearMask8) {
+    TRACY_FUNC(sceKernelAtomicClearMask8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicClearAndGet8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicClearAndGet8, store, value);
-    return static_cast<SceInt8>(std::atomic_ref(*store).fetch_and(static_cast<SceInt8>(~value)) & ~value);
+EXPORT(int, sceKernelAtomicCompareAndSet16) {
+    TRACY_FUNC(sceKernelAtomicCompareAndSet16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(void, sceKernelAtomicClearMask16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicClearMask16, store, value);
-    std::atomic_ref(*store).fetch_and(static_cast<SceInt16>(~value));
+EXPORT(int, sceKernelAtomicCompareAndSet32) {
+    TRACY_FUNC(sceKernelAtomicCompareAndSet32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(void, sceKernelAtomicClearMask32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicClearMask32, store, value);
-    std::atomic_ref(*store).fetch_and(static_cast<SceInt32>(~value));
+EXPORT(int, sceKernelAtomicCompareAndSet64) {
+    TRACY_FUNC(sceKernelAtomicCompareAndSet64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(void, sceKernelAtomicClearMask64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicClearMask64, store, value);
-    std::atomic_ref(*store).fetch_and(static_cast<SceInt64>(~value));
+EXPORT(int, sceKernelAtomicCompareAndSet8) {
+    TRACY_FUNC(sceKernelAtomicCompareAndSet8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(void, sceKernelAtomicClearMask8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicClearMask8, store, value);
-    std::atomic_ref(*store).fetch_and(static_cast<SceInt8>(~value));
+EXPORT(int, sceKernelAtomicDecIfPositive16) {
+    TRACY_FUNC(sceKernelAtomicDecIfPositive16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicCompareAndSet16, SceInt16 *store, SceInt16 value, SceInt16 new_value) {
-    TRACY_FUNC(sceKernelAtomicCompareAndSet16, store, value, new_value);
-    return atomic_compare_and_set(store, value, new_value);
+EXPORT(int, sceKernelAtomicDecIfPositive32) {
+    TRACY_FUNC(sceKernelAtomicDecIfPositive32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicCompareAndSet32, SceInt32 *store, SceInt32 value, SceInt32 new_value) {
-    TRACY_FUNC(sceKernelAtomicCompareAndSet32, store, value, new_value);
-    return atomic_compare_and_set(store, value, new_value);
+EXPORT(int, sceKernelAtomicDecIfPositive64) {
+    TRACY_FUNC(sceKernelAtomicDecIfPositive64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicCompareAndSet64, SceInt64 *store, SceInt64 value, SceInt64 new_value) {
-    TRACY_FUNC(sceKernelAtomicCompareAndSet64, store, value, new_value);
-    return atomic_compare_and_set(store, value, new_value);
+EXPORT(int, sceKernelAtomicDecIfPositive8) {
+    TRACY_FUNC(sceKernelAtomicDecIfPositive8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicCompareAndSet8, SceInt8 *store, SceInt8 value, SceInt8 new_value) {
-    TRACY_FUNC(sceKernelAtomicCompareAndSet8, store, value, new_value);
-    return atomic_compare_and_set(store, value, new_value);
+EXPORT(int, sceKernelAtomicGetAndAdd16) {
+    TRACY_FUNC(sceKernelAtomicGetAndAdd16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicDecIfPositive16, SceInt16 *store) {
-    TRACY_FUNC(sceKernelAtomicDecIfPositive16, store);
-    return atomic_dec_if_positive(store);
+EXPORT(int, sceKernelAtomicGetAndAdd32) {
+    TRACY_FUNC(sceKernelAtomicGetAndAdd32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicDecIfPositive32, SceInt32 *store) {
-    TRACY_FUNC(sceKernelAtomicDecIfPositive32, store);
-    return atomic_dec_if_positive(store);
+EXPORT(int, sceKernelAtomicGetAndAdd64) {
+    TRACY_FUNC(sceKernelAtomicGetAndAdd64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicDecIfPositive64, SceInt64 *store) {
-    TRACY_FUNC(sceKernelAtomicDecIfPositive64, store);
-    return atomic_dec_if_positive(store);
+EXPORT(int, sceKernelAtomicGetAndAdd8) {
+    TRACY_FUNC(sceKernelAtomicGetAndAdd8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicDecIfPositive8, SceInt8 *store) {
-    TRACY_FUNC(sceKernelAtomicDecIfPositive8, store);
-    return atomic_dec_if_positive(store);
+EXPORT(int, sceKernelAtomicGetAndAnd16) {
+    TRACY_FUNC(sceKernelAtomicGetAndAnd16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicGetAndAdd16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndAdd16, store, value);
-    return std::atomic_ref(*store).fetch_add(value);
+EXPORT(int, sceKernelAtomicGetAndAnd32) {
+    TRACY_FUNC(sceKernelAtomicGetAndAnd32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicGetAndAdd32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndAdd32, store, value);
-    return std::atomic_ref(*store).fetch_add(value);
+EXPORT(int, sceKernelAtomicGetAndAnd64) {
+    TRACY_FUNC(sceKernelAtomicGetAndAnd64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicGetAndAdd64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndAdd64, store, value);
-    return std::atomic_ref(*store).fetch_add(value);
+EXPORT(int, sceKernelAtomicGetAndAnd8) {
+    TRACY_FUNC(sceKernelAtomicGetAndAnd8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicGetAndAdd8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndAdd8, store, value);
-    return std::atomic_ref(*store).fetch_add(value);
+EXPORT(int, sceKernelAtomicGetAndClear16) {
+    TRACY_FUNC(sceKernelAtomicGetAndClear16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicGetAndAnd16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndAnd16, store, value);
-    return std::atomic_ref(*store).fetch_and(value);
+EXPORT(int, sceKernelAtomicGetAndClear32) {
+    TRACY_FUNC(sceKernelAtomicGetAndClear32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicGetAndAnd32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndAnd32, store, value);
-    return std::atomic_ref(*store).fetch_and(value);
+EXPORT(int, sceKernelAtomicGetAndClear64) {
+    TRACY_FUNC(sceKernelAtomicGetAndClear64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicGetAndAnd64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndAnd64, store, value);
-    return std::atomic_ref(*store).fetch_and(value);
+EXPORT(int, sceKernelAtomicGetAndClear8) {
+    TRACY_FUNC(sceKernelAtomicGetAndClear8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicGetAndAnd8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndAnd8, store, value);
-    return std::atomic_ref(*store).fetch_and(value);
+EXPORT(int, sceKernelAtomicGetAndOr16) {
+    TRACY_FUNC(sceKernelAtomicGetAndOr16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicGetAndClear16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndClear16, store, value);
-    return std::atomic_ref(*store).fetch_and(static_cast<SceInt16>(~value));
+EXPORT(int, sceKernelAtomicGetAndOr32) {
+    TRACY_FUNC(sceKernelAtomicGetAndOr32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicGetAndClear32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndClear32, store, value);
-    return std::atomic_ref(*store).fetch_and(static_cast<SceInt32>(~value));
+EXPORT(int, sceKernelAtomicGetAndOr64) {
+    TRACY_FUNC(sceKernelAtomicGetAndOr64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicGetAndClear64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndClear64, store, value);
-    return std::atomic_ref(*store).fetch_and(static_cast<SceInt64>(~value));
+EXPORT(int, sceKernelAtomicGetAndOr8) {
+    TRACY_FUNC(sceKernelAtomicGetAndOr8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicGetAndClear8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndClear8, store, value);
-    return std::atomic_ref(*store).fetch_and(static_cast<SceInt8>(~value));
+EXPORT(int, sceKernelAtomicGetAndSet16) {
+    TRACY_FUNC(sceKernelAtomicGetAndSet16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicGetAndOr16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndOr16, store, value);
-    return std::atomic_ref(*store).fetch_or(value);
+EXPORT(int, sceKernelAtomicGetAndSet32) {
+    TRACY_FUNC(sceKernelAtomicGetAndSet32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicGetAndOr32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndOr32, store, value);
-    return std::atomic_ref(*store).fetch_or(value);
+EXPORT(int, sceKernelAtomicGetAndSet64) {
+    TRACY_FUNC(sceKernelAtomicGetAndSet64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicGetAndOr64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndOr64, store, value);
-    return std::atomic_ref(*store).fetch_or(value);
+EXPORT(int, sceKernelAtomicGetAndSet8) {
+    TRACY_FUNC(sceKernelAtomicGetAndSet8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicGetAndOr8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndOr8, store, value);
-    return std::atomic_ref(*store).fetch_or(value);
+EXPORT(int, sceKernelAtomicGetAndSub16) {
+    TRACY_FUNC(sceKernelAtomicGetAndSub16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicGetAndSet16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndSet16, store, value);
-    return std::atomic_ref(*store).exchange(value);
+EXPORT(int, sceKernelAtomicGetAndSub32) {
+    TRACY_FUNC(sceKernelAtomicGetAndSub32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicGetAndSet32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndSet32, store, value);
-    return std::atomic_ref(*store).exchange(value);
+EXPORT(int, sceKernelAtomicGetAndSub64) {
+    TRACY_FUNC(sceKernelAtomicGetAndSub64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicGetAndSet64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndSet64, store, value);
-    return std::atomic_ref(*store).exchange(value);
+EXPORT(int, sceKernelAtomicGetAndSub8) {
+    TRACY_FUNC(sceKernelAtomicGetAndSub8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicGetAndSet8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndSet8, store, value);
-    return std::atomic_ref(*store).exchange(value);
+EXPORT(int, sceKernelAtomicGetAndXor16) {
+    TRACY_FUNC(sceKernelAtomicGetAndXor16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicGetAndSub16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndSub16, store, value);
-    return std::atomic_ref(*store).fetch_sub(value);
+EXPORT(int, sceKernelAtomicGetAndXor32) {
+    TRACY_FUNC(sceKernelAtomicGetAndXor32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicGetAndSub32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndSub32, store, value);
-    return std::atomic_ref(*store).fetch_sub(value);
+EXPORT(int, sceKernelAtomicGetAndXor64) {
+    TRACY_FUNC(sceKernelAtomicGetAndXor64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicGetAndSub64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndSub64, store, value);
-    return std::atomic_ref(*store).fetch_sub(value);
+EXPORT(int, sceKernelAtomicGetAndXor8) {
+    TRACY_FUNC(sceKernelAtomicGetAndXor8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicGetAndSub8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndSub8, store, value);
-    return std::atomic_ref(*store).fetch_sub(value);
+EXPORT(int, sceKernelAtomicOrAndGet16) {
+    TRACY_FUNC(sceKernelAtomicOrAndGet16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicGetAndXor16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndXor16, store, value);
-    return std::atomic_ref(*store).fetch_xor(value);
+EXPORT(int, sceKernelAtomicOrAndGet32) {
+    TRACY_FUNC(sceKernelAtomicOrAndGet32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicGetAndXor32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndXor32, store, value);
-    return std::atomic_ref(*store).fetch_xor(value);
+EXPORT(int, sceKernelAtomicOrAndGet64) {
+    TRACY_FUNC(sceKernelAtomicOrAndGet64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicGetAndXor64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndXor64, store, value);
-    return std::atomic_ref(*store).fetch_xor(value);
+EXPORT(int, sceKernelAtomicOrAndGet8) {
+    TRACY_FUNC(sceKernelAtomicOrAndGet8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicGetAndXor8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicGetAndXor8, store, value);
-    return std::atomic_ref(*store).fetch_xor(value);
+EXPORT(int, sceKernelAtomicSet16) {
+    TRACY_FUNC(sceKernelAtomicSet16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicOrAndGet16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicOrAndGet16, store, value);
-    return static_cast<SceInt16>(std::atomic_ref(*store).fetch_or(value) | value);
+EXPORT(int, sceKernelAtomicSet32) {
+    TRACY_FUNC(sceKernelAtomicSet32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicOrAndGet32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicOrAndGet32, store, value);
-    return static_cast<SceInt32>(std::atomic_ref(*store).fetch_or(value) | value);
+EXPORT(int, sceKernelAtomicSet64) {
+    TRACY_FUNC(sceKernelAtomicSet64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicOrAndGet64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicOrAndGet64, store, value);
-    return static_cast<SceInt64>(std::atomic_ref(*store).fetch_or(value) | value);
+EXPORT(int, sceKernelAtomicSet8) {
+    TRACY_FUNC(sceKernelAtomicSet8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt8, sceKernelAtomicOrAndGet8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicOrAndGet8, store, value);
-    return static_cast<SceInt8>(std::atomic_ref(*store).fetch_or(value) | value);
+EXPORT(int, sceKernelAtomicSubAndGet16) {
+    TRACY_FUNC(sceKernelAtomicSubAndGet16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(void, sceKernelAtomicSet16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicSet16, store, value);
-    std::atomic_ref(*store).store(value);
+EXPORT(int, sceKernelAtomicSubAndGet32) {
+    TRACY_FUNC(sceKernelAtomicSubAndGet32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(void, sceKernelAtomicSet32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicSet32, store, value);
-    std::atomic_ref(*store).store(value);
+EXPORT(int, sceKernelAtomicSubAndGet64) {
+    TRACY_FUNC(sceKernelAtomicSubAndGet64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(void, sceKernelAtomicSet64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicSet64, store, value);
-    std::atomic_ref(*store).store(value);
+EXPORT(int, sceKernelAtomicSubAndGet8) {
+    TRACY_FUNC(sceKernelAtomicSubAndGet8);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(void, sceKernelAtomicSet8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicSet8, store, value);
-    std::atomic_ref(*store).store(value);
+EXPORT(int, sceKernelAtomicXorAndGet16) {
+    TRACY_FUNC(sceKernelAtomicXorAndGet16);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt16, sceKernelAtomicSubAndGet16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicSubAndGet16, store, value);
-    return wrap_sub(std::atomic_ref(*store).fetch_sub(value), value);
+EXPORT(int, sceKernelAtomicXorAndGet32) {
+    TRACY_FUNC(sceKernelAtomicXorAndGet32);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelAtomicSubAndGet32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicSubAndGet32, store, value);
-    return wrap_sub(std::atomic_ref(*store).fetch_sub(value), value);
+EXPORT(int, sceKernelAtomicXorAndGet64) {
+    TRACY_FUNC(sceKernelAtomicXorAndGet64);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt64, sceKernelAtomicSubAndGet64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicSubAndGet64, store, value);
-    return wrap_sub(std::atomic_ref(*store).fetch_sub(value), value);
-}
-
-EXPORT(SceInt8, sceKernelAtomicSubAndGet8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicSubAndGet8, store, value);
-    return wrap_sub(std::atomic_ref(*store).fetch_sub(value), value);
-}
-
-EXPORT(SceInt16, sceKernelAtomicXorAndGet16, SceInt16 *store, SceInt16 value) {
-    TRACY_FUNC(sceKernelAtomicXorAndGet16, store, value);
-    return static_cast<SceInt16>(std::atomic_ref(*store).fetch_xor(value) ^ value);
-}
-
-EXPORT(SceInt32, sceKernelAtomicXorAndGet32, SceInt32 *store, SceInt32 value) {
-    TRACY_FUNC(sceKernelAtomicXorAndGet32, store, value);
-    return static_cast<SceInt32>(std::atomic_ref(*store).fetch_xor(value) ^ value);
-}
-
-EXPORT(SceInt64, sceKernelAtomicXorAndGet64, SceInt64 *store, SceInt64 value) {
-    TRACY_FUNC(sceKernelAtomicXorAndGet64, store, value);
-    return static_cast<SceInt64>(std::atomic_ref(*store).fetch_xor(value) ^ value);
-}
-
-EXPORT(SceInt8, sceKernelAtomicXorAndGet8, SceInt8 *store, SceInt8 value) {
-    TRACY_FUNC(sceKernelAtomicXorAndGet8, store, value);
-    return static_cast<SceInt8>(std::atomic_ref(*store).fetch_xor(value) ^ value);
+EXPORT(int, sceKernelAtomicXorAndGet8) {
+    TRACY_FUNC(sceKernelAtomicXorAndGet8);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceKernelBacktrace) {
@@ -1140,9 +1102,42 @@ EXPORT(int, sceKernelBacktrace) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceKernelBacktraceSelf) {
-    TRACY_FUNC(sceKernelBacktraceSelf);
-    return UNIMPLEMENTED();
+struct SceKernelCallFrame {
+    SceUInt32 sp;
+    SceUInt32 pc;
+};
+
+EXPORT(int, sceKernelBacktraceSelf, Ptr<SceKernelCallFrame> pFrames, SceSize maxFrames, Ptr<SceUInt32> pFrameCount, SceUInt32 flags) {
+    TRACY_FUNC(sceKernelBacktraceSelf, pFrames, maxFrames, pFrameCount, flags);
+    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+
+    uint32_t written = 0;
+    const uint32_t frame_cap = std::min<uint32_t>(std::max<uint32_t>(maxFrames, 1), 64);
+    SceKernelCallFrame *const frames = pFrames.get(emuenv.mem);
+    const Address sp = read_sp(*thread->cpu);
+    const Address stack_end = thread->stack_top();
+
+    if (frames) {
+        for (Address addr = sp; addr + 4 <= stack_end && written < frame_cap; addr += 4) {
+            if (!Ptr<uint32_t>(addr).valid(emuenv.mem))
+                break;
+            const Address value = *Ptr<uint32_t>(addr).get(emuenv.mem);
+            if (value < 0x80000000)
+                continue;
+            if (!emuenv.kernel.find_module_by_addr(value))
+                continue;
+            frames[written].sp = addr;
+            frames[written].pc = value;
+            written++;
+        }
+    }
+
+    if (SceUInt32 *const count = pFrameCount.get(emuenv.mem))
+        *count = written;
+
+    return 0;
 }
 
 EXPORT(int, sceKernelCallModuleExit) {
@@ -1155,9 +1150,9 @@ EXPORT(int, sceKernelCallWithChangeStack) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelCancelEvent, SceUID eventId, SceUInt32 *pNumWaitThreads) {
-    TRACY_FUNC(sceKernelCancelEvent, eventId, pNumWaitThreads);
-    return CALL_EXPORT(_sceKernelCancelEvent, eventId, pNumWaitThreads);
+EXPORT(int, sceKernelCancelEvent) {
+    TRACY_FUNC(sceKernelCancelEvent);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(SceInt32, sceKernelCancelEventFlag, SceUID event_id, SceUInt pattern, SceUInt32 *num_wait_thread) {
@@ -1165,31 +1160,24 @@ EXPORT(SceInt32, sceKernelCancelEventFlag, SceUID event_id, SceUInt pattern, Sce
     return CALL_EXPORT(_sceKernelCancelEventFlag, event_id, pattern, num_wait_thread);
 }
 
-EXPORT(SceInt32, sceKernelCancelEventWithSetPattern, SceUID eventId, SceUInt32 setPattern, SceUInt64 userData, Ptr<SceUInt32> pNumWaitThreads) {
-    TRACY_FUNC(sceKernelCancelEventWithSetPattern, eventId, setPattern, userData, pNumWaitThreads);
-    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
-
-    Ptr<SceKernelCancelEventWithSetPattern_opt> options = Ptr<SceKernelCancelEventWithSetPattern_opt>(stack_alloc(*thread->cpu, sizeof(SceKernelCancelEventWithSetPattern_opt)));
-    options.get(emuenv.mem)->userData = userData;
-    options.get(emuenv.mem)->pNumWaitThreads = pNumWaitThreads;
-    const SceInt32 res = CALL_EXPORT(_sceKernelCancelEventWithSetPattern, eventId, setPattern, options);
-    stack_free(*thread->cpu, sizeof(SceKernelCancelEventWithSetPattern_opt));
-    return res;
+EXPORT(int, sceKernelCancelEventWithSetPattern) {
+    TRACY_FUNC(sceKernelCancelEventWithSetPattern);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelCancelMsgPipe, SceUID msgPipeId, SceUInt32 *pNumSendWaitThreads, SceUInt32 *pNumReceiveWaitThreads) {
-    TRACY_FUNC(sceKernelCancelMsgPipe, msgPipeId, pNumSendWaitThreads, pNumReceiveWaitThreads);
-    return CALL_EXPORT(_sceKernelCancelMsgPipe, msgPipeId, pNumSendWaitThreads, pNumReceiveWaitThreads);
+EXPORT(int, sceKernelCancelMsgPipe) {
+    TRACY_FUNC(sceKernelCancelMsgPipe);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelCancelMutex, SceUID mutexId, SceInt32 newCount, SceUInt32 *pNumWaitThreads) {
-    TRACY_FUNC(sceKernelCancelMutex, mutexId, newCount, pNumWaitThreads);
-    return CALL_EXPORT(_sceKernelCancelMutex, mutexId, newCount, pNumWaitThreads);
+EXPORT(int, sceKernelCancelMutex) {
+    TRACY_FUNC(sceKernelCancelMutex);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelCancelRWLock, SceUID rwLockId, SceUInt32 *pNumReadWaitThreads, SceUInt32 *pNumWriteWaitThreads, SceInt32 flag) {
-    TRACY_FUNC(sceKernelCancelRWLock, rwLockId, pNumReadWaitThreads, pNumWriteWaitThreads, flag);
-    return CALL_EXPORT(_sceKernelCancelRWLock, rwLockId, pNumReadWaitThreads, pNumWriteWaitThreads, flag);
+EXPORT(int, sceKernelCancelRWLock) {
+    TRACY_FUNC(sceKernelCancelRWLock);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceKernelCancelSema, SceUID semaId, SceInt32 setCount, SceUInt32 *pNumWaitThreads) {
@@ -1197,18 +1185,14 @@ EXPORT(int, sceKernelCancelSema, SceUID semaId, SceInt32 setCount, SceUInt32 *pN
     return CALL_EXPORT(_sceKernelCancelSema, semaId, setCount, pNumWaitThreads);
 }
 
-EXPORT(SceInt32, sceKernelCancelTimer, SceUID timerId, SceUInt32 *pNumWaitThreads) {
-    TRACY_FUNC(sceKernelCancelTimer, timerId, pNumWaitThreads);
-    return CALL_EXPORT(_sceKernelCancelTimer, timerId, pNumWaitThreads);
+EXPORT(int, sceKernelCancelTimer) {
+    TRACY_FUNC(sceKernelCancelTimer);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceKernelChangeCurrentThreadAttr, SceUInt clear_attr, SceUInt set_attr) {
-    TRACY_FUNC(sceKernelChangeCurrentThreadAttr, clear_attr, set_attr);
-    // A Vita takes only these, and thread info doesn't show a change to either
-    constexpr SceUInt32 CHANGEABLE_ATTRS = THREAD_ATTR_NOUSE_VFP | THREAD_ATTR_USER;
-    if ((clear_attr | set_attr) & ~CHANGEABLE_ATTRS)
-        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ATTR);
-    return SCE_KERNEL_OK;
+EXPORT(int, sceKernelChangeCurrentThreadAttr) {
+    TRACY_FUNC(sceKernelChangeCurrentThreadAttr);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceKernelCheckThreadStack) {
@@ -1254,11 +1238,9 @@ EXPORT(int, sceKernelCreateLwMutex, Ptr<SceKernelLwMutexWork> workarea, const ch
 
 EXPORT(int, sceKernelCreateMsgPipe, const char *name, uint32_t type, uint32_t attr, SceSize bufSize, const SceKernelCreateMsgPipeOpt *opt) {
     TRACY_FUNC(sceKernelCreateMsgPipe, name, type, attr, bufSize, opt);
-    if (const SceInt32 error = MsgPipe::check_create(name, type, attr, bufSize))
-        return RET_ERROR(error);
-
-    const auto msgpipe = std::make_shared<MsgPipe>(attr, name, bufSize);
-    return emuenv.kernel.objects.add(msgpipe, emuenv.kernel.get_next_uid());
+    if (type != SCE_KERNEL_MSG_PIPE_TYPE_USER_MAIN && type != SCE_KERNEL_MSG_PIPE_TYPE_USER_CDRAM)
+        return kernel_refuse(export_name, "message pipe type", SCE_KERNEL_ERROR_ILLEGAL_TYPE);
+    return msgpipe_create(emuenv.kernel, export_name, name, thread_id, attr, bufSize);
 }
 
 EXPORT(int, sceKernelCreateMsgPipeWithLR) {
@@ -1272,7 +1254,11 @@ EXPORT(int, sceKernelCreateMutex, const char *name, SceUInt attr, int init_count
         STUBBED("priority ceiling feature is not supported");
     }
 
-    return CALL_EXPORT(_sceKernelCreateMutex, name, attr, init_count, opt_param);
+    SceUID uid;
+    if (auto error = mutex_create(&uid, emuenv.kernel, emuenv.mem, export_name, name, thread_id, attr, init_count, Ptr<SceKernelLwMutexWork>(0), SyncWeight::Heavy)) {
+        return error;
+    }
+    return uid;
 }
 
 EXPORT(SceUID, sceKernelCreateRWLock, const char *name, SceUInt32 attr, SceKernelMutexOptParam *opt_param) {
@@ -1330,7 +1316,9 @@ EXPORT(SceUID, sceKernelCreateTimer, const char *name, SceUInt32 attr, const uin
 
 EXPORT(int, sceKernelDeleteLwCond, Ptr<SceKernelLwCondWork> workarea) {
     TRACY_FUNC(sceKernelDeleteLwCond, workarea);
-    return CALL_EXPORT(_sceKernelDeleteLwCond, workarea);
+    SceUID lightweight_condition_id = workarea.get(emuenv.mem)->uid;
+
+    return condvar_delete(emuenv.kernel, export_name, thread_id, lightweight_condition_id, SyncWeight::Light);
 }
 
 EXPORT(int, sceKernelDeleteLwMutex, Ptr<SceKernelLwMutexWork> workarea) {
@@ -1341,8 +1329,6 @@ EXPORT(int, sceKernelDeleteLwMutex, Ptr<SceKernelLwMutexWork> workarea) {
 EXPORT(int, sceKernelExitProcess, int res) {
     TRACY_FUNC(sceKernelExitProcess, res);
     emuenv.kernel.request_process_exit(res);
-    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
-    thread->exit(res);
     return SCE_KERNEL_OK;
 }
 
@@ -1366,9 +1352,9 @@ EXPORT(SceInt32, sceKernelGetEventFlagInfo, SceUID evfId, Ptr<SceKernelEventFlag
     return CALL_EXPORT(_sceKernelGetEventFlagInfo, evfId, pInfo);
 }
 
-EXPORT(SceInt32, sceKernelGetEventInfo, SceUID eventId, Ptr<SceKernelEventInfo> pInfo) {
-    TRACY_FUNC(sceKernelGetEventInfo, eventId, pInfo);
-    return CALL_EXPORT(_sceKernelGetEventInfo, eventId, pInfo);
+EXPORT(int, sceKernelGetEventInfo) {
+    TRACY_FUNC(sceKernelGetEventInfo);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(SceInt32, sceKernelGetEventPattern, SceUID event_id, SceUInt32 *get_pattern) {
@@ -1376,16 +1362,14 @@ EXPORT(SceInt32, sceKernelGetEventPattern, SceUID event_id, SceUInt32 *get_patte
     return CALL_EXPORT(_sceKernelGetEventPattern, event_id, get_pattern);
 }
 
-EXPORT(SceInt32, sceKernelGetLwCondInfo, Ptr<SceKernelLwCondWork> workarea, Ptr<SceKernelLwCondInfo> pInfo) {
-    TRACY_FUNC(sceKernelGetLwCondInfo, workarea, pInfo);
-    return CALL_EXPORT(_sceKernelGetLwCondInfo, workarea, pInfo);
+EXPORT(int, sceKernelGetLwCondInfo) {
+    TRACY_FUNC(sceKernelGetLwCondInfo);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelGetLwCondInfoById, SceUID lwCondId, Ptr<SceKernelLwCondInfo> pInfo) {
-    TRACY_FUNC(sceKernelGetLwCondInfoById, lwCondId, pInfo);
-    // The kernel gets the size apart, 0 without a struct
-    const SceSize size = pInfo ? pInfo.get(emuenv.mem)->size : 0;
-    return CALL_EXPORT(_sceKernelGetLwCondInfoById, lwCondId, pInfo, &size);
+EXPORT(int, sceKernelGetLwCondInfoById) {
+    TRACY_FUNC(sceKernelGetLwCondInfoById);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceKernelGetLwMutexInfoById, SceUID lightweight_mutex_id, Ptr<SceKernelLwMutexInfo> info) {
@@ -1413,9 +1397,9 @@ EXPORT(int, sceKernelGetModuleInfoByAddr, Ptr<void> addr, SceKernelModuleInfo *i
     return RET_ERROR(SCE_KERNEL_ERROR_MODULEMGR_NOENT);
 }
 
-EXPORT(SceInt32, sceKernelGetMsgPipeInfo, SceUID msgPipeId, SceKernelMppInfo *pInfo) {
-    TRACY_FUNC(sceKernelGetMsgPipeInfo, msgPipeId, pInfo);
-    return CALL_EXPORT(_sceKernelGetMsgPipeInfo, msgPipeId, pInfo);
+EXPORT(int, sceKernelGetMsgPipeInfo) {
+    TRACY_FUNC(sceKernelGetMsgPipeInfo);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceKernelGetMutexInfo, SceUID mutexId, SceKernelMutexInfo *info) {
@@ -1502,7 +1486,7 @@ EXPORT(SceInt32, sceKernelGetThreadCurrentPriority) {
     if (!thread)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 
-    return thread->get_priority();
+    return thread->priority;
 }
 
 EXPORT(int, sceKernelGetThreadEventInfo) {
@@ -1512,7 +1496,17 @@ EXPORT(int, sceKernelGetThreadEventInfo) {
 
 EXPORT(int, sceKernelGetThreadExitStatus, SceUID thid, SceInt32 *pExitStatus) {
     TRACY_FUNC(sceKernelGetThreadExitStatus, thid, pExitStatus);
-    return CALL_EXPORT(_sceKernelGetThreadExitStatus, thid, pExitStatus);
+    const ThreadStatePtr thread = emuenv.kernel.get_thread(thid ? thid : thread_id);
+    if (!thread) {
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+    }
+    if (thread->status != ThreadStatus::dormant) {
+        return SCE_KERNEL_ERROR_NOT_DORMANT;
+    }
+    if (pExitStatus) {
+        *pExitStatus = thread->returned_value;
+    }
+    return 0;
 }
 
 EXPORT(int, sceKernelGetThreadId) {
@@ -1532,12 +1526,12 @@ EXPORT(int, sceKernelGetThreadRunStatus) {
 
 EXPORT(int, sceKernelGetTimerBase, SceUID timer_handle, SceKernelSysClock *time) {
     TRACY_FUNC(sceKernelGetTimerBase, timer_handle, time);
-    const TimerPtr timer = emuenv.kernel.objects.find<Timer>(timer_handle);
-    uint64_t base;
-    if (!timer || timer->get_base(base) != SCE_KERNEL_OK)
+    const TimerPtr timer_info = lock_and_find(timer_handle, emuenv.kernel.timers, emuenv.kernel.mutex);
+
+    if (!timer_info)
         return SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID;
 
-    *time = base ? emuenv.kernel.process_time_at(base) : 0;
+    *time = timer_info->time;
 
     return 0;
 }
@@ -1554,12 +1548,12 @@ EXPORT(int, sceKernelGetTimerInfo) {
 
 EXPORT(int, sceKernelGetTimerTime, SceUID timer_handle, SceKernelSysClock *time) {
     TRACY_FUNC(sceKernelGetTimerTime, timer_handle, time);
-    const TimerPtr timer = emuenv.kernel.objects.find<Timer>(timer_handle);
-    uint64_t count;
-    if (!timer || timer->get_time(count) != SCE_KERNEL_OK)
+    const TimerPtr timer_info = lock_and_find(timer_handle, emuenv.kernel.timers, emuenv.kernel.mutex);
+
+    if (!timer_info)
         return SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID;
 
-    *time = count;
+    *time = get_current_time() - timer_info->time;
 
     return 0;
 }
@@ -1586,19 +1580,9 @@ EXPORT(int, sceKernelLockLwMutex_0, Ptr<SceKernelLwMutexWork> workarea, int lock
 
 EXPORT(int, sceKernelLockLwMutexCB, Ptr<SceKernelLwMutexWork> workarea, int lock_count, unsigned int *ptimeout) {
     TRACY_FUNC(sceKernelLockLwMutexCB, workarea, lock_count, ptimeout);
-    if (!workarea)
-        return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
-
-    const auto lwmutexid = workarea.get(emuenv.mem)->uid;
-    const MutexPtr mutex = emuenv.kernel.objects.find<LwMutex>(lwmutexid);
-    if (!mutex)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
-    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
-    // A Vita takes a lightweight mutex no other thread holds in user code, which runs no callbacks
-    const SceInt32 taken = mutex->try_acquire(emuenv.mem, thread, lock_count);
-    if (taken != SCE_KERNEL_ERROR_LW_MUTEX_FAILED_TO_OWN)
-        return taken;
-    return mutex->acquire(emuenv.mem, thread, lock_count, ptimeout, true);
+    return wait_with_callbacks(emuenv.kernel, thread_id, [&] {
+        return CALL_EXPORT(_sceKernelLockLwMutex, workarea, lock_count, ptimeout);
+    });
 }
 
 EXPORT(int, sceKernelLockMutex, SceUID mutexid, int lock_count, unsigned int *timeout) {
@@ -1661,53 +1645,32 @@ EXPORT(int, sceKernelPulseEventWithNotifyCallback) {
     return UNIMPLEMENTED();
 }
 
-// Returns the error the pieces of a message pipe vector call get, or SCE_KERNEL_OK
-static SceInt32 check_msg_pipe_vector(const MsgPipeVector *vectors, SceUInt32 count) {
-    if (!vectors)
-        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-    if (count == 0)
-        return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
-    for (SceUInt32 i = 0; i < count; i++) {
-        // Even an empty piece needs a buffer
-        if (!vectors[i].base)
-            return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+EXPORT(SceInt32, sceKernelReceiveMsgPipe, SceUID msgPipeId, void *pRecvBuf, SceSize recvSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
+    TRACY_FUNC(sceKernelReceiveMsgPipe, msgPipeId, pRecvBuf, recvSize, waitMode, pResult, pTimeout);
+    const auto ret = msgpipe_recv(emuenv.kernel, export_name, thread_id, msgPipeId, waitMode, pRecvBuf, recvSize, pTimeout);
+    if (static_cast<int>(ret) < 0) {
+        return ret;
+    }
+    if (pResult) {
+        *pResult = ret;
     }
     return SCE_KERNEL_OK;
 }
 
-static SceInt32 receive_msg_pipe(EmuEnvState &emuenv, const char *export_name, SceUID thread_id, SceUID msgPipeId, std::span<const MsgPipeVector> pieces, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout, bool callbacks) {
-    const MsgPipePtr msgpipe = emuenv.kernel.objects.find<MsgPipe>(msgPipeId);
-    if (!msgpipe)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
-    return msgpipe->receive(emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, pieces, pResult, pTimeout, callbacks);
-}
-
-EXPORT(SceInt32, sceKernelReceiveMsgPipe, SceUID msgPipeId, Ptr<void> pRecvBuf, SceSize recvSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
-    TRACY_FUNC(sceKernelReceiveMsgPipe, msgPipeId, pRecvBuf, recvSize, waitMode, pResult, pTimeout);
-    const MsgPipeVector piece{ pRecvBuf, recvSize };
-    return receive_msg_pipe(emuenv, export_name, thread_id, msgPipeId, { &piece, 1 }, waitMode, pResult, pTimeout, false);
-}
-
-EXPORT(SceInt32, sceKernelReceiveMsgPipeCB, SceUID msgPipeId, Ptr<void> pRecvBuf, SceSize recvSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
+EXPORT(SceInt32, sceKernelReceiveMsgPipeCB, SceUID msgPipeId, void *pRecvBuf, SceSize recvSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
     TRACY_FUNC(sceKernelReceiveMsgPipeCB, msgPipeId, pRecvBuf, recvSize, waitMode, pResult, pTimeout);
-    const MsgPipeVector piece{ pRecvBuf, recvSize };
-    return receive_msg_pipe(emuenv, export_name, thread_id, msgPipeId, { &piece, 1 }, waitMode, pResult, pTimeout, true);
+    process_callbacks(emuenv.kernel, thread_id);
+    return CALL_EXPORT(sceKernelReceiveMsgPipe, msgPipeId, pRecvBuf, recvSize, waitMode, pResult, pTimeout);
 }
 
-static SceInt32 receive_msg_pipe_vector(EmuEnvState &emuenv, const char *export_name, SceUID thread_id, SceUID msgPipeId, const MsgPipeVector *vectors, SceUInt32 count, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout, bool callbacks) {
-    if (const SceInt32 error = check_msg_pipe_vector(vectors, count))
-        return RET_ERROR(error);
-    return receive_msg_pipe(emuenv, export_name, thread_id, msgPipeId, { vectors, count }, waitMode, pResult, pTimeout, callbacks);
+EXPORT(int, sceKernelReceiveMsgPipeVector) {
+    TRACY_FUNC(sceKernelReceiveMsgPipeVector);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelReceiveMsgPipeVector, SceUID msgPipeId, const MsgPipeVector *vectors, SceUInt32 count, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
-    TRACY_FUNC(sceKernelReceiveMsgPipeVector, msgPipeId, vectors, count, waitMode, pResult, pTimeout);
-    return receive_msg_pipe_vector(emuenv, export_name, thread_id, msgPipeId, vectors, count, waitMode, pResult, pTimeout, false);
-}
-
-EXPORT(SceInt32, sceKernelReceiveMsgPipeVectorCB, SceUID msgPipeId, const MsgPipeVector *vectors, SceUInt32 count, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
-    TRACY_FUNC(sceKernelReceiveMsgPipeVectorCB, msgPipeId, vectors, count, waitMode, pResult, pTimeout);
-    return receive_msg_pipe_vector(emuenv, export_name, thread_id, msgPipeId, vectors, count, waitMode, pResult, pTimeout, true);
+EXPORT(int, sceKernelReceiveMsgPipeVectorCB) {
+    TRACY_FUNC(sceKernelReceiveMsgPipeVectorCB);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceKernelRegisterThreadEventHandler, const char *name, SceUID thread_mask, SceUInt32 mask, Ptr<const void> handler, Address common) {
@@ -1719,39 +1682,32 @@ EXPORT(int, sceKernelRegisterThreadEventHandler, const char *name, SceUID thread
     return CALL_EXPORT(_sceKernelRegisterThreadEventHandler, name, thread_mask, mask, &handler_opt);
 }
 
-static SceInt32 send_msg_pipe(EmuEnvState &emuenv, const char *export_name, SceUID thread_id, SceUID msgPipeId, std::span<const MsgPipeVector> pieces, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout, bool callbacks) {
-    const MsgPipePtr msgpipe = emuenv.kernel.objects.find<MsgPipe>(msgPipeId);
-    if (!msgpipe)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
-    return msgpipe->send(emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, pieces, pResult, pTimeout, callbacks);
-}
-
-EXPORT(SceInt32, sceKernelSendMsgPipe, SceUID msgPipeId, Ptr<const void> pSendBuf, SceSize sendSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
+EXPORT(SceInt32, sceKernelSendMsgPipe, SceUID msgPipeId, const void *pSendBuf, SceSize sendSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
     TRACY_FUNC(sceKernelSendMsgPipe, msgPipeId, pSendBuf, sendSize, waitMode, pResult, pTimeout);
-    const MsgPipeVector piece{ pSendBuf.cast<void>(), sendSize };
-    return send_msg_pipe(emuenv, export_name, thread_id, msgPipeId, { &piece, 1 }, waitMode, pResult, pTimeout, false);
+    const auto ret = msgpipe_send(emuenv.kernel, export_name, thread_id, msgPipeId, waitMode, pSendBuf, sendSize, pTimeout);
+    if (static_cast<int>(ret) < 0) {
+        return ret;
+    }
+    if (pResult) {
+        *pResult = ret;
+    }
+    return SCE_KERNEL_OK;
 }
 
-EXPORT(SceInt32, sceKernelSendMsgPipeCB, SceUID msgPipeId, Ptr<const void> pSendBuf, SceSize sendSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
+EXPORT(SceInt32, sceKernelSendMsgPipeCB, SceUID msgPipeId, const void *pSendBuf, SceSize sendSize, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
     TRACY_FUNC(sceKernelSendMsgPipeCB, msgPipeId, pSendBuf, sendSize, waitMode, pResult, pTimeout);
-    const MsgPipeVector piece{ pSendBuf.cast<void>(), sendSize };
-    return send_msg_pipe(emuenv, export_name, thread_id, msgPipeId, { &piece, 1 }, waitMode, pResult, pTimeout, true);
+    process_callbacks(emuenv.kernel, thread_id);
+    return CALL_EXPORT(sceKernelSendMsgPipe, msgPipeId, pSendBuf, sendSize, waitMode, pResult, pTimeout);
 }
 
-static SceInt32 send_msg_pipe_vector(EmuEnvState &emuenv, const char *export_name, SceUID thread_id, SceUID msgPipeId, const MsgPipeVector *vectors, SceUInt32 count, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout, bool callbacks) {
-    if (const SceInt32 error = check_msg_pipe_vector(vectors, count))
-        return RET_ERROR(error);
-    return send_msg_pipe(emuenv, export_name, thread_id, msgPipeId, { vectors, count }, waitMode, pResult, pTimeout, callbacks);
+EXPORT(int, sceKernelSendMsgPipeVector) {
+    TRACY_FUNC(sceKernelSendMsgPipeVector);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceKernelSendMsgPipeVector, SceUID msgPipeId, const MsgPipeVector *vectors, SceUInt32 count, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
-    TRACY_FUNC(sceKernelSendMsgPipeVector, msgPipeId, vectors, count, waitMode, pResult, pTimeout);
-    return send_msg_pipe_vector(emuenv, export_name, thread_id, msgPipeId, vectors, count, waitMode, pResult, pTimeout, false);
-}
-
-EXPORT(SceInt32, sceKernelSendMsgPipeVectorCB, SceUID msgPipeId, const MsgPipeVector *vectors, SceUInt32 count, SceUInt32 waitMode, SceSize *pResult, SceUInt32 *pTimeout) {
-    TRACY_FUNC(sceKernelSendMsgPipeVectorCB, msgPipeId, vectors, count, waitMode, pResult, pTimeout);
-    return send_msg_pipe_vector(emuenv, export_name, thread_id, msgPipeId, vectors, count, waitMode, pResult, pTimeout, true);
+EXPORT(int, sceKernelSendMsgPipeVectorCB) {
+    TRACY_FUNC(sceKernelSendMsgPipeVectorCB);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceKernelSetEventWithNotifyCallback) {
@@ -1767,14 +1723,7 @@ EXPORT(int, sceKernelSetThreadContextForVM, SceUID threadId, Ptr<SceKernelThread
 EXPORT(int, sceKernelSetTimerEvent, SceUID timer_handle, SceInt32 type, SceKernelSysClock *interval, SceInt32 repeats) {
     TRACY_FUNC(sceKernelSetTimerEvent, timer_handle, type, interval, repeats);
 
-    const TimerPtr timer = emuenv.kernel.objects.find<Timer>(timer_handle);
-    if (!timer)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_TIMER_ID);
-
-    if (!interval)
-        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
-
-    return timer->set_event(type, *interval, repeats);
+    return timer_set(emuenv.kernel, export_name, thread_id, timer_handle, type, interval, repeats);
 }
 
 EXPORT(int, sceKernelSetTimerTime) {
@@ -1785,30 +1734,22 @@ EXPORT(int, sceKernelSetTimerTime) {
 EXPORT(int, sceKernelSignalLwCond, Ptr<SceKernelLwCondWork> workarea) {
     TRACY_FUNC(sceKernelSignalLwCond, workarea);
     SceUID condid = workarea.get(emuenv.mem)->uid;
-    const CondvarPtr condvar = emuenv.kernel.objects.find<LwCond>(condid);
-    if (!condvar)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::Any));
+    return condvar_signal(emuenv.kernel, export_name, thread_id, condid,
+        Condvar::SignalTarget(Condvar::SignalTarget::Type::Any), SyncWeight::Light);
 }
 
 EXPORT(int, sceKernelSignalLwCondAll, Ptr<SceKernelLwCondWork> workarea) {
     TRACY_FUNC(sceKernelSignalLwCondAll, workarea);
     SceUID condid = workarea.get(emuenv.mem)->uid;
-    const CondvarPtr condvar = emuenv.kernel.objects.find<LwCond>(condid);
-    if (!condvar)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::All));
+    return condvar_signal(emuenv.kernel, export_name, thread_id, condid,
+        Condvar::SignalTarget(Condvar::SignalTarget::Type::All), SyncWeight::Light);
 }
 
 EXPORT(int, sceKernelSignalLwCondTo, Ptr<SceKernelLwCondWork> workarea, SceUID thread_target) {
     TRACY_FUNC(sceKernelSignalLwCondTo, workarea, thread_target);
     SceUID condid = workarea.get(emuenv.mem)->uid;
-    const CondvarPtr condvar = emuenv.kernel.objects.find<LwCond>(condid);
-    if (!condvar)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
-    if (!emuenv.kernel.get_thread(thread_target))
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
-    return condvar->signal(Condvar::SignalTarget(Condvar::SignalTarget::Type::Specific, thread_target));
+    return condvar_signal(emuenv.kernel, export_name, thread_id, condid,
+        Condvar::SignalTarget(Condvar::SignalTarget::Type::Specific, thread_target), SyncWeight::Light);
 }
 
 EXPORT(int, sceKernelStackChkFail) {
@@ -1839,10 +1780,7 @@ EXPORT(int, sceKernelStopUnloadModule, SceUID uid, SceSize args, Ptr<const void>
 EXPORT(int, sceKernelTryLockLwMutex, Ptr<SceKernelLwMutexWork> workarea, int lock_count) {
     TRACY_FUNC(sceKernelTryLockLwMutex, workarea, lock_count);
     const auto lwmutexid = workarea.get(emuenv.mem)->uid;
-    const MutexPtr mutex = emuenv.kernel.objects.find<LwMutex>(lwmutexid);
-    if (!mutex)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID);
-    return mutex->try_acquire(emuenv.mem, emuenv.kernel.get_thread(thread_id), lock_count);
+    return mutex_try_lock(emuenv.kernel, emuenv.mem, export_name, thread_id, lwmutexid, lock_count, SyncWeight::Light);
 }
 
 EXPORT(int, sceKernelTryLockLwMutex_16XX, Ptr<SceKernelLwMutexWork> workarea, int lock_count) {
@@ -1850,42 +1788,36 @@ EXPORT(int, sceKernelTryLockLwMutex_16XX, Ptr<SceKernelLwMutexWork> workarea, in
     return CALL_EXPORT(sceKernelTryLockLwMutex, workarea, lock_count);
 }
 
-EXPORT(int, sceKernelTryReceiveMsgPipe, SceUID msgpipe_id, Ptr<void> recv_buf, SceSize msg_size, SceUInt32 wait_mode, SceSize *result) {
+EXPORT(int, sceKernelTryReceiveMsgPipe, SceUID msgpipe_id, char *recv_buf, SceSize msg_size, SceUInt32 wait_mode, SceSize *result) {
     TRACY_FUNC(sceKernelTryReceiveMsgPipe, msgpipe_id, recv_buf, msg_size, wait_mode, result);
-    const MsgPipePtr msgpipe = emuenv.kernel.objects.find<MsgPipe>(msgpipe_id);
-    if (!msgpipe)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
-    const MsgPipeVector piece{ recv_buf, msg_size };
-    return msgpipe->try_receive(emuenv.kernel.get_thread(thread_id), emuenv.mem, wait_mode, { &piece, 1 }, result);
+    const auto ret = msgpipe_recv(emuenv.kernel, export_name, thread_id, msgpipe_id, wait_mode | SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT, recv_buf, msg_size, 0);
+    if (result)
+        *result = static_cast<int>(ret) < 0 ? 0 : ret;
+    if (static_cast<int>(ret) < 0)
+        return ret;
+    return SCE_KERNEL_OK;
 }
 
-EXPORT(SceInt32, sceKernelTryReceiveMsgPipeVector, SceUID msgPipeId, const MsgPipeVector *vectors, SceUInt32 count, SceUInt32 waitMode, SceSize *pResult) {
-    TRACY_FUNC(sceKernelTryReceiveMsgPipeVector, msgPipeId, vectors, count, waitMode, pResult);
-    if (const SceInt32 error = check_msg_pipe_vector(vectors, count))
-        return RET_ERROR(error);
-    const MsgPipePtr msgpipe = emuenv.kernel.objects.find<MsgPipe>(msgPipeId);
-    if (!msgpipe)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
-    return msgpipe->try_receive(emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, { vectors, count }, pResult);
+EXPORT(int, sceKernelTryReceiveMsgPipeVector) {
+    TRACY_FUNC(sceKernelTryReceiveMsgPipeVector);
+    return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceKernelTrySendMsgPipe, SceUID msgPipeId, Ptr<const void> pSendBuf, SceSize sendSize, SceUInt32 waitMode, SceSize *pResult) {
+EXPORT(int, sceKernelTrySendMsgPipe, SceUID msgPipeId, const void *pSendBuf, SceSize sendSize, SceUInt32 waitMode, SceSize *pResult) {
     TRACY_FUNC(sceKernelTrySendMsgPipe, msgPipeId, pSendBuf, sendSize, waitMode, pResult);
-    const MsgPipePtr msgpipe = emuenv.kernel.objects.find<MsgPipe>(msgPipeId);
-    if (!msgpipe)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
-    const MsgPipeVector piece{ pSendBuf.cast<void>(), sendSize };
-    return msgpipe->try_send(emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, { &piece, 1 }, pResult);
+    waitMode |= SCE_KERNEL_MSG_PIPE_MODE_DONT_WAIT;
+    SceUInt32 pTimeout = 0;
+    const auto ret = msgpipe_send(emuenv.kernel, export_name, thread_id, msgPipeId, waitMode, pSendBuf, sendSize, &pTimeout);
+    if (pResult)
+        *pResult = static_cast<int>(ret) < 0 ? 0 : ret;
+    if (static_cast<int>(ret) < 0)
+        return ret;
+    return SCE_KERNEL_OK;
 }
 
-EXPORT(SceInt32, sceKernelTrySendMsgPipeVector, SceUID msgPipeId, const MsgPipeVector *vectors, SceUInt32 count, SceUInt32 waitMode, SceSize *pResult) {
-    TRACY_FUNC(sceKernelTrySendMsgPipeVector, msgPipeId, vectors, count, waitMode, pResult);
-    if (const SceInt32 error = check_msg_pipe_vector(vectors, count))
-        return RET_ERROR(error);
-    const MsgPipePtr msgpipe = emuenv.kernel.objects.find<MsgPipe>(msgPipeId);
-    if (!msgpipe)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
-    return msgpipe->try_send(emuenv.kernel.get_thread(thread_id), emuenv.mem, waitMode, { vectors, count }, pResult);
+EXPORT(int, sceKernelTrySendMsgPipeVector) {
+    TRACY_FUNC(sceKernelTrySendMsgPipeVector);
+    return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceKernelUnloadModule, SceUID uid, SceUInt32 flags, const void *pOpt) {
@@ -1896,11 +1828,7 @@ EXPORT(int, sceKernelUnloadModule, SceUID uid, SceUInt32 flags, const void *pOpt
 EXPORT(int, sceKernelUnlockLwMutex, Ptr<SceKernelLwMutexWork> workarea, int unlock_count) {
     TRACY_FUNC(sceKernelUnlockLwMutex, workarea, unlock_count);
     const auto lwmutexid = workarea.get(emuenv.mem)->uid;
-    const MutexPtr mutex = emuenv.kernel.objects.find<LwMutex>(lwmutexid);
-    // A delete clears the owner in the work area, so a Vita reports the unlock as not owned
-    if (!mutex)
-        return RET_ERROR(SCE_KERNEL_ERROR_LW_MUTEX_NOT_OWNED);
-    return mutex->release(emuenv.mem, emuenv.kernel.get_thread(thread_id), unlock_count);
+    return mutex_unlock(emuenv.kernel, emuenv.mem, export_name, thread_id, lwmutexid, unlock_count, SyncWeight::Light);
 }
 
 EXPORT(int, sceKernelUnlockLwMutex_0, Ptr<SceKernelLwMutexWork> workarea, int unlock_count) {
@@ -1911,11 +1839,7 @@ EXPORT(int, sceKernelUnlockLwMutex_0, Ptr<SceKernelLwMutexWork> workarea, int un
 EXPORT(int, sceKernelUnlockLwMutex2, Ptr<SceKernelLwMutexWork> workarea, int unlock_count) {
     TRACY_FUNC(sceKernelUnlockLwMutex2, workarea, unlock_count);
     const auto lwmutexid = workarea.get(emuenv.mem)->uid;
-    const MutexPtr mutex = emuenv.kernel.objects.find<LwMutex>(lwmutexid);
-    // A delete clears the owner in the work area, so a Vita reports the unlock as not owned
-    if (!mutex)
-        return RET_ERROR(SCE_KERNEL_ERROR_LW_MUTEX_NOT_OWNED);
-    return mutex->release(emuenv.mem, emuenv.kernel.get_thread(thread_id), unlock_count);
+    return mutex_unlock(emuenv.kernel, emuenv.mem, export_name, thread_id, lwmutexid, unlock_count, SyncWeight::Light);
 }
 
 EXPORT(SceInt32, sceKernelWaitCond, SceUID condId, SceUInt32 *pTimeout) {
@@ -1940,10 +1864,7 @@ EXPORT(SceInt32, sceKernelWaitEventCB, SceUID event_id, SceUInt32 bit_pattern, S
 
 EXPORT(SceInt32, sceKernelWaitEventFlag, SceUID evfId, SceUInt32 bitPattern, SceUInt32 waitMode, SceUInt32 *pResultPat, SceUInt32 *pTimeout) {
     TRACY_FUNC(sceKernelWaitEventFlag, evfId, bitPattern, waitMode, pResultPat, pTimeout);
-    const EventFlagPtr event = emuenv.kernel.objects.find<EventFlag>(evfId);
-    if (!event)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVF_ID);
-    return event->wait(emuenv.kernel.get_thread(thread_id), bitPattern, waitMode, pResultPat, pTimeout, false);
+    return eventflag_wait(emuenv.kernel, export_name, thread_id, evfId, bitPattern, waitMode, pResultPat, pTimeout);
 }
 
 EXPORT(SceInt32, sceKernelWaitEventFlagCB, SceUID evfId, SceUInt32 bitPattern, SceUInt32 waitMode, SceUInt32 *pResultPat, SceUInt32 *pTimeout) {
@@ -1964,10 +1885,7 @@ EXPORT(int, sceKernelWaitExceptionCB) {
 EXPORT(int, sceKernelWaitLwCond, Ptr<SceKernelLwCondWork> workarea, SceUInt32 *timeout) {
     TRACY_FUNC(sceKernelWaitLwCond, workarea, timeout);
     const auto cond_id = workarea.get(emuenv.mem)->uid;
-    const CondvarPtr condvar = emuenv.kernel.objects.find<LwCond>(cond_id);
-    if (!condvar)
-        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID);
-    return condvar->wait(emuenv.mem, emuenv.kernel.get_thread(thread_id), timeout, false);
+    return condvar_wait(emuenv.kernel, emuenv.mem, export_name, thread_id, cond_id, timeout, SyncWeight::Light);
 }
 
 EXPORT(SceInt32, sceKernelWaitLwCondCB, Ptr<SceKernelLwCondWork> pWork, SceUInt32 *pTimeout) {
@@ -1975,14 +1893,14 @@ EXPORT(SceInt32, sceKernelWaitLwCondCB, Ptr<SceKernelLwCondWork> pWork, SceUInt3
     return CALL_EXPORT(_sceKernelWaitLwCondCB, pWork, pTimeout);
 }
 
-EXPORT(int, sceKernelWaitMultipleEvents) {
-    TRACY_FUNC(sceKernelWaitMultipleEvents);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceKernelWaitMultipleEvents, SceKernelWaitEvent *pWaitEventList, SceUInt32 numEvents, SceUInt32 waitMode, SceKernelResultEvent *pResultEventList, SceUInt32 *pTimeout) {
+    TRACY_FUNC(sceKernelWaitMultipleEvents, pWaitEventList, numEvents, waitMode, pResultEventList, pTimeout);
+    return simple_event_wait_multiple(emuenv.kernel, export_name, thread_id, pWaitEventList, numEvents, waitMode, pResultEventList, pTimeout, false);
 }
 
-EXPORT(int, sceKernelWaitMultipleEventsCB) {
-    TRACY_FUNC(sceKernelWaitMultipleEventsCB);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceKernelWaitMultipleEventsCB, SceKernelWaitEvent *pWaitEventList, SceUInt32 numEvents, SceUInt32 waitMode, SceKernelResultEvent *pResultEventList, SceUInt32 *pTimeout) {
+    TRACY_FUNC(sceKernelWaitMultipleEventsCB, pWaitEventList, numEvents, waitMode, pResultEventList, pTimeout);
+    return simple_event_wait_multiple(emuenv.kernel, export_name, thread_id, pWaitEventList, numEvents, waitMode, pResultEventList, pTimeout, true);
 }
 
 EXPORT(SceInt32, sceKernelWaitSema, SceUID semaId, SceInt32 needCount, SceUInt32 *pTimeout) {
@@ -1995,12 +1913,12 @@ EXPORT(SceInt32, sceKernelWaitSemaCB, SceUID semaId, SceInt32 needCount, SceUInt
     return CALL_EXPORT(_sceKernelWaitSemaCB, semaId, needCount, pTimeout);
 }
 
-EXPORT(int, sceKernelWaitSignal, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
+EXPORT(int, sceKernelWaitSignal, uint32_t unknown, uint32_t delay, uint32_t timeout) {
     TRACY_FUNC(sceKernelWaitSignal, unknown, delay, timeout);
     return CALL_EXPORT(_sceKernelWaitSignal, unknown, delay, timeout);
 }
 
-EXPORT(int, sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, SceUInt32 *timeout) {
+EXPORT(int, sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, uint32_t timeout) {
     TRACY_FUNC(sceKernelWaitSignalCB, unknown, delay, timeout);
     return CALL_EXPORT(_sceKernelWaitSignalCB, unknown, delay, timeout);
 }

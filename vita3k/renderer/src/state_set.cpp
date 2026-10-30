@@ -29,6 +29,9 @@
 #include <renderer/vulkan/state.h>
 #include <renderer/vulkan/types.h>
 
+#include <array>
+#include <atomic>
+
 #include <util/align.h>
 #include <util/log.h>
 #include <util/tracy.h>
@@ -78,13 +81,38 @@ COMMAND_SET_STATE(region_clip) {
 COMMAND_SET_STATE(program) {
     TRACY_FUNC_COMMANDS_SET_STATE(program);
     const Ptr<void> program = helper.pop<Ptr<void>>();
+    auto *binding_payload = helper.pop<std::shared_ptr<ProgramBinding> *>();
     const bool is_fragment = helper.pop<bool>();
+
+    if (!binding_payload || !*binding_payload) {
+        LOG_ERROR("SetProgram command has no host-side program binding");
+        return;
+    }
+
+    const std::shared_ptr<ProgramBinding> binding = *binding_payload;
+    // Immediate commands execute once. Deferred commands may be linked and executed again, so
+    // their payload is released only when the deferred command list is destroyed.
+    if (!(helper.cmd->flags & Command::FLAG_NO_FREE))
+        delete binding_payload;
+
+    // A binding only carries the program of its own kind, so a mismatch means the handle no longer describes it
+    if (is_fragment ? !binding->fragment_program : !binding->vertex_program) {
+        static std::atomic<uint32_t> mismatched{ 0 };
+        const uint32_t n = mismatched.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8 || (n & 1023) == 0)
+            LOG_ERROR("[PROGMIX] SetProgram({}) got a binding without a {} program: handle 0x{:X} binding {} vert={} frag={} gxp={} streams={} attrs={} key_hash=0x{:X} maskupdate={} deferred={} - ignored (#{})",
+                is_fragment ? "fragment" : "vertex", is_fragment ? "fragment" : "vertex", program.address(),
+                fmt::ptr(binding.get()), static_cast<bool>(binding->vertex_program), static_cast<bool>(binding->fragment_program),
+                binding->gxp.size(), binding->streams.size(), binding->attributes.size(), binding->key_hash,
+                binding->is_maskupdate, static_cast<bool>(helper.cmd->flags & Command::FLAG_NO_FREE), n);
+        return;
+    }
 
     if (is_fragment) {
         render_context->record.fragment_program = program.cast<SceGxmFragmentProgram>();
-        const SceGxmFragmentProgram *gxm_program = render_context->record.fragment_program.get(mem);
-        render_context->record.fragment_program_hash = gxm_program->renderer_data->hash;
-        render_context->record.is_maskupdate = gxm_program->is_maskupdate;
+        render_context->record.fragment_program_binding = binding;
+        render_context->record.fragment_program_hash = binding->fragment_program->hash;
+        render_context->record.is_maskupdate = binding->is_maskupdate;
 
         switch (renderer.current_backend) {
         case Backend::OpenGL:
@@ -100,8 +128,8 @@ COMMAND_SET_STATE(program) {
         }
     } else {
         render_context->record.vertex_program = program.cast<SceGxmVertexProgram>();
-        const SceGxmVertexProgram *gxm_program = render_context->record.vertex_program.get(mem);
-        render_context->record.vertex_program_hash = gxm_program->renderer_data->hash;
+        render_context->record.vertex_program_binding = binding;
+        render_context->record.vertex_program_hash = binding->vertex_program->hash;
     }
 
     if (renderer.current_backend == Backend::Vulkan) {
@@ -116,8 +144,8 @@ COMMAND_SET_STATE(uniform_buffer) {
     const int block_num = helper.pop<int>();
     const std::uint32_t size = helper.pop<std::uint32_t>();
 
-    renderer::ShaderProgram *program = is_vertex ? reinterpret_cast<ShaderProgram *>(render_context->record.vertex_program.get(mem)->renderer_data.get())
-                                                 : reinterpret_cast<ShaderProgram *>(render_context->record.fragment_program.get(mem)->renderer_data.get());
+    renderer::ShaderProgram *program = is_vertex ? static_cast<ShaderProgram *>(render_context->record.vertex_program_binding->vertex_program.get())
+                                                 : static_cast<ShaderProgram *>(render_context->record.fragment_program_binding->fragment_program.get());
 
     switch (renderer.current_backend) {
     case Backend::OpenGL:
@@ -490,10 +518,12 @@ COMMAND_SET_STATE(vertex_stream) {
     const Ptr<const uint8_t> stream_data = helper.pop<Ptr<const uint8_t>>();
     const std::size_t stream_index = helper.pop<std::size_t>();
     const std::size_t stream_data_length = helper.pop<std::size_t>();
+    const uint64_t stream_snapshot = helper.pop<uint64_t>();
 
     renderer::GXMStreamInfo &info = render_context->record.vertex_streams[stream_index];
     info.data = stream_data;
     info.size = stream_data_length;
+    info.snapshot = stream_snapshot;
 }
 
 COMMAND_SET_STATE(fragment_program_enable) {
@@ -537,32 +567,38 @@ COMMAND(handle_set_state) {
     renderer::GXMState gxm_state_to_set = helper.pop<renderer::GXMState>();
     using StateChangeHandlerFunc = decltype(cmd_set_state_region_clip);
 
-    static const std::map<renderer::GXMState, StateChangeHandlerFunc *> handlers = {
-        { GXMState::RegionClip, cmd_set_state_region_clip },
-        { GXMState::Program, cmd_set_state_program },
-        { GXMState::Viewport, cmd_set_state_viewport },
-        { GXMState::DepthBias, cmd_set_state_depth_bias },
-        { GXMState::DepthFunc, cmd_set_state_depth_func },
-        { GXMState::DepthWriteEnable, cmd_set_state_depth_write_enable },
-        { GXMState::PolygonMode, cmd_set_state_polygon_mode },
-        { GXMState::PointLineWidth, cmd_set_state_point_line_width },
-        { GXMState::StencilFunc, cmd_set_state_stencil_func },
-        { GXMState::Texture, cmd_set_state_texture },
-        { GXMState::StencilRef, cmd_set_state_stencil_ref },
-        { GXMState::TwoSided, cmd_set_state_two_sided },
-        { GXMState::CullMode, cmd_set_state_cull_mode },
-        { GXMState::VertexStream, cmd_set_state_vertex_stream },
-        { GXMState::UniformBuffer, cmd_set_state_uniform_buffer },
-        { GXMState::FragmentProgramEnable, cmd_set_state_fragment_program_enable },
-        { GXMState::VisibilityBuffer, cmd_set_state_visibility_buffer },
-        { GXMState::VisibilityIndex, cmd_set_state_visibility_index }
-    };
+    using StateChangeHandler = StateChangeHandlerFunc *;
+    static const auto handlers = [] {
+        std::array<StateChangeHandler, static_cast<size_t>(GXMState::TotalState)> result{};
+        const auto set = [&result](GXMState state, StateChangeHandler handler) {
+            result[static_cast<size_t>(state)] = handler;
+        };
+        set(GXMState::RegionClip, cmd_set_state_region_clip);
+        set(GXMState::Program, cmd_set_state_program);
+        set(GXMState::Viewport, cmd_set_state_viewport);
+        set(GXMState::DepthBias, cmd_set_state_depth_bias);
+        set(GXMState::DepthFunc, cmd_set_state_depth_func);
+        set(GXMState::DepthWriteEnable, cmd_set_state_depth_write_enable);
+        set(GXMState::PolygonMode, cmd_set_state_polygon_mode);
+        set(GXMState::PointLineWidth, cmd_set_state_point_line_width);
+        set(GXMState::StencilFunc, cmd_set_state_stencil_func);
+        set(GXMState::Texture, cmd_set_state_texture);
+        set(GXMState::StencilRef, cmd_set_state_stencil_ref);
+        set(GXMState::TwoSided, cmd_set_state_two_sided);
+        set(GXMState::CullMode, cmd_set_state_cull_mode);
+        set(GXMState::VertexStream, cmd_set_state_vertex_stream);
+        set(GXMState::UniformBuffer, cmd_set_state_uniform_buffer);
+        set(GXMState::FragmentProgramEnable, cmd_set_state_fragment_program_enable);
+        set(GXMState::VisibilityBuffer, cmd_set_state_visibility_buffer);
+        set(GXMState::VisibilityIndex, cmd_set_state_visibility_index);
+        return result;
+    }();
 
-    auto result = handlers.find(gxm_state_to_set);
-
-    if (result != handlers.end()) {
+    const size_t state_index = static_cast<size_t>(gxm_state_to_set);
+    const StateChangeHandler handler = state_index < handlers.size() ? handlers[state_index] : nullptr;
+    if (handler) {
         // LOG_TRACE("State set: {}", (int)gxm_state_to_set);
-        result->second(renderer, mem, config, helper, render_context);
+        handler(renderer, mem, config, helper, render_context);
     } else {
         LOG_ERROR("Unknown state set command {}", static_cast<uint16_t>(gxm_state_to_set));
     }

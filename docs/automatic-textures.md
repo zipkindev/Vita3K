@@ -1,6 +1,6 @@
 # Automatic texture preparation (experimental)
 
-Enable **Automatic Texture Preparation** under **Settings → Texture Decoding (Perf. Tweaks)** alongside a nonzero
+Enable **Automatic Texture Preparation** under **Settings → Texture Decoding** alongside a nonzero
 **Decoded Texture Cache** budget. The option can be set globally or per game;
 legacy profiles inherit the global value. Changes apply on the next game launch.
 Default is disabled, preserving existing behavior. No manual Learn/Preload switching

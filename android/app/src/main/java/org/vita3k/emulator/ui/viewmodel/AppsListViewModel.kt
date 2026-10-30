@@ -18,6 +18,7 @@ import org.vita3k.emulator.R
 import org.vita3k.emulator.data.FirmwareInstallState
 import org.vita3k.emulator.data.AppInfo
 import org.vita3k.emulator.data.AppRepository
+import org.vita3k.emulator.data.AppStorage
 import org.vita3k.emulator.data.SortOption
 import org.vita3k.emulator.data.UpdateCheckResult
 import org.vita3k.emulator.data.UpdateCheckStatus
@@ -59,7 +60,7 @@ class AppsListViewModel(application: Application) : AndroidViewModel(application
         private set
     var sortOption by mutableStateOf(SortOption.TITLE)
         private set
-    var viewMode by mutableStateOf(ViewMode.LIST)
+    var viewMode by mutableStateOf(AppStorage.appsViewMode(application))
         private set
     var appVersion by mutableStateOf("")
         private set
@@ -128,6 +129,7 @@ class AppsListViewModel(application: Application) : AndroidViewModel(application
 
     fun toggleViewMode() {
         viewMode = if (viewMode == ViewMode.LIST) ViewMode.GRID else ViewMode.LIST
+        AppStorage.setAppsViewMode(getApplication<Application>(), viewMode)
     }
 
     fun dismissActionResult() {
@@ -292,7 +294,12 @@ class AppsListViewModel(application: Application) : AndroidViewModel(application
 
         compatSyncStarted = true
         viewModelScope.launch {
-            if (syncCompatibilityDatabase()) {
+            // The compatibility database was fetched from GitHub on every launch regardless of the
+            // user's update setting. Honour the same setting the startup update check uses; the
+            // locally cached database is still loaded either way, and a manual refresh still syncs.
+            val enabled = runCatching { NativeLib.getGlobalConfig().checkForUpdatesMode != 0 }
+                .getOrDefault(false)
+            if (enabled && syncCompatibilityDatabase()) {
                 loadApps()
             }
         }
@@ -303,7 +310,7 @@ class AppsListViewModel(application: Application) : AndroidViewModel(application
 
         startupUpdateCheckStarted = true
         viewModelScope.launch {
-            val enabled = runCatching { NativeLib.getGlobalConfig().checkForUpdatesMode != 0 }.getOrDefault(true)
+            val enabled = runCatching { NativeLib.getGlobalConfig().checkForUpdatesMode != 0 }.getOrDefault(false)
             if (enabled) {
                 checkForUpdates(manual = false)
             }

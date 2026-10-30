@@ -108,7 +108,7 @@ enum SceCommonDialogStatus {
     SCE_COMMON_DIALOG_STATUS_FINISHED = 2
 };
 
-enum SceCommonDialogResult : SceInt32 {
+enum SceCommonDialogResult {
     SCE_COMMON_DIALOG_RESULT_OK,
     SCE_COMMON_DIALOG_RESULT_USER_CANCELED,
     SCE_COMMON_DIALOG_RESULT_ABORTED

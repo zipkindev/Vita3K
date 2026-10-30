@@ -9,6 +9,27 @@ def signingKeyAlias = System.getenv("SIGNING_KEY_ALIAS")
 def signingKeyPassword = System.getenv("SIGNING_KEY_PASSWORD")
 def hasCiSigning = signingStorePath && signingStorePassword && signingKeyAlias && signingKeyPassword
 
+def appVersionSource = providers.fileContents(layout.projectDirectory.file('../../vita3k/CMakeLists.txt')).asText.get()
+def appVersionPart = { String part ->
+	def match = appVersionSource =~ /set\(VITA3K_APP_VER_${part} (\d+)\)/
+	if (!match.find())
+		throw new GradleException("vita3k/CMakeLists.txt has no set(VITA3K_APP_VER_${part} <number>)")
+	match.group(1) as int
+}
+def appVerHi = appVersionPart('HI')
+def appVerMid = appVersionPart('MID')
+def appVerLo = appVersionPart('LO')
+if (appVerMid > 9 || appVerLo > 9)
+	throw new GradleException("versionCode is HI*100 + MID*10 + LO, so VITA3K_APP_VER_MID and VITA3K_APP_VER_LO must stay below 10")
+def appVersionMatch = appVersionSource =~ /set\(VITA3K_APP_VERSION "([^"]+)"\)/
+if (!appVersionMatch.find())
+	throw new GradleException('vita3k/CMakeLists.txt has no set(VITA3K_APP_VERSION "...")')
+def appVersionName = appVersionMatch.group(1)
+	.replace('${VITA3K_APP_VER_HI}', appVerHi.toString())
+	.replace('${VITA3K_APP_VER_MID}', appVerMid.toString())
+	.replace('${VITA3K_APP_VER_LO}', appVerLo.toString())
+	.replaceFirst(/^v/, '')
+
 android {
 	namespace = "org.vita3k.emulator"
 	compileSdk = 35
@@ -19,14 +40,16 @@ android {
 	}
 
 	defaultConfig {
-		applicationId = "org.vita3k.emulator"
+		// namespace stays org.vita3k.emulator: it is the Java package the JNI symbols are bound to
+		applicationId = "org.vita3kplus.emulator"
 		minSdk = 28
 		targetSdk = 35
-		versionCode = 21
-		versionName = "0.2.1"
+		versionCode = appVerHi * 100 + appVerMid * 10 + appVerLo
+		versionName = appVersionName
 
 		ndk {
-			abiFilters "arm64-v8a", "x86_64"
+			// x86_64 is emulator-only and broken here: vcpkg OpenSSL cannot assemble its x86 SM3/SM4 code with the NDK.
+			abiFilters "arm64-v8a"
 		}
 	}
 
