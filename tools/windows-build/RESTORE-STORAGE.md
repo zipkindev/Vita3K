@@ -121,6 +121,8 @@ startup-reconnect and retention scripts matched the merged source by SHA-256,
 including after reboot. The existing SMB credential, archive destination and
 every prior release-protection rule were preserved.
 
+These results describe the October 25 verification, not a live health check.
+
 | Check | Verified result |
 | --- | --- |
 | Installer | Completed successfully; both production storage tasks remained enabled as SYSTEM. |
@@ -132,7 +134,7 @@ every prior release-protection rule were preserved.
 | GitHub readiness | [Run 40172546737](https://github.com/zipkindev/Vita3K-Go/actions/runs/40172546737) passed after reboot and invoked the deployed hook in `Complete runner`. |
 | Final health | Runner service and listener running, GitHub runner online and idle, both storage tasks enabled/ready, and approximately 44.4 GiB free on `C:`. |
 
-Retention remains scheduled daily at 03:30 Pacific / 06:30 Eastern with the
+At verification, retention was scheduled daily at 03:30 Pacific / 06:30 Eastern with the
 30-day/newest-five policy. The archive write/delete exclusion lock had already
 passed a contention test. All 17 Python regressions, native Windows fixture tests,
 formatting checks and CodeQL passed before the deployment commit was merged.
@@ -149,7 +151,8 @@ RetainArchives.py    711bbb797ed8593c9d2fdf5b464d18650b1b5f80832b9d38f4366e08064
 
 A private rollback snapshot was saved under
 `C:\ProgramData\Vita3KStorageDeployments\merged-<timestamp>-<id>\before`,
-alongside the staged merged source and `deployment.json`. It contains the prior
+with sibling `source` and `deployment.json` entries in the deployment directory.
+The `before` snapshot contains the prior
 scripts, task definitions, protection ledger and encrypted credential config;
 the deployment directory is restricted to SYSTEM and administrators. Credentials,
 protection-ledger contents and raw machine evidence remain outside this public
