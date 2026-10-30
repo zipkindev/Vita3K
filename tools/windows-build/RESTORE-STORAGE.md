@@ -159,6 +159,49 @@ protection-ledger contents and raw machine evidence remain outside this public
 repository. The encrypted credential backup remains tied to the original
 Windows machine; replacement-host recovery still requires SMB credentials.
 
+### Windows build verification: 2026-10-30 UTC
+
+[Windows run 40996613182](https://github.com/zipkindev/Vita3K-Go/actions/runs/40996613182)
+built merged source
+[`f14b2e691181fcf3f8ae46b638259c9f0e4f1af0`](https://github.com/zipkindev/Vita3K-Go/commit/f14b2e691181fcf3f8ae46b638259c9f0e4f1af0)
+using recipe
+[`02f03d1ca79f46f5a643b358e3f184c5371097d6`](https://github.com/zipkindev/Vita3K-Go/commit/02f03d1ca79f46f5a643b358e3f184c5371097d6)
+and label `master-storage-verify-20261030.2`. The recipe includes the
+[PR #47 correction](https://github.com/zipkindev/Vita3K-Go/pull/47) that accepts
+the exact ATRAC9 input-span fix already present in the source. The build used
+the documented support patches and retained their diffs in its evidence.
+
+These results were recorded at approximately 03:30–03:34 UTC on October 30
+(23:30–23:34 Eastern on October 29) and describe the state at verification time.
+
+| Check | Verified result |
+| --- | --- |
+| Build and tests | Optimized `RelWithDebInfo` build with full symbols completed; all 38 Windows tests passed, including `atrac9-input-span`. |
+| Matching symbols | The actual EXE and full PDB had GUID `156dded6-f0c1-4c88-b6cd-d0211ca1daed`, age `1`, in both the TrueNAS package and downloaded GitHub artifact. |
+| TrueNAS archiving | The installed completion hook ran as Network Service, copied the package, downloads and build evidence, and wrote a verified archive receipt at 03:30:39 UTC. Independent Network Service verification checked all 134 manifest files and the runtime/diagnostics ZIP payloads. |
+| Uploaded artifact | Downloaded the GitHub artifact and independently checked ZIP hashes, all 134 payload files, and the EXE/PDB identity. The runtime ZIP contained the EXE; the diagnostics ZIP contained its matching PDB and build evidence. |
+| Automatic local cleanup | The completion hook removed `native-build` after archive verification. Compiler output was observed at 8.91 GiB before cleanup; local preserved package copies still matched the archived EXE/PDB hashes afterward. |
+| Retention | A non-deleting SYSTEM dry run evaluated eight archives under the 30-day/newest-five policy, retained this build among the newest unreleased builds, and preserved every prior release-protection rule. No archives were deleted during this check. |
+| Final health | `C:` had 41.99 GiB free; the runner service was running, GitHub reported it online/idle, `Y:` was healthy, and both production storage tasks were enabled/ready as SYSTEM with last result `0`. Temporary verification tasks and fixtures were removed. |
+
+The archive directory relative to the configured TrueNAS root is
+`Vita3K-Go\master-storage-verify-20261030.2-40996613182`; it contains
+`archive-verified.json`, `windows-package`, `windows-downloads` and `build-evidence`.
+GitHub downloads retain the workflow's three-day expiration; NAS retention follows
+the separate policy above.
+
+Verified binary hashes:
+
+```text
+Vita3K.exe  d1e3711d259ffbaa9a5b26354bb975766226c74ac50497eebf281f8569295874
+Vita3K.pdb  3b92b787ece2638565dc1451767f308785270fe95ab8c0f71d09958fe552a100
+```
+
+The installed maintenance hook matched the merged Git object's SHA-256 recorded
+above. Its Windows checkout copy used CRLF line endings; normalized script
+contents matched. Raw machine evidence and protection-ledger contents remain
+outside this public repository.
+
 ## Retention and recovery controls
 
 Unreleased archives must be older than 30 days **and** outside the newest five
