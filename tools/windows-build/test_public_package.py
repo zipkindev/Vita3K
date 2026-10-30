@@ -118,6 +118,23 @@ class PublicPackageTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 public_text(text, 'test')
 
+    def test_escaped_local_paths_are_not_unc_shares(self):
+        # Clang/FFmpeg stores quoted command lines with doubled local separators.
+        command = r'"-fdebug-compilation-dir=C:\\vcpkg\\buildtrees\\ffmpeg" "-I" "C:\\Program Files (x86)\\SDK"'
+        public_text(command, 'compiler record')
+        public_text(json.dumps({'command': command}), 'JSON compiler record')
+        path = self.root / 'compiler-record.pdb'
+        path.write_bytes(symbols()[1] + command.encode() + b'\0')
+        validate_symbol_privacy(path)
+
+    def test_actual_unc_roots_still_fail_in_compiler_and_pdb_records(self):
+        for value in (r'"-I" "\\private-host\share"', r'-I\\private-host\share',
+                      r'/I\\private-host\share', r'-L\\private-host\share',
+                      r'/LIBPATH:\\private-host\share', '\0' + r'\\private-host\share',
+                      json.dumps({'path': r'\\private-host\share'})):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                public_text(value, 'compiler record')
+
     def test_new_full_symbols_reject_personal_paths(self):
         self.write('Vita3K.pdb', symbols()[1] + b'C:\\Users\\Private\\temp.obj')
         self.save_manifest()

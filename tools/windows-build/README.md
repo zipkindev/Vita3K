@@ -140,3 +140,10 @@ ran successfully; its basename-only RSDS reference and full PDB GUID/age matched
 packaging preserved EXE/PDB bytes and excluded a machine-specific cache canary.
 Windows PowerShell parsed the updated build script successfully. All 30 Python
 regression tests passed locally and in the PR's storage-test workflow.
+
+
+The full-build symbol check distinguishes UNC roots from doubled separators in
+quoted compiler records. Distributed FFmpeg debug records contain escaped local
+paths; those separators do not identify a network share. Actual UNC roots,
+including quoted/JSON values, NUL-delimited PDB records and compiler path options,
+remain blocked along with personal-profile paths and private addresses.
