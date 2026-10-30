@@ -27,13 +27,15 @@ int main() {
     assert(queue.pop() == 20); // upgraded hint retains one owner
     assert(queue.pop() == 10);
     assert(!queue.promote(99));
-    for (int i = 0; i < 48; ++i) assert(queue.push(i, false, true, true));
+    for (int i = 0; i < 48; ++i)
+        assert(queue.push(i, false, true, true));
     assert(!queue.has_urgent());
     assert(queue.push(90, false, true));
     assert(queue.push(91, true));
     assert(queue.pop() == 91); // learned replay retains priority
     assert(queue.pop() == 90); // fresh actual pair jumps the retry backlog
-    for (int i = 0; i < 48; ++i) assert(queue.pop() == i);
+    for (int i = 0; i < 48; ++i)
+        assert(queue.pop() == i);
     assert(queue.empty());
     for (int i = 0; i < 64; ++i)
         assert(queue.push(i, true));

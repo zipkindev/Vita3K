@@ -20,8 +20,8 @@
 #include <bit>
 #include <chrono>
 #include <cpu/functions.h>
-#include <renderer/texture_work_profile.h>
 #include <renderer/pvrt-dec.h>
+#include <renderer/texture_work_profile.h>
 #include <renderer/vulkan/functions.h>
 
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -701,13 +701,11 @@ bool VKTextureCache::upload_cached_pvrt(SceGxmTextureBaseFormat base_format, uin
         if (!is_texture_transfer_ready)
             prepare_staging_buffer();
         const auto &staging = staging_buffers[staging_idx];
-        return staging.used_so_far <= staging.buffer.size && size <= staging.buffer.size - staging.used_so_far;
-    }, [&](auto decoded) {
+        return staging.used_so_far <= staging.buffer.size && size <= staging.buffer.size - staging.used_so_far; }, [&](auto decoded) {
         auto &staging = staging_buffers[staging_idx];
         TextureWorkScope copy(TextureWorkKind::StagingCopy, context);
         std::memcpy(static_cast<uint8_t *>(staging.buffer.mapped_data) + staging.used_so_far, decoded.data(), static_cast<size_t>(size));
-        copy.result(0);
-    });
+        copy.result(0); });
     direct.result(hit ? 0 : 1);
     if (!hit)
         return false;

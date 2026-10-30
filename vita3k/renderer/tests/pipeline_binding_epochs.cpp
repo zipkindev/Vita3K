@@ -12,7 +12,8 @@ int main() {
     assert(epochs.observe(1, vertex, fragment));
     assert(epochs.notify(1, 0));
     assert(!epochs.observe(1, vertex, fragment));
-    for (unsigned i = 0; i < 10000; ++i) assert(!epochs.notify(1, 0));
+    for (unsigned i = 0; i < 10000; ++i)
+        assert(!epochs.notify(1, 0));
     assert(epochs.notify(1, 1)); // new knowledge reopens unchanged bindings
     assert(!epochs.notify(1, 1));
     // Replacement must register even while the old object is still retained by a worker.

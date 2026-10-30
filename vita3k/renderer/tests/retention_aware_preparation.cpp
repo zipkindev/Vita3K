@@ -51,15 +51,16 @@ int main() {
     // Mixed recent demand and a rare costly effect both receive preparation.
     std::vector<Profile::Record> plan;
     for (uint64_t i = 0; i < 30; ++i)
-        plan.push_back({ {i, 8, 8, 0}, 100000, 100, 0, 32, 64, 0 });
-    plan.push_back({ {99, 16, 16, 0}, 30000000, 1, 0, 128, 0, 777 });
-    plan.push_back({ {100, 8, 8, 0}, 20000, 1, 0, 32, 0, 777 });
+        plan.push_back({ { i, 8, 8, 0 }, 100000, 100, 0, 32, 64, 0 });
+    plan.push_back({ { 99, 16, 16, 0 }, 30000000, 1, 0, 128, 0, 777 });
+    plan.push_back({ { 100, 8, 8, 0 }, 20000, 1, 0, 32, 0, 777 });
     Profile::order_preparation(plan, 8192);
     size_t selected_bytes = 0;
     bool effect = false, companion = false;
     for (const auto &record : plan) {
         const size_t bytes = record.size + record.key.width * record.key.height * 4;
-        if (bytes > 8192 - selected_bytes) continue;
+        if (bytes > 8192 - selected_bytes)
+            continue;
         selected_bytes += bytes;
         effect |= record.key.hash == 99;
         companion |= record.key.hash == 100;
@@ -68,7 +69,7 @@ int main() {
     // Bounds, no startup demand, actual-use aging, and no-play preservation.
     Cache history(10000);
     std::vector<uint8_t> source(32), decoded(256);
-    const Cache::Key learned{1, 8, 8, 0};
+    const Cache::Key learned{ 1, 8, 8, 0 };
     history.start_learning(1024);
     history.merge_learning(learned, source, 100, 8, 16, 777);
     assert(history.learning_snapshot().front().recent == 16);

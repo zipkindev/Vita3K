@@ -2675,8 +2675,7 @@ void PipelineCache::warm_thread(MemState &mem) {
             // Completion and registration wake this loop. The timeout also reopens quiet-time capacity.
             warm_work_ready.wait_for(lock, std::chrono::milliseconds(25), [&] {
                 const auto now = pipeline_clock_ns();
-                return warm_stopping || (!warm_queue.empty() && (warm_queue.has_exact() || (warm_queue.has_urgent() ? preparation_work_budget.available(now) : preparation_work_budget.background_available(now)))
-                    && warm_running < PipelinePreparationQueue<WarmRequest *>::concurrency(now, last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)));
+                return warm_stopping || (!warm_queue.empty() && (warm_queue.has_exact() || (warm_queue.has_urgent() ? preparation_work_budget.available(now) : preparation_work_budget.background_available(now))) && warm_running < PipelinePreparationQueue<WarmRequest *>::concurrency(now, last_pipeline_draw_ns.load(std::memory_order_relaxed), pipeline_draw_busy.load(std::memory_order_acquire)));
             });
             if (warm_stopping)
                 break;

@@ -20,7 +20,9 @@ public:
     bool push(T item, bool learned_exact, bool actual_pair = false, bool retry = false) {
         if (size() >= limit)
             return false;
-        (learned_exact ? exact : actual_pair ? retry ? recovery : actual : speculative).push_back(item);
+        (learned_exact ? exact : actual_pair ? retry ? recovery : actual
+                                             : speculative)
+            .push_back(item);
         return true;
     }
     bool promote(T item) {
@@ -34,7 +36,9 @@ public:
         return false;
     }
     T pop() {
-        auto &queue = !exact.empty() ? exact : !actual.empty() ? actual : !recovery.empty() ? recovery : speculative;
+        auto &queue = !exact.empty() ? exact : !actual.empty() ? actual
+            : !recovery.empty()                                ? recovery
+                                                               : speculative;
         auto item = queue.front();
         queue.pop_front();
         return item;
