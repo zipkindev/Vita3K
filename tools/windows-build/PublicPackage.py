@@ -14,10 +14,14 @@ EVIDENCE = frozenset({
 })
 PRIVATE_TEXT = re.compile(
     r'(?i)(?:[A-Z]:[\\/](?:Users|Windows[\\/]ServiceProfiles)[\\/]|/(?:home|Users)/[^/\s]+/'
-    r'|\\\\[\w.$-]+\\|\b(?:192\.168(?:\.\d{1,3}){2}'
+    r'|\b(?:192\.168(?:\.\d{1,3}){2}'
     r'|10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})\b'
     r'|-----BEGIN (?:OPENSSH |RSA |EC )?PRIVATE KEY-----'
     r'|\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,})\b)')
+
+# A doubled separator inside an escaped local path (C:\\\\build) is not a
+# UNC root. Require an argument/string boundary, including NUL in PDB records.
+UNC_TEXT = re.compile(r"""(?i)(?:(?<!\S)|(?<=[\x00"'=([{,]))(?:-[A-Za-z-]+|/[A-Za-z-]+:?)?\\\\[\w.$-]+\\""")
 
 
 def read_text(path):
@@ -34,7 +38,7 @@ def relative_path(value):
 
 def public_text(text, name):
     # Also catch Windows paths escaped inside JSON or quoted command lines.
-    if any(PRIVATE_TEXT.search(value) for value in (text, text.replace('\\\\', '\\'))):
+    if any(PRIVATE_TEXT.search(value) or UNC_TEXT.search(value) for value in (text, text.replace('\\\\', '\\'))):
         raise ValueError('Private metadata in public payload: ' + name)
     return text
 
