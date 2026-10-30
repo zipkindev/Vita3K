@@ -29,3 +29,7 @@ if(NOT ANDROID)
 	target_link_libraries(mem-tests PRIVATE mem googletest util)
 	add_test(NAME mem COMMAND mem-tests)
 endif()
+
+add_executable(allocator-model-tests tests/allocator_model.cpp src/allocator.cpp)
+target_include_directories(allocator-model-tests PRIVATE include)
+add_test(NAME allocator-model COMMAND allocator-model-tests)
